@@ -377,6 +377,29 @@ describe('TuiApp rendering', () => {
     expect(frame.indexOf('● todolist进行中...')).toBeLessThan(frame.indexOf('❯'))
   })
 
+  it('renders the heartbeat above the input bar while a step is in flight', () => {
+    const working: FrameState = { ...state([]), activeStep: { turn: 1, step: 1, startedAt: Date.now() } }
+    const { lastFrame } = renderApp(<TuiApp state={working} handlers={noopHandlers()} />)
+    const frame = lastFrame() ?? ''
+    expect(frame).toContain('✢ Running… (0s)')
+    expect(frame.indexOf('✢ Running…')).toBeLessThan(frame.indexOf('❯'))
+  })
+
+  it('pins the heartbeat below the plan and keeps the label while a tool is pending', () => {
+    const plan = [{ content: 'task one', status: 'in_progress' as const }]
+    const thinking: FrameState = {
+      ...state([], plan),
+      activeStep: { turn: 1, step: 1, startedAt: Date.now() },
+    }
+    const { lastFrame } = renderApp(<TuiApp state={thinking} handlers={noopHandlers()} />)
+    const frame = lastFrame() ?? ''
+    expect(frame.indexOf('● todolist进行中...')).toBeLessThan(frame.indexOf('✢ Running…'))
+    // A step covers the model call and its tool executions: the heartbeat
+    // stays up — and keeps its single label — while a tool runs.
+    const busy: FrameState = { ...thinking, pendingTools: new Map([['c1', 0]]) }
+    expect(renderApp(<TuiApp state={busy} handlers={noopHandlers()} />).lastFrame()).toContain('✢ Running…')
+  })
+
   it('renders the raw result content when the tool card has no result view', () => {
     const frames: Frame[] = [{
       kind: 'tool',

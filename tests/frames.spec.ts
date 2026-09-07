@@ -446,6 +446,31 @@ describe('fold: todo plan', () => {
   })
 })
 
+describe('fold: active step', () => {
+  it('opens the thinking clock on step/start and closes it on step/end', () => {
+    const { state: open } = replay([ev('step/start', { turn: 1, step: 1 })])
+    expect(open.activeStep).toEqual({ turn: 1, step: 1, startedAt: 0 })
+    const { state: closed } = replay([
+      ev('step/start', { turn: 1, step: 1 }),
+      ev('step/end', { turn: 1, step: 1 }),
+    ])
+    expect(closed.activeStep).toBeUndefined()
+  })
+
+  it('ignores a stale step/end and clears the clock on turn/end', () => {
+    const stale = replay([
+      ev('step/start', { turn: 1, step: 2 }),
+      ev('step/end', { turn: 1, step: 1 }),
+    ])
+    expect(stale.state.activeStep).toEqual({ turn: 1, step: 2, startedAt: 0 })
+    const ended = replay([
+      ev('step/start', { turn: 1, step: 1 }),
+      ev('turn/end', { turn: 1, reason: { kind: 'completed' } }),
+    ])
+    expect(ended.state.activeStep).toBeUndefined()
+  })
+})
+
 describe('fold: commands', () => {
   it('renders a user slash command and pairs its settled outcome', () => {
     const run = ev('command/run', { commandId: CommandId('c1'), name: 'quit', args: '', source: { kind: 'user' } })

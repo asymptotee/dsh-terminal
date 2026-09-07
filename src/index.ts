@@ -52,7 +52,7 @@ export const STREAM_RENDER_INTERVAL_MS = 80
 /** How long a settled subagent's panel row stays visible before it is removed. */
 export const SUBAGENT_FADE_MS = 5_000
 
-/** The panel ticks once a second: elapsed rows refresh, faded rows leave. */
+/** The heartbeat tick: subagent rows refresh and fade, thinking seconds advance. */
 const SUBAGENT_PANEL_TICK_MS = 1_000
 
 /**
@@ -328,10 +328,11 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
     trackUsage(event)
     adopt(foldEvent(state, event, deps).state, event.type !== 'assistant/chunk')
   })
-  // The panel ticks once a second: elapsed rows refresh, and a child whose
-  // agent left the registry (its run settled) fades out after its delay.
+  // The panel ticks once a second: elapsed rows refresh, a child whose agent
+  // left the registry (its run settled) fades out after its delay, and the
+  // thinking indicator's elapsed seconds advance.
   const panelTick = setInterval(() => {
-    if (children.size === 0) return
+    if (children.size === 0 && state.activeStep === undefined) return
     const now = Date.now()
     for (const [childId, entry] of children) {
       if (!entry.fading && entry.state.frames.length > 0 && agents.get(SessionId(childId)) === undefined) {

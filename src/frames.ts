@@ -71,6 +71,8 @@ export interface FrameState {
   readonly frames: readonly Frame[]
   /** The standing todo plan; cleared on turn/start. */
   readonly plan: readonly TodoItem[] | undefined
+  /** The step whose model call is in flight; the thinking indicator's clock source. */
+  readonly activeStep: { turn: number; step: number; startedAt: number } | undefined
   /** Open (streaming) assistant frame index by `${turn}:${step}`. */
   readonly openAssistant: ReadonlyMap<string, number>
   /** Pending tool frame index by callId. */
@@ -103,7 +105,7 @@ export interface FoldResult {
  * @returns an empty fold state.
  */
 export function createFrameState(): FrameState {
-  return { frames: [], plan: undefined, openAssistant: new Map(), pendingTools: new Map(), pendingCommands: new Map() }
+  return { frames: [], plan: undefined, activeStep: undefined, openAssistant: new Map(), pendingTools: new Map(), pendingCommands: new Map() }
 }
 
 const stepKey = (turn: number, step: number): string => `${turn}:${step}`
@@ -395,6 +397,23 @@ export function foldEvent(state: FrameState, event: SessionEvent, deps: FoldDeps
         lines: renderPlanLines(todos),
       }
     }
+    case 'step/start':
+      // One step is one model call plus its tool executions; the thinking
+      // indicator clocks from here until the step settles.
+      return {
+        state: { ...state, activeStep: { turn: event.data.turn, step: event.data.step, startedAt: event.time } },
+        lines: [],
+      }
+    case 'step/end':
+      // A stale end for an earlier step must not clear a newer step's clock.
+      return {
+        state: state.activeStep !== undefined
+          && state.activeStep.turn === event.data.turn
+          && state.activeStep.step === event.data.step
+          ? { ...state, activeStep: undefined }
+          : state,
+        lines: [],
+      }
     case 'turn/start': {
       // Turn-scoped plan lifetime: the standing list clears on the next turn.
       const closed = closeOpenAssistant(state, event.time)
@@ -402,7 +421,7 @@ export function foldEvent(state: FrameState, event: SessionEvent, deps: FoldDeps
     }
     case 'turn/end': {
       const closed = closeOpenAssistant(state, event.time)
-      return { state: { ...state, ...closed }, lines: [] }
+      return { state: { ...state, ...closed, activeStep: undefined }, lines: [] }
     }
     default:
       // Log-only families (request/header, seed markers, session lifecycle)

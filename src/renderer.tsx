@@ -205,6 +205,14 @@ export function TuiApp({
       {/* The standing plan stays pinned directly above the input bar for its
           whole lifetime; the child view shows the child's own plan instead. */}
       {opened === undefined && state.plan !== undefined ? <PlanPanel todos={state.plan} /> : null}
+      {/* The step heartbeat sits below the plan and above the input bar:
+          shown throughout a step — its tool executions included — while an
+          approval overlay waits on the user and the child view, which
+          replaces this region entirely, hides it. */}
+      {opened === undefined && view?.overlay === undefined
+        && state.activeStep !== undefined
+        ? <HeartbeatLine startedAt={state.activeStep.startedAt} />
+        : null}
       {/* The input bar stays mounted in every focus mode — it owns the single
           stdin listener; in the child view it renders nothing and only routes
           Esc back to the input focus. */}
@@ -568,6 +576,18 @@ function PlanPanel({ todos }: { todos: FrameState['plan'] & object }): React.JSX
         const prefix = index === 0 ? '  ⎿  ' : '     '
         return <Text key={index}>{prefix}{mark} <Text dimColor>{todo.content}</Text></Text>
       })}
+    </Box>
+  )
+}
+
+/** The step heartbeat: one label for the whole step — the model call and its tool executions. */
+function HeartbeatLine({ startedAt }: { startedAt: number }): React.JSX.Element {
+  // One blank row of breathing room between the heartbeat and the input bar.
+  return (
+    <Box marginBottom={1}>
+      <Text>
+        <Text color="#a5d8ff">✢</Text> Running… <Text dimColor>({formatElapsed(Date.now() - startedAt)})</Text>
+      </Text>
     </Box>
   )
 }
