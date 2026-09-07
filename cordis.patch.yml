@@ -1,0 +1,32 @@
+# The dsh-terminal patch layer over the base bundle: interactive terminal UI
+# with no Host, HTTP server, or browser plugin. The startup provider parses
+# --resume/--help, then the runner creates (or resumes) an Agent through the
+# core registry and drives the ink view. Mirrors the official tui-app bundle
+# layer; plugin rows point at this package's own exports.
+
+- id: system-prompt
+  config:
+    persona: >-
+      You are a coding agent powered by the {{model}} model. Your working directory is {{cwd}}.
+
+# The shared module-reload HMR row stays off; there is no user patch layer
+# to keep live in this composition.
+- id: hmr
+  disabled: true
+
+- id: tools
+  config:
+    mode: !!js process.env.DSH_TOOLS_MODE
+
+- insert:
+    # Bare package names: the dsh plugin mechanism installs this package into
+    # the profile's node_modules, where the Loader resolves its exports.
+    - id: tui-startup
+      name: 'dsh-terminal/startup'
+
+    # Reads its startup values from the ordinary tuiStartup provider.
+    - id: tui-runner
+      name: 'dsh-terminal'
+      inject: [tuiStartup]
+      config:
+        resume: !!js ctx.tuiStartup.resume
