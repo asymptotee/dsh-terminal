@@ -385,11 +385,16 @@ export function foldEvent(state: FrameState, event: SessionEvent, deps: FoldDeps
         lines: [],
       }
     }
-    case 'todo/write':
+    case 'todo/write': {
+      // A fully completed list is spent: the standing panel hides itself, and
+      // the tool card in the stream stays as the settled record.
+      const todos = event.data.todos
+      const plan = todos.every(todo => todo.status === 'completed') ? undefined : todos
       return {
-        state: { ...state, plan: event.data.todos },
-        lines: renderPlanLines(event.data.todos),
+        state: { ...state, plan },
+        lines: renderPlanLines(todos),
       }
+    }
     case 'turn/start': {
       // Turn-scoped plan lifetime: the standing list clears on the next turn.
       const closed = closeOpenAssistant(state, event.time)

@@ -422,11 +422,21 @@ describe('fold: todo plan', () => {
     const turnStart = ev('turn/start', { turn: 2 })
     const { lines, state } = replay([write, turnStart])
     expect(lines).toEqual([
-      '[plan]\n',
-      '  [ ] pending task\n',
-      '  [>] active task\n',
-      '  [x] done task\n',
+      '● todolist进行中...\n',
+      '  ⎿  ◻ pending task\n',
+      '     ◼ active task\n',
+      '     ✔ done task\n',
     ])
+    expect(state.plan).toBeUndefined()
+  })
+
+  it('hides the standing plan once every item is completed', () => {
+    const { state } = replay([ev('todo/write', {
+      todos: [
+        { content: 'task one', status: 'completed' },
+        { content: 'task two', status: 'completed' },
+      ],
+    })])
     expect(state.plan).toBeUndefined()
   })
 

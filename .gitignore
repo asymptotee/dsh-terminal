@@ -4,3 +4,9 @@ lib/
 *.tgz
 .DS_Store
 .env
+
+# Claude Code
+CLAUDE.md
+CLAUDE.local.md
+.claude/
+.mcp.json

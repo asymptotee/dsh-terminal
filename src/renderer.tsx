@@ -195,7 +195,6 @@ export function TuiApp({
     <Box flexDirection="column">
       <SessionStream
         items={items}
-        plan={state.plan}
         live={live}
         expandedOutput={expandedOutput}
       />
@@ -203,6 +202,9 @@ export function TuiApp({
         ? <OverlayLine key={overlayKey(view.overlay)} overlay={view.overlay} selected={view.overlay.kind === 'approval' ? approvalIndex : 0} />
         : null}
       {opened !== undefined ? <ChildView opened={opened} /> : null}
+      {/* The standing plan stays pinned directly above the input bar for its
+          whole lifetime; the child view shows the child's own plan instead. */}
+      {opened === undefined && state.plan !== undefined ? <PlanPanel todos={state.plan} /> : null}
       {/* The input bar stays mounted in every focus mode — it owns the single
           stdin listener; in the child view it renders nothing and only routes
           Esc back to the input focus. */}
@@ -385,19 +387,17 @@ function formatContext(context: { used: number; window: number }): string {
   return `${compactTokens(context.used)}/${compactTokens(context.window)} (${percent}%)`
 }
 
-/** The seq-ordered frame window plus the standing todo plan panel. */
+/** The seq-ordered frame window: settled scrollback plus the live frames. */
 /** One append-once stream entry: the welcome block or a settled frame. */
 type StreamItem = Frame | { kind: 'welcome'; status: StatusInfo | undefined }
 
 export function SessionStream({
   items,
-  plan,
   live,
   expandedOutput,
 }: {
   /** The welcome block and settled frames, appended once into the terminal scrollback. */
   items: StreamItem[]
-  plan: FrameState['plan']
   /** The frames awaiting updates (plus the latest frame), redrawn above the input bar. */
   live: readonly Frame[]
   /** Whether truncated tool outputs render in full. */
@@ -405,7 +405,6 @@ export function SessionStream({
 }): React.JSX.Element {
   return (
     <Box flexDirection="column">
-      {plan !== undefined ? <PlanPanel todos={plan} /> : null}
       <Static items={items}>
         {item => item.kind === 'welcome'
           ? (
@@ -551,14 +550,23 @@ function CommandRow({ frame }: { frame: Extract<Frame, { kind: 'command' }> }): 
   )
 }
 
-/** The standing todo plan as a dim panel above the stream. */
+/** The standing todo plan as a checklist panel above the stream. */
 function PlanPanel({ todos }: { todos: FrameState['plan'] & object }): React.JSX.Element {
   return (
     <Box flexDirection="column">
-      <Text dimColor>[plan]</Text>
+      <Text><Text color="green">●</Text> todolist进行中...</Text>
       {todos.map((todo, index) => {
-        const mark = todo.status === 'completed' ? '[x]' : todo.status === 'in_progress' ? '[>]' : '[ ]'
-        return <Text key={index} dimColor>  {mark} {todo.content}</Text>
+        const mark = todo.status === 'completed'
+          ? <Text color="green">✔</Text>
+          : todo.status === 'in_progress'
+            ? <Text color="#a5d8ff">◼</Text>
+            : <Text dimColor>◻</Text>
+        // The first line carries the `⎿` connector; continuations align under
+        // its text (`⎿` is one cell wide, so `  ⎿  ` is five display columns).
+        // Dim covers only the content text: dim inherits into nested Text, so
+        // a dim row wrapper would also mute the colored status markers.
+        const prefix = index === 0 ? '  ⎿  ' : '     '
+        return <Text key={index}>{prefix}{mark} <Text dimColor>{todo.content}</Text></Text>
       })}
     </Box>
   )

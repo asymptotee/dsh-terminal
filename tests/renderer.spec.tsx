@@ -359,16 +359,22 @@ describe('TuiApp rendering', () => {
     expect(lastFrame()).toContain('❯ l▏')
   })
 
-  it('renders the standing plan panel above the stream', () => {
+  it('renders the standing plan panel pinned above the input bar', () => {
     const plan = [
       { content: 'task one', status: 'in_progress' as const },
       { content: 'task two', status: 'pending' as const },
     ]
     const { lastFrame } = renderApp(<TuiApp state={state([], plan)} handlers={noopHandlers()} />)
     const frame = lastFrame() ?? ''
-    expect(frame).toContain('[plan]')
-    expect(frame).toContain('[>] task one')
-    expect(frame).toContain('[ ] task two')
+    // The first line carries the `⎿` connector; continuations align at five columns.
+    expect(frame).toContain('  ⎿  ◼ task one')
+    expect(frame).toContain('     ◻ task two')
+    // The header carries the same green dot as the tool call lines.
+    expect(frame).toContain('● todolist进行中...')
+    // The panel is pinned directly above the input bar: below the stream's
+    // welcome block, above the `❯` input marker.
+    expect(frame.indexOf('DeepSeek Harness — Terminal')).toBeLessThan(frame.indexOf('● todolist进行中...'))
+    expect(frame.indexOf('● todolist进行中...')).toBeLessThan(frame.indexOf('❯'))
   })
 
   it('renders the raw result content when the tool card has no result view', () => {

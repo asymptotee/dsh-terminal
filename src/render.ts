@@ -132,15 +132,17 @@ export function renderNoticeLines(frame: Extract<Frame, { kind: 'notice' }>): re
 }
 
 /**
- * The standing todo plan as a panel block.
+ * The standing todo plan as a checklist block: a heading line, then the items
+ * in an indented block whose first line carries the `⎿` connector.
  * @param todos - the plan items to render.
  * @returns the newline-terminated plan lines.
  */
 export function renderPlanLines(todos: readonly TodoItem[]): readonly string[] {
-  const lines = ['[plan]\n']
-  for (const todo of todos) {
-    const mark = todo.status === 'completed' ? '[x]' : todo.status === 'in_progress' ? '[>]' : '[ ]'
-    lines.push(`  ${mark} ${todo.content}\n`)
-  }
+  const lines = ['● todolist进行中...\n']
+  todos.forEach((todo, index) => {
+    const mark = todo.status === 'completed' ? '✔' : todo.status === 'in_progress' ? '◼' : '◻'
+    const prefix = index === 0 ? '  ⎿  ' : '     '
+    lines.push(`${prefix}${mark} ${todo.content}\n`)
+  })
   return lines
 }
