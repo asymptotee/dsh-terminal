@@ -10,7 +10,7 @@
 
 # 第一部分：基本原理
 
-## 为什么需要 subagent
+## 1.1 为什么需要 subagent
 
 一个 agent 把所有工作都自己做，会遇到四个根本问题：
 
@@ -23,7 +23,7 @@
 subagent 的解法：**把工作委派给一个独立的子 agent，它在自己的会话里烧自己的上下文，
 父级只收一份蒸馏后的结果**。中间过程再冗长，回流到父级的只是一条最终消息。
 
-## 核心模型：委派 = 「任务外包 + 结果回流」
+## 1.2 核心模型：委派 = 「任务外包 + 结果回流」
 
 ```
 父 agent
@@ -46,7 +46,7 @@ subagent 的解法：**把工作委派给一个独立的子 agent，它在自己
 - **权限在委派时固定**——子代理的权限范围启动即定死，内部无法扩大（需审批的操作
   自动拒绝），越界需求只能在回复里说明、由父级处理。
 
-## 会话树：血缘与隔离
+## 1.3 会话树：血缘与隔离
 
 每个子代理是一个真实会话，头部携带 `parentSession` 指向父会话——由此形成一棵**会话树**：
 
@@ -64,7 +64,7 @@ root session
 - **深度可控**：委派可以递归（子代理再委派），但深度上限（maxDepth）在委派时声明，
   防止无限套娃。
 
-## 两种形态：一次性 vs 可继续
+## 1.4 两种形态：一次性 vs 可继续
 
 | 形态 | 心智模型 | 适用 |
 |---|---|---|
@@ -79,7 +79,7 @@ continuable 的关键机制：
   接收，空闲的子被唤醒开启新轮次；
 - **结算通知进父级轮次流**——子的每次驻留运行结算时，父级在自己的事件流里收到通知。
 
-## 生命周期全景
+## 1.5 生命周期全景
 
 ```
 委派 → 建立（构建子 agent / 预留身份）→ 发布（所有权交给调用方）
@@ -96,7 +96,7 @@ continuable 的关键机制：
 
 > 本部分按第一部分的每条原理，给出对应的具体实现。
 
-## 总览：委派流程图的每一步 → 实现位置
+## 2.1 总览：委派流程图的每一步 → 实现位置
 
 | 流程图环节 | 具体实现 |
 |---|---|
@@ -106,7 +106,7 @@ continuable 的关键机制：
 | ④ 结算（输出 + 停止原因） | one-shot：`settleRun` / `runOutcome`；continuable：`finishDisposal` child-first 释放 → `observer.capture` 捕获终态 |
 | ⑤ 结算通知追加进父上下文 | `notifySettlement`：`settlementSummary` 生成开头句 + `createUserMessage`（`source.kind: 'subagent-settled'`、`form: 'notice'`）+ inject / followup 分发 |
 
-## seam 架构：一个服务，多个提供方
+## 2.2 seam 架构：一个服务，多个提供方
 
 `ctx.subagents`（`SubagentRuntime`）是**具名提供方注册表**——委派约定与后端实现分离。
 启用委派需要三件套：服务 + 提供方后端 + 面向模型的委派工具：
@@ -140,7 +140,7 @@ export function apply(ctx, config) {
 对照 fork 提供方：`inheritsParentContext = true`，start 时携带**父级已完成轮次**作为
 seed——所以工具描述会按此切换措辞（见下节）。
 
-## 模型侧入口：委派工具 `dsh-tool-subagent`
+## 2.3 模型侧入口：委派工具 `dsh-tool-subagent`
 
 流程图第 ① 步的发起方——模型看到的静态工具，把工具参数映射成委派请求。
 
@@ -180,7 +180,7 @@ parameters: {
 `presentCall` 是 generic 卡：标题 = description——这正是 TUI 里子代理工具行的显示来源；
 `isConcurrencySafe: true`（子级从不写父会话，唯一的父侧写入是同步可交换的插入）。
 
-## 「兑现即发布」的具体实现：`start()`
+## 2.4 「兑现即发布」的具体实现：`start()`
 
 服务 `start()` 的真实代码路径（bundle `lib/index.js`）：
 
@@ -209,7 +209,7 @@ async start(name, request) {
 第一个缺失的能力即抛 `UNSUPPORTED_CAPABILITY`。这就是「请求了不具备的能力响亮失败、
 不静默降级」。
 
-## Descriptor：`subagent/descriptor` 事件的具体实现
+## 2.5 Descriptor：`subagent/descriptor` 事件的具体实现
 
 descriptor 是「冷恢复的依据」原理的落地，实现要点：
 
@@ -225,7 +225,7 @@ descriptor 是「冷恢复的依据」原理的落地，实现要点：
   后续同类型事件不能改写已声明的组合
 - **严格解析**：未知字段、错误类型一律抛错——持久化的日志必须与声明的 schema 完全一致
 
-## 会话树的具体实现：`childSessionMeta` 与深度记账
+## 2.6 会话树的具体实现：`childSessionMeta` 与深度记账
 
 「血缘」原理的落地是子会话创建元数据（`child-agent` 模块，one-shot 提供方与
 continuation 管理器共用同一个家）：
@@ -265,7 +265,7 @@ const handle = create === undefined
 同一个 `ctx.agents` registry——「子代理是完整 agent」原理的落地就是「没有特殊 agent，
 只有多了一行 `parentSession` 元数据的普通会话」。
 
-## 选项继承的具体实现
+## 2.7 选项继承的具体实现
 
 「子级继承父级路由」的原理落地为两步：
 
@@ -289,7 +289,7 @@ function resolveChildAgentOptions(parent, requested, childDepth) {
 }
 ```
 
-## 权限固定的具体实现
+## 2.8 权限固定的具体实现
 
 「权限启动即定死」的原理落地为三个协作函数：
 
@@ -307,7 +307,7 @@ function resolveChildAgentOptions(parent, requested, childDepth) {
    runtime-context 贡献而非 system-prompt section，让部署的 system prompt 在父子间
    保持统一），最后叠加子级自己的 persona section 与 `tools.restrict(toolFilter)`
 
-## 一次性 driver 的具体实现：`startInProcessRun`
+## 2.9 一次性 driver 的具体实现：`startInProcessRun`
 
 spawn 与 fork 提供方共用的驱动（`dsh-subagent-in-process-driver`）——流程图第 ② 步
 的 one-shot 完整代码路径：
@@ -368,7 +368,7 @@ export async function startInProcessRun(request, options): Promise<SubagentRun> 
 另有两条覆盖规则：caller 取消且记录原因非 completed → 强制 `aborted`；要求结构化输出
 但 completed 时没捕获到值 → 改判 `error`（取消则 `aborted`）。
 
-## 子 Agent 创建的完整链路：`ctx.agents.create()` 内部
+## 2.10 子 Agent 创建的完整链路：`ctx.agents.create()` 内部
 
 driver 调用的 `ctx.agents.create()` 往下是一条**三层委托 + 创建事务**流水线：
 
@@ -427,7 +427,7 @@ emitAgentEvent(loopCtx, agent, 'agent/session-start', ...)
 就是一个跑标准 turn/step 循环的普通 Agent。一句话：**会话预备 → 未发布窗口 → 原子
 发布，任何一步失败全量回滚，发布成功即所有权移交**。
 
-## 结算的具体实现：`settleRun`
+## 2.11 结算的具体实现：`settleRun`
 
 「结果回流」原理的落地（one-shot 背景 Task 路径）：
 
@@ -452,7 +452,7 @@ function runOutcome(result) {
 停止原因到任务结果的映射有明确语义：**本地取消是 killed（预期内），带诊断的远程
 中止与其他失败都是 failed 且不携带部分输出**。
 
-## 结果回流父级的具体实现：`notifySettlement`
+## 2.12 结果回流父级的具体实现：`notifySettlement`
 
 流程图第 ⑤ 步「父上下文追加结算通知」的完整实现（continuable 路径）：
 
@@ -498,7 +498,7 @@ createUserMessage({
 > one-shot 路径的回流不走 notifySettlement：结果经 `settleRun` 映射为 Task outcome，
 > 由委派工具作为工具结果返回给父级模型。
 
-## Continuable 的具体实现：Activation 与 inbox
+## 2.13 Continuable 的具体实现：Activation 与 inbox
 
 continuation 管理器（约千行的最大模块）的职责与关键设计：
 
@@ -523,7 +523,7 @@ continuation 管理器（约千行的最大模块）的职责与关键设计：
   「父级共享工作区但不会自动收到你的转录/工具输出/推理」，且发消息不结束自己的轮次。
   这就是「父级只收蒸馏结果」原理在 continuable 形态下的落地
 
-## 多个子 Agent 的并行执行
+## 2.14 多个子 Agent 的并行执行
 
 三层设计——模型侧发起、调度器并发、运行时承载（运行时细节见下文「运行时基础」节）。
 
@@ -565,11 +565,11 @@ while (!aborted && nextToStart < group.length && inFlight.size < maxParallelTool
 两处呼应：todo 工具的 `allowParallelInProgress: true` 就是为并发子代理场景准备的
 （允许多个 todo 同时 `in_progress`）；TUI 面板给每个并发子代理一行独立展示。
 
-## 运行时基础：协作式异步并发与 I/O 多路复用
+## 2.15 运行时基础：协作式异步并发与 I/O 多路复用
 
 上节「单进程异步并发」承载的物理基础。关键词：**单线程、非阻塞、协作式**。
 
-### Node.js 事件循环上的协作式异步并发
+### 2.15.1 Node.js 事件循环上的协作式异步并发
 
 **单线程 + 事件循环**：JavaScript 只在一个线程上执行；这个线程不停地
 「取任务 → 执行到结束 → 发起的 I/O 交给底层 → 完成的回调进队列 → 取下一个任务」。
@@ -595,7 +595,7 @@ while (!aborted && nextToStart < group.length && inFlight.size < maxParallelTool
 一段 JS 在跑，不是真并行——真·并行计算需要 worker 线程或多进程（进程外提供方的
 另一个存在理由）。
 
-### 底层原理：从 select 到 epoll
+### 2.15.2 底层原理：从 select 到 epoll
 
 事件循环的底层分四层：
 
@@ -649,7 +649,7 @@ agent: await fetch(LLM API)
 十个子代理并发 = 十个 socket 挂在**同一个 epoll 实例**里，一次 `epoll_wait` 同时
 监视全部——这就是单线程能「同时等所有人」的物理基础。
 
-## 服务操作面与生命周期事件（汇总）
+## 2.16 服务操作面与生命周期事件（汇总）
 
 | 方法 | 职责 |
 |---|---|
@@ -664,7 +664,7 @@ agent: await fetch(LLM API)
 Cordis 事件：`subagent/provider-added` / `-removed`、`subagent/start(info)` / `end(info)`
 （载荷：runId、provider、SessionId、local、stopReason、lastAssistantMessage?）。
 
-## 模型体验（两条注入）
+## 2.17 模型体验（两条注入）
 
 **结算通知**（parent 收到的 user 角色消息，runtime 生成）：
 
@@ -676,7 +676,7 @@ Cordis 事件：`subagent/provider-added` / `-removed`、`subagent/start(info)` 
 
 **委派范围声明**——即上文 `applyChildComposition` 注册的 `subagent:delegation` 固定句。
 
-## 已知限制（节选）
+## 2.18 已知限制（节选）
 
 - ACP 子级仍为一次性，且无法通过追踪枚举
 - child → parent 投递要求直接 parent 在线——无持久 parent mailbox
@@ -689,7 +689,7 @@ Cordis 事件：`subagent/provider-added` / `-removed`、`subagent/start(info)` 
 
 一个消费方如何在不依赖 subagent 包的情况下展示子代理——每条机制对应到具体代码。
 
-## 事件路由的具体实现（`src/index.ts`）
+## 3.1 事件路由的具体实现（`src/index.ts`）
 
 `session/event` 是全局事件总线，所有会话的事件都流经这里。driver 的归属判定：
 
@@ -708,7 +708,7 @@ ctx.on('session/event', (session, event) => {
 `session.header.parentSession` 就是第二部分 `childSessionMeta` 写入的那个字段——
 消费端与写入端在同一个会话树约定上会合，中间不需要任何 subagent 包的类型面。
 
-## 子代理条目的具体折叠：`foldChildEvent`
+## 3.2 子代理条目的具体折叠：`foldChildEvent`
 
 ```ts
 const foldChildEvent = (childId, event) => {
@@ -742,7 +742,7 @@ const foldChildEvent = (childId, event) => {
   所以子代理详情视图零专门渲染代码地支持它自己的流式帧、工具卡、todolist 面板
 - **占位标签策略**：`subagent <id前8位>` 保证 descriptor 迟到时面板行也有可读身份
 
-## 面板行的具体计算
+## 3.3 面板行的具体计算
 
 面板切片**每次渲染时计算**而非存进基础视图——所有渲染路径自动拾取 roster 变化：
 
@@ -762,7 +762,7 @@ function withPanel(base: RenderView): RenderView {   // 每个渲染出口都过
 }
 ```
 
-## 键盘导航的具体实现
+## 3.4 键盘导航的具体实现
 
 面板焦点是一个整数游标 `panelSelected`（0 = main 行，1..n = 子代理行）+ `openChild`：
 
@@ -776,7 +776,7 @@ function withPanel(base: RenderView): RenderView {   // 每个渲染出口都过
 所有 handler 首行 `if (exiting) return`——退出流程启动后输入一律忽略（防止拆卸期间
 对正在 dispose 的 agent 排队工作）。
 
-## 焦点模式与视图替换（`src/renderer.tsx`）
+## 3.5 焦点模式与视图替换（`src/renderer.tsx`）
 
 ```ts
 const focusMode = opened !== undefined ? 'child'
@@ -790,7 +790,7 @@ const focusMode = opened !== undefined ? 'child'
 - `ChildView`：分隔线 + `● subagent: <label> (Esc 返回)` 头 + 子代理自己的 plan 面板
   （若有）+ 完整帧流的只读转录
 
-## 淡出生命周期的具体实现
+## 3.6 淡出生命周期的具体实现
 
 每秒心跳 tick（`SUBAGENT_PANEL_TICK_MS = 1000`）里的两段逻辑：
 
@@ -812,7 +812,7 @@ for (const [childId, entry] of children) {
 **registry 观察**实现同等效果——后者不依赖任何 subagent 包的类型面，与零 import
 原则一致；`frames.length > 0` 守卫防止从未产出内容的幽灵行闪现淡出。
 
-## 相关常量一览
+## 3.7 相关常量一览
 
 | 常量 | 值 | 用途 |
 |---|---|---|

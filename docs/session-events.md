@@ -3,7 +3,7 @@
 > 基于 `@deepseek-ai/dsh-session@0.1.2-rc.1`（`lib/types/types.d.ts` 的 `SessionEventMap`）整理，
 > 并标注 dsh-terminal 的 fold（`src/frames.ts`）如何消费每类事件。
 
-## 基础概念：事件溯源
+## 1 基础概念：事件溯源
 
 dsh 的会话是**事件溯源（event-sourcing）**模型：会话中发生的一切都是一条条追加进不可变日志的事件，
 每条带 `seq`（序号）和 `time`（时间戳）。推论有两条：
@@ -11,7 +11,7 @@ dsh 的会话是**事件溯源（event-sourcing）**模型：会话中发生的�
 - **显示 = fold**——把事件流折叠成显示状态（本工程在 `src/frames.ts`），同一事件序列折叠两次结果相同；
 - **恢复 = 重放**——恢复会话就是重放持久化日志走同一个 fold，显示自动重建。
 
-## 层级骨架：session → turn → step
+## 2 层级骨架：session → turn → step
 
 ```
 session（会话）
@@ -22,7 +22,7 @@ session（会话）
 一个 turn 可以有多个 step（模型调工具 → 工具结果进下一步的上下文，循环往复）；
 没有进入任何 step 的 turn（例如直接被拒）不会有 step 事件。
 
-## 生命周期事件（层级骨架）
+## 3 生命周期事件（层级骨架）
 
 | 事件 | 载荷 | 含义 |
 |---|---|---|
@@ -42,7 +42,7 @@ session（会话）
 | `max-tokens` | 至少一个 step 撞到输出 token 上限 |
 | `interrupted` | **不是循环发出的** —— 重载时持久层给「崩溃孤儿回合」补的收尾标记，崩溃前的事件保持完整 |
 
-## Step 内的内容事件
+## 4 Step 内的内容事件
 
 | 事件 | 载荷要点 | 含义 |
 |---|---|---|
@@ -52,7 +52,7 @@ session（会话）
 | `tool/call` | `{turn, step, callId, name, arguments}` | 模型请求一次工具调用；`arguments` 是原始 JSON 字符串（未解析），`callId` 配对结果 |
 | `tool/result` | `{turn, step, message, error?, meta?}` | 工具执行结果；`meta` 是工具私有展示载荷（如 `dsh-tool-fs` 的结果时上下文 diff），核心不透明但必须 JSON 可序列化 —— 重放时还原同一张卡 |
 
-## Log-only 事件（只进日志，不进显示）
+## 5 Log-only 事件（只进日志，不进显示）
 
 | 事件 | 含义 |
 |---|---|
@@ -60,7 +60,7 @@ session（会话）
 | `request/context` | 路由元数据；仅路由或容量变化时记录，不参与请求重建 |
 | `session/end-seed` | **种子结束标记**：它之前的事件来自种子历史（resume / fork / replay），本次活会话没有产生它们；载荷为空，位置即语义。只有 `Session` 构造器是合法写入者 |
 
-## 插件声明合并的事件
+## 6 插件声明合并的事件
 
 `SessionEventMap` 是可扩展接口 —— 各包通过 declaration merging 注入自己的事件，
 运行时零代码。本工程 adapter 的 `src/dsh-adapter/effects.ts` 因此只 `import type {}` 这些包
@@ -72,7 +72,7 @@ session（会话）
 | `todo/write` | `dsh-tool-todo` | todolist 全量快照（整表替换，last-write-wins） |
 | `subagent/descriptor` | `dsh-subagent` | 子代理标签（本工程按结构读取，不 import 该包） |
 
-## 典型时间线（示意）
+## 7 典型时间线（示意）
 
 ```
 turn/start {turn:1}
@@ -88,7 +88,7 @@ turn/end {turn:1, reason:{kind:'completed'}}   ← 兜底清空指示器
 turn/start {turn:2}                  ← plan 面板清空（turn 级生命周期）
 ```
 
-## dsh-terminal 的 fold 映射（`src/frames.ts`）
+## 8 dsh-terminal 的 fold 映射（`src/frames.ts`）
 
 | 事件 | fold 动作 |
 |---|---|
