@@ -14,7 +14,7 @@ import React, { useState } from 'react'
 import { Box, Static, Text, render, useInput, useStdout } from 'ink'
 import type { Frame, FrameState } from './frames.ts'
 import { createFrameState } from './frames.ts'
-import { contentToText } from './render.ts'
+import { contentToText, stripOuterCodeFence } from './render.ts'
 
 /** Callbacks the input bar hands to the driver. */
 export interface InputHandlers {
@@ -629,13 +629,13 @@ function ToolResultView({
 }): React.JSX.Element {
   const result = frame.result
   if (result === undefined) {
-    const text = contentToText(frame.resultContent ?? [])
-    return text === '' ? <></> : <IndentedBlock text={trimNewline(text)} expanded={expandedOutput} />
+    const text = stripOuterCodeFence(contentToText(frame.resultContent ?? []))
+    return text === '' ? <></> : <IndentedBlock text={trimNewline(text)} expanded={expandedOutput} {...(frame.isError ? { error: true } : {})} />
   }
   switch (result.card) {
     case 'terminal':
       return result.output !== undefined && result.output !== ''
-        ? <IndentedBlock text={trimNewline(result.output)} expanded={expandedOutput} />
+        ? <IndentedBlock text={trimNewline(result.output)} expanded={expandedOutput} {...(frame.isError ? { error: true } : {})} />
         : <></>
     case 'diff': {
       // Flatten the diffs into one row list (path lines and +/- lines) so the
@@ -659,8 +659,8 @@ function ToolResultView({
       )
     }
     case 'generic': {
-      const text = contentToText(result.content ?? frame.resultContent ?? [])
-      return text === '' ? <></> : <IndentedBlock text={trimNewline(text)} expanded={expandedOutput} />
+      const text = stripOuterCodeFence(contentToText(result.content ?? frame.resultContent ?? []))
+      return text === '' ? <></> : <IndentedBlock text={trimNewline(text)} expanded={expandedOutput} {...(frame.isError ? { error: true } : {})} />
     }
     case 'read': {
       const endOfFile = result.lines.at(-1)?.number === result.totalLines
@@ -679,8 +679,8 @@ function ToolResultView({
     // search/web views carry no text payload; fall back to the raw result content.
     case 'search':
     case 'web': {
-      const text = contentToText(frame.resultContent ?? [])
-      return text === '' ? <></> : <IndentedBlock text={trimNewline(text)} expanded={expandedOutput} />
+      const text = stripOuterCodeFence(contentToText(frame.resultContent ?? []))
+      return text === '' ? <></> : <IndentedBlock text={trimNewline(text)} expanded={expandedOutput} {...(frame.isError ? { error: true } : {})} />
     }
   }
 }
@@ -693,22 +693,26 @@ function toolLabel(name: string): string {
 /** How many output lines render before truncation with an expand hint. */
 const TRUNCATED_OUTPUT_LINES = 6
 
-/** The Claude Code-style output block: one `⎿` connector, then aligned lines, truncated with an expand hint. */
-function IndentedBlock({ text, expanded }: { text: string; expanded: boolean }): React.JSX.Element {
+/** The Claude Code-style output block: one `⎿` connector, then aligned lines, truncated with an expand hint; a failed result renders red instead of dim. */
+function IndentedBlock({ text, expanded, error }: { text: string; expanded: boolean; error?: boolean }): React.JSX.Element {
   const lines = text.split('\n')
   const hidden = lines.length - TRUNCATED_OUTPUT_LINES
   if (!expanded && hidden > 0) {
     const visible = lines.slice(0, TRUNCATED_OUTPUT_LINES)
     return (
       <Box flexDirection="column">
-        {visible.map((line, index) => <Text key={index} dimColor>{connector(index, line)}</Text>)}
+        {visible.map((line, index) => error
+          ? <Text key={index} color="red">{connector(index, line)}</Text>
+          : <Text key={index} dimColor>{connector(index, line)}</Text>)}
         <Text dimColor>     … {hidden} more lines (ctrl+o to expand)</Text>
       </Box>
     )
   }
   return (
     <Box flexDirection="column">
-      {lines.map((line, index) => <Text key={index} dimColor>{connector(index, line)}</Text>)}
+      {lines.map((line, index) => error
+        ? <Text key={index} color="red">{connector(index, line)}</Text>
+        : <Text key={index} dimColor>{connector(index, line)}</Text>)}
     </Box>
   )
 }

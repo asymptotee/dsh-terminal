@@ -22,6 +22,24 @@ export function contentToText(content: readonly ContentBlock[], joinWith = ''): 
 }
 
 /**
+ * Strip one outer markdown code fence. Tool presentations wrap model-facing
+ * output in fences (the bash tool fences error/background output as
+ * ```console); a markdown viewer renders the fence, but the terminal card
+ * shows the content bare — so the fence pair leaves before display. Text
+ * without a matching open/close pair passes through unchanged.
+ * @param text - the raw presentation text.
+ * @returns the text without its outer fence pair, if it had one.
+ */
+export function stripOuterCodeFence(text: string): string {
+  const lines = text.split('\n')
+  if (!/^```/.test(lines[0]?.trim() ?? '')) return text
+  let last = lines.length - 1
+  while (last > 0 && lines[last]?.trim() === '') last--
+  if (last <= 0 || lines[last]?.trim() !== '```') return text
+  return lines.slice(1, last).join('\n')
+}
+
+/**
  * The submitted user line, echoed with the Claude Code-style prompt marker.
  * @param text - the submitted line text.
  * @returns the echoed line, newline-terminated.
@@ -63,7 +81,7 @@ function terminated(text: string): string {
 export function renderToolResultLines(frame: Extract<Frame, { kind: 'tool' }>): readonly string[] {
   const result = frame.result
   if (result === undefined) {
-    const text = contentToText(frame.resultContent ?? [])
+    const text = stripOuterCodeFence(contentToText(frame.resultContent ?? []))
     return text === '' ? [] : [terminated(text)]
   }
   switch (result.card) {
@@ -80,7 +98,7 @@ export function renderToolResultLines(frame: Extract<Frame, { kind: 'tool' }>): 
         ...renderInlineDiff(diff.oldText ?? '', diff.newText),
       ])
     case 'generic': {
-      const text = contentToText(result.content ?? frame.resultContent ?? [])
+      const text = stripOuterCodeFence(contentToText(result.content ?? frame.resultContent ?? []))
       return text === '' ? [] : [terminated(text)]
     }
     // search/read/web views carry no text payload; fall back to the raw result content.

@@ -400,6 +400,27 @@ describe('TuiApp rendering', () => {
     expect(renderApp(<TuiApp state={busy} handlers={noopHandlers()} />).lastFrame()).toContain('✢ Running…')
   })
 
+  it('renders a failed generic tool result bare, without the console fence', () => {
+    const fenced = '```console\nError: the user rejected escalating\n```'
+    const frames: Frame[] = [{
+      kind: 'tool',
+      seq: 5,
+      turn: 1,
+      step: 1,
+      callId: 'c5',
+      name: 'bash',
+      args: {},
+      call: { card: 'generic', title: 'printf', rawInput: {} },
+      result: { card: 'generic', content: [{ type: 'text', text: fenced }] },
+      resultContent: [{ type: 'text', text: fenced }],
+      isError: true,
+    }]
+    const { lastFrame } = renderApp(<TuiApp state={state(frames)} handlers={noopHandlers()} />)
+    const frame = lastFrame() ?? ''
+    expect(frame).toContain('Error: the user rejected escalating')
+    expect(frame).not.toContain('```')
+  })
+
   it('renders the raw result content when the tool card has no result view', () => {
     const frames: Frame[] = [{
       kind: 'tool',

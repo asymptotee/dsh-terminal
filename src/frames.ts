@@ -45,6 +45,8 @@ export type Frame =
     result?: ToolResultView
     /** The raw result content, the fallback when the result view carries none. */
     resultContent?: readonly ContentBlock[]
+    /** The result block reported failure; the UI renders it in red. */
+    isError?: boolean
   }
   | {
     kind: 'command'
@@ -339,6 +341,7 @@ export function foldEvent(state: FrameState, event: SessionEvent, deps: FoldDeps
         ...existing,
         ...result === undefined ? {} : { result },
         resultContent: block.content,
+        ...block.isError ? { isError: true } : {},
       }
       const pendingTools = new Map(state.pendingTools)
       pendingTools.delete(block.toolCallId)

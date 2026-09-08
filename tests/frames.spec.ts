@@ -398,6 +398,24 @@ describe('fold: tool cards', () => {
     expect(lines).toEqual(['[tool] read_file\n', 'a.ts content\n'])
   })
 
+  it('strips the outer console fence and carries the error flag on failed results', () => {
+    const call = ev('tool/call', { turn: 1, step: 1, callId: ToolCallId('c1'), name: 'bash', arguments: '{}' })
+    const result = ev('tool/result', {
+      turn: 1,
+      step: 1,
+      message: createToolResultMessage({
+        callId: ToolCallId('c1'),
+        content: [{ type: 'text', text: '```console\nError: rejected\n```' }],
+        isError: true,
+      }),
+    })
+    const { lines, state } = replay([call, result])
+    expect(lines).toEqual(['[tool] bash\n', 'Error: rejected\n'])
+    // tool/result updates the pending tool frame in place — still frames[0].
+    const frame = state.frames[0] as Extract<Frame, { kind: 'tool' }> | undefined
+    expect(frame?.isError).toBe(true)
+  })
+
   it('ignores an orphan tool result with no matching pending call', () => {
     const result = ev('tool/result', {
       turn: 1,
