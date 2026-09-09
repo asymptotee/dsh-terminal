@@ -35,6 +35,8 @@ export const BLESSED_PACKAGES: readonly BlessedPackage[] = [
   { name: '@deepseek-ai/dsh-invariants', version: DSH_VERSION_LINE },
   { name: '@deepseek-ai/dsh-llm', version: DSH_VERSION_LINE },
   { name: '@deepseek-ai/dsh-session', version: DSH_VERSION_LINE },
+  { name: '@deepseek-ai/dsh-session-projection', version: DSH_VERSION_LINE },
+  { name: '@deepseek-ai/dsh-subagent', version: DSH_VERSION_LINE },
   { name: '@deepseek-ai/dsh-tool-todo', version: DSH_VERSION_LINE },
   { name: '@deepseek-ai/dsh-tools', version: DSH_VERSION_LINE },
   { name: '@deepseek-ai/dsh-user-approval', version: DSH_VERSION_LINE },

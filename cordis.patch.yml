@@ -19,6 +19,11 @@
     mode: !!js process.env.DSH_TOOLS_MODE
 
 - insert:
+    # Shared team task list (M1 of the star-topology Agent Teams design):
+    # team_task_write/team_task_read tools plus the teamTasks projection.
+    - id: tool-team
+      name: 'dsh-terminal/team'
+
     # Bare package names: the dsh plugin mechanism installs this package into
     # the profile's node_modules, where the Loader resolves its exports.
     - id: tui-startup

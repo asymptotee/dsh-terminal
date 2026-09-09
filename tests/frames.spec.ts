@@ -464,6 +464,33 @@ describe('fold: todo plan', () => {
   })
 })
 
+describe('fold: team tasks', () => {
+  it('replaces the team task list whole and keeps it across turn/start', () => {
+    const write = ev('team/task-write', {
+      tasks: [
+        { id: 't1', content: '调研', status: 'in_progress', owner: 'researcher' },
+        { id: 't2', content: '实现', status: 'pending', blockedBy: ['t1'] },
+      ],
+    })
+    const { lines, state } = replay([write, ev('turn/start', { turn: 2 })])
+    expect(lines).toEqual([
+      '● 团队任务\n',
+      '  ⎿  ◼ 调研 @researcher\n',
+      '     ◻ 实现 (blocked)\n',
+    ])
+    // Unlike the personal plan, the team list outlives turn boundaries.
+    expect(state.teamTasks).toHaveLength(2)
+  })
+
+  it('last write wins on replay', () => {
+    const { state } = replay([
+      ev('team/task-write', { tasks: [{ id: 't1', content: 'old', status: 'pending' }] }),
+      ev('team/task-write', { tasks: [{ id: 't1', content: 'new', status: 'completed' }] }),
+    ])
+    expect(state.teamTasks).toEqual([{ id: 't1', content: 'new', status: 'completed' }])
+  })
+})
+
 describe('fold: interruption marker', () => {
   it('appends the marker when the user aborts the turn', () => {
     const { lines, state } = replay([
