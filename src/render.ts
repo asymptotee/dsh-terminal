@@ -128,6 +128,14 @@ function renderInlineDiff(oldText: string, newText: string): readonly string[] {
 }
 
 /**
+ * The user-interruption marker line appended at a user-cancelled turn end.
+ * @returns the newline-terminated marker line.
+ */
+export function renderInterruptedLine(): string {
+  return '[interrupted] Interrupted\n'
+}
+
+/**
  * One slash-command invocation as a terminal line.
  * @param frame - the pending command frame.
  * @returns the newline-terminated command line.

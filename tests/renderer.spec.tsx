@@ -377,6 +377,14 @@ describe('TuiApp rendering', () => {
     expect(frame.indexOf('● todolist进行中...')).toBeLessThan(frame.indexOf('❯'))
   })
 
+  it('renders the user-interruption marker after the interrupted turn', () => {
+    const frames: Frame[] = [{ kind: 'interrupted', seq: 3 }]
+    const { lastFrame } = renderApp(<TuiApp state={state(frames)} handlers={noopHandlers()} />)
+    const frame = lastFrame() ?? ''
+    expect(frame).toContain('● Interrupted')
+    expect(frame).toContain('· What should dsh do instead?')
+  })
+
   it('renders the heartbeat above the input bar while a step is in flight', () => {
     const working: FrameState = { ...state([]), activeStep: { turn: 1, step: 1, startedAt: Date.now() } }
     const { lastFrame } = renderApp(<TuiApp state={working} handlers={noopHandlers()} />)

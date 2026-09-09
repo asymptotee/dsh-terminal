@@ -440,6 +440,7 @@ function frameMutable(frame: Frame): boolean {
   switch (frame.kind) {
     case 'user':
     case 'notice':
+    case 'interrupted':
       return false
     case 'assistant':
       return frame.streaming
@@ -455,6 +456,7 @@ function frameKey(frame: Frame): string {
     case 'user':
     case 'assistant':
     case 'notice':
+    case 'interrupted':
       return `${frame.kind}:${frame.seq}`
     case 'tool':
       return `${frame.kind}:${frame.callId}`
@@ -505,6 +507,8 @@ function FrameRow({ frame, expandedOutput }: { frame: Frame; expandedOutput: boo
       return <ToolRow frame={frame} expandedOutput={expandedOutput} />
     case 'command':
       return <CommandRow frame={frame} />
+    case 'interrupted':
+      return <Text><Text color="red">● Interrupted</Text> · What should dsh do instead?</Text>
   }
 }
 

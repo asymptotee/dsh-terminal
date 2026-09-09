@@ -11,6 +11,7 @@ import type { ContentBlock, MessageSource, SessionEvent, TodoItem, ToolCallView,
 import {
   contentToText,
   renderCommandLine,
+  renderInterruptedLine,
   renderNoticeLines,
   renderPlanLines,
   renderToolCallLines,
@@ -65,6 +66,11 @@ export type Frame =
     summary: string
     /** The remaining message text; absent when the message carries only the account. */
     body?: string
+  }
+  | {
+    /** The user-interruption marker appended at a user-cancelled turn end. */
+    kind: 'interrupted'
+    seq: number
   }
 
 /** The fold's adopted display state: the stream plus the open/pending registries. */
@@ -424,7 +430,19 @@ export function foldEvent(state: FrameState, event: SessionEvent, deps: FoldDeps
     }
     case 'turn/end': {
       const closed = closeOpenAssistant(state, event.time)
-      return { state: { ...state, ...closed, activeStep: undefined }, lines: [] }
+      // Only a user-initiated cancel leaves a visible marker; disposal and
+      // parent cancels happen while the surface is already tearing down.
+      const byUser = event.data.reason.kind === 'aborted'
+        && event.data.reason.reason.kind === 'user'
+      return {
+        state: {
+          ...state,
+          ...closed,
+          activeStep: undefined,
+          ...byUser ? { frames: [...closed.frames, { kind: 'interrupted' as const, seq: event.seq }] } : {},
+        },
+        lines: byUser ? [renderInterruptedLine()] : [],
+      }
     }
     default:
       // Log-only families (request/header, seed markers, session lifecycle)

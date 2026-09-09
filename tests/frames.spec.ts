@@ -464,6 +464,23 @@ describe('fold: todo plan', () => {
   })
 })
 
+describe('fold: interruption marker', () => {
+  it('appends the marker when the user aborts the turn', () => {
+    const { lines, state } = replay([
+      ev('turn/end', { turn: 1, reason: { kind: 'aborted', reason: { kind: 'user' } } }),
+    ])
+    expect(lines).toEqual(['[interrupted] Interrupted\n'])
+    expect(state.frames.at(-1)).toEqual({ kind: 'interrupted', seq: 1 })
+  })
+
+  it('does not mark non-user aborts or completed turns', () => {
+    const legacy = replay([ev('turn/end', { turn: 1, reason: { kind: 'aborted', reason: { kind: 'legacy' } } })])
+    expect(legacy.state.frames).toEqual([])
+    const done = replay([ev('turn/end', { turn: 1, reason: { kind: 'completed' } })])
+    expect(done.state.frames).toEqual([])
+  })
+})
+
 describe('fold: active step', () => {
   it('opens the thinking clock on step/start and closes it on step/end', () => {
     const { state: open } = replay([ev('step/start', { turn: 1, step: 1 })])
