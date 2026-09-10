@@ -203,11 +203,8 @@ export function TuiApp({
         : null}
       {opened !== undefined ? <ChildView opened={opened} /> : null}
       {/* The standing plan stays pinned directly above the input bar for its
-          whole lifetime; the child view shows the child's own plan instead.
-          The shared team task list supersedes the personal plan slot. */}
-      {opened === undefined && (state.teamTasks !== undefined
-        ? <TeamTasksPanel tasks={state.teamTasks} />
-        : state.plan !== undefined ? <PlanPanel todos={state.plan} /> : null)}
+          whole lifetime; the child view shows the child's own plan instead. */}
+      {opened === undefined && state.plan !== undefined ? <PlanPanel todos={state.plan} /> : null}
       {/* The step heartbeat sits below the plan and above the input bar:
           shown throughout a step — its tool executions included — while an
           approval overlay waits on the user and the child view, which
@@ -587,25 +584,6 @@ function PlanPanel({ todos }: { todos: FrameState['plan'] & object }): React.JSX
   )
 }
 
-/** The shared team task list as a checklist panel: the plan shape plus owner/blocked suffixes. */
-function TeamTasksPanel({ tasks }: { tasks: FrameState['teamTasks'] & object }): React.JSX.Element {
-  return (
-    <Box flexDirection="column">
-      <Text><Text color="green">●</Text> 团队任务</Text>
-      {tasks.map((task, index) => {
-        const mark = task.status === 'completed'
-          ? <Text color="green">✔</Text>
-          : task.status === 'in_progress'
-            ? <Text color="#a5d8ff">◼</Text>
-            : <Text dimColor>◻</Text>
-        const prefix = index === 0 ? '  ⎿  ' : '     '
-        const owner = task.owner === undefined ? '' : ` @${task.owner}`
-        const blocked = task.blockedBy !== undefined && task.blockedBy.length > 0 ? ' (blocked)' : ''
-        return <Text key={index}>{prefix}{mark} <Text dimColor>{task.content}{owner}{blocked}</Text></Text>
-      })}
-    </Box>
-  )
-}
 
 /** The step heartbeat: one label for the whole step — the model call and its tool executions. */
 function HeartbeatLine({ startedAt }: { startedAt: number }): React.JSX.Element {

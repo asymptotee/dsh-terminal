@@ -6,7 +6,6 @@
  */
 
 import type { ContentBlock, TodoItem } from './dsh-adapter/types.ts'
-import type { TeamTask } from './team/types.ts'
 import type { Frame } from './frames.ts'
 
 /**
@@ -174,20 +173,3 @@ export function renderPlanLines(todos: readonly TodoItem[]): readonly string[] {
   return lines
 }
 
-/**
- * The shared team task list as a panel block: same checklist shape as the
- * plan, with the owner claim and blocked state as dim suffixes.
- * @param tasks - the team task items to render.
- * @returns the newline-terminated team task lines.
- */
-export function renderTeamTaskLines(tasks: readonly TeamTask[]): readonly string[] {
-  const lines = ['● 团队任务\n']
-  tasks.forEach((task, index) => {
-    const mark = task.status === 'completed' ? '✔' : task.status === 'in_progress' ? '◼' : '◻'
-    const prefix = index === 0 ? '  ⎿  ' : '     '
-    const owner = task.owner === undefined ? '' : ` @${task.owner}`
-    const blocked = task.blockedBy !== undefined && task.blockedBy.length > 0 ? ' (blocked)' : ''
-    lines.push(`${prefix}${mark} ${task.content}${owner}${blocked}\n`)
-  })
-  return lines
-}

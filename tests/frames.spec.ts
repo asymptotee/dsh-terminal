@@ -16,8 +16,8 @@ function ev<T extends SessionEventType>(type: T, data: SessionEvent<T>['data']):
   return { type, seq: nextSeq, time: 0, data } as SessionEvent<T>
 }
 
-function deps(tools: Record<string, ToolPresentation> = {}): FoldDeps {
-  return { tools: { get: name => tools[name] } }
+function deps(tools: Record<string, ToolPresentation> = {}, childLabels: ReadonlyMap<string, string> = new Map()): FoldDeps {
+  return { tools: { get: name => tools[name] }, childLabels }
 }
 
 function assistant(text: string): SessionEvent<'assistant/message'> {
@@ -166,6 +166,50 @@ describe('fold: notices', () => {
       summary: 'Background subagent child-1 finished.',
       body: 'done.',
     }])
+  })
+
+  it('renames the sender session id in notice text to the friendly label', () => {
+    const source = {
+      kind: 'subagent-settled',
+      form: 'notice',
+      summary: 'Background subagent child-1 finished.',
+      senderSessionId: 'child-1',
+    } as unknown as MessageSource
+    const folded = foldEvent(
+      createFrameState(),
+      ev('user/message', createUserMessage({
+        content: [
+          { type: 'text', text: 'Background subagent child-1 finished.' },
+          { type: 'text', text: 'closing note about child-1.' },
+        ],
+        source,
+      })),
+      deps({}, new Map([['child-1', 'architect']])),
+    )
+    expect(folded.state.frames).toEqual([{
+      kind: 'notice',
+      seq: 1,
+      summary: 'Background subagent architect finished.',
+      body: 'closing note about architect.',
+    }])
+  })
+
+  it('keeps the raw id when the sender has no known label', () => {
+    const source = {
+      kind: 'subagent-settled',
+      form: 'notice',
+      summary: 'Background subagent child-1 finished.',
+      senderSessionId: 'child-1',
+    } as unknown as MessageSource
+    const folded = foldEvent(
+      createFrameState(),
+      ev('user/message', createUserMessage({
+        content: [{ type: 'text', text: 'Background subagent child-1 finished.' }],
+        source,
+      })),
+      deps(),
+    )
+    expect(folded.state.frames[0]).toMatchObject({ kind: 'notice', summary: 'Background subagent child-1 finished.' })
   })
 
   it('keeps the full text as body when the first content block is not text', () => {
@@ -461,33 +505,6 @@ describe('fold: todo plan', () => {
   it('keeps the plan across assistant output until the next turn starts', () => {
     const { state } = replay([ev('todo/write', { todos: [{ content: 'task', status: 'pending' }] }), assistant('ok')])
     expect(state.plan).toEqual([{ content: 'task', status: 'pending' }])
-  })
-})
-
-describe('fold: team tasks', () => {
-  it('replaces the team task list whole and keeps it across turn/start', () => {
-    const write = ev('team/task-write', {
-      tasks: [
-        { id: 't1', content: '调研', status: 'in_progress', owner: 'researcher' },
-        { id: 't2', content: '实现', status: 'pending', blockedBy: ['t1'] },
-      ],
-    })
-    const { lines, state } = replay([write, ev('turn/start', { turn: 2 })])
-    expect(lines).toEqual([
-      '● 团队任务\n',
-      '  ⎿  ◼ 调研 @researcher\n',
-      '     ◻ 实现 (blocked)\n',
-    ])
-    // Unlike the personal plan, the team list outlives turn boundaries.
-    expect(state.teamTasks).toHaveLength(2)
-  })
-
-  it('last write wins on replay', () => {
-    const { state } = replay([
-      ev('team/task-write', { tasks: [{ id: 't1', content: 'old', status: 'pending' }] }),
-      ev('team/task-write', { tasks: [{ id: 't1', content: 'new', status: 'completed' }] }),
-    ])
-    expect(state.teamTasks).toEqual([{ id: 't1', content: 'new', status: 'completed' }])
   })
 })
 

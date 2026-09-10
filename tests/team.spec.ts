@@ -1,41 +1,7 @@
-/** The team task list validation: the constraints the schema cannot express. */
+/** The team coordination helpers: relay envelope, role parsing, and the spawn instruction. */
 
 import { describe, expect, it } from 'vitest'
-import { parseTeamRoles, relayEnvelope, rolePrompt, teamInstruction, toTeamTasks } from '../src/team/index.ts'
-
-const task = (partial: Partial<{ id: string; content: string; status: 'pending' | 'in_progress' | 'completed'; owner: string; blockedBy: string[] }> = {}) => ({
-  id: 't1',
-  content: 'do the thing',
-  status: 'pending' as const,
-  ...partial,
-})
-
-describe('toTeamTasks', () => {
-  it('normalizes a valid list, trimming ids and content', () => {
-    const tasks = toTeamTasks([
-      task({ id: ' t1 ', content: ' task one ' }),
-      task({ id: 't2', content: 'task two', status: 'in_progress', owner: 'arch', blockedBy: ['t1'] }),
-    ])
-    expect(tasks).toEqual([
-      { id: 't1', content: 'task one', status: 'pending' },
-      { id: 't2', content: 'task two', status: 'in_progress', owner: 'arch', blockedBy: ['t1'] },
-    ])
-  })
-
-  it('rejects empty or duplicated ids', () => {
-    expect(() => toTeamTasks([task({ id: '  ' })])).toThrow('`id` must be a non-empty string')
-    expect(() => toTeamTasks([task(), task({ content: 'other' })])).toThrow('duplicate id')
-  })
-
-  it('rejects empty or duplicated content', () => {
-    expect(() => toTeamTasks([task({ content: '  ' })])).toThrow('`content` must be a non-empty string')
-    expect(() => toTeamTasks([task(), task({ id: 't2' })])).toThrow('duplicate content')
-  })
-
-  it('rejects a blockedBy reference to an unknown id', () => {
-    expect(() => toTeamTasks([task({ blockedBy: ['ghost'] })])).toThrow('depends on unknown id')
-  })
-})
+import { parseTeamRoles, relayEnvelope, rolePrompt, teamInstruction } from '../src/team/index.ts'
 
 describe('relayEnvelope', () => {
   it('attributes the originator in the envelope text', () => {
@@ -74,8 +40,8 @@ describe('rolePrompt', () => {
     const prompt = rolePrompt('architect', '设计新接口')
     expect(prompt).toContain("You are the team's architect")
     expect(prompt).toContain('Respond in Chinese')
-    expect(prompt).toContain('team_task_read')
     expect(prompt).toContain('team_send')
+    expect(prompt).toContain('report your completion to the coordinator')
     expect(prompt).toContain('Your duty: 设计新接口')
   })
 })
@@ -88,10 +54,14 @@ describe('teamInstruction', () => {
     ])
     expect(instruction).toContain('You are the team coordinator')
     expect(instruction).toContain('Respond to the user in Chinese')
-    expect(instruction).toContain('researcher (duty: 调研) → shared task t1')
-    expect(instruction).toContain('architect (duty: 设计) → shared task t2')
-    expect(instruction).toContain('team_task_read')
-    expect(instruction).toContain('team_task_write')
+    expect(instruction).toContain("set the subagent tool's `description` parameter to EXACTLY the role name")
+    expect(instruction).toContain('researcher (duty: 调研)')
+    expect(instruction).toContain('architect (duty: 设计)')
+    expect(instruction).toContain('team_send')
     expect(instruction).toContain("Do not perform teammates' tasks yourself")
+    expect(instruction).toContain('Communicate with teammates using send_message (not team_send')
+    expect(instruction).toContain('do not poll list_agents repeatedly')
+    expect(instruction).toContain('you do not need to send extra messages to wake idle teammates')
+    expect(instruction).toContain("You decide when the team's work is complete")
   })
 })

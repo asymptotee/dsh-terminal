@@ -8,14 +8,12 @@
  */
 
 import type { ContentBlock, MessageSource, SessionEvent, TodoItem, ToolCallView, ToolResult, ToolResultView } from './dsh-adapter/types.ts'
-import type { TeamTask } from './team/types.ts'
 import {
   contentToText,
   renderCommandLine,
   renderInterruptedLine,
   renderNoticeLines,
   renderPlanLines,
-  renderTeamTaskLines,
   renderToolCallLines,
   renderToolResultLines,
   renderUserLine,
@@ -81,8 +79,6 @@ export interface FrameState {
   readonly frames: readonly Frame[]
   /** The standing todo plan; cleared on turn/start. */
   readonly plan: readonly TodoItem[] | undefined
-  /** The shared team task list; whole-list replaced, never turn-cleared. */
-  readonly teamTasks: readonly TeamTask[] | undefined
   /** The step whose model call is in flight; the thinking indicator's clock source. */
   readonly activeStep: { turn: number; step: number; startedAt: number } | undefined
   /** Open (streaming) assistant frame index by `${turn}:${step}`. */
@@ -103,6 +99,8 @@ export interface ToolPresentation {
 export interface FoldDeps {
   /** Resolve a tool's presentation by name; absent tools fall back to the generic card. */
   tools: { get(name: string): ToolPresentation | undefined }
+  /** Child session id → friendly label, used to rename raw session ids embedded in notice text. */
+  childLabels: ReadonlyMap<string, string>
 }
 
 /** The result of folding one event: the adopted state plus the lines it renders. */
@@ -117,7 +115,7 @@ export interface FoldResult {
  * @returns an empty fold state.
  */
 export function createFrameState(): FrameState {
-  return { frames: [], plan: undefined, teamTasks: undefined, activeStep: undefined, openAssistant: new Map(), pendingTools: new Map(), pendingCommands: new Map() }
+  return { frames: [], plan: undefined, activeStep: undefined, openAssistant: new Map(), pendingTools: new Map(), pendingCommands: new Map() }
 }
 
 const stepKey = (turn: number, step: number): string => `${turn}:${step}`
@@ -168,6 +166,7 @@ function noticeFrame(
   seq: number,
   source: MessageSource,
   content: readonly ContentBlock[],
+  childLabels: ReadonlyMap<string, string>,
 ): Extract<Frame, { kind: 'notice' }> | undefined {
   const [head, ...rest] = content
   const headIsText = head !== undefined && head.type === 'text'
@@ -176,7 +175,14 @@ function noticeFrame(
   // Notice content blocks are paragraphs (the account header, then the child's
   // message), so the body joins them one per line rather than concatenated.
   const body = contentToText(headIsText ? rest : content, '\n')
-  return { kind: 'notice', seq, summary, ...body === '' ? {} : { body } }
+  // Relay/settlement notice text embeds the sender's raw session id; swap it
+  // for the friendly roster label when known, so notices match the roster.
+  const senderId = 'senderSessionId' in source ? (source as { senderSessionId?: string }).senderSessionId : undefined
+  const label = senderId === undefined ? undefined : childLabels.get(senderId)
+  const rename = (text: string): string =>
+    label === undefined || senderId === undefined ? text : text.split(senderId).join(label)
+  const renamedBody = rename(body)
+  return { kind: 'notice', seq, summary: rename(summary), ...renamedBody === '' ? {} : { body: renamedBody } }
 }
 
 /** Join the reasoning blocks of a content sequence; other blocks are dropped. */
@@ -219,7 +225,7 @@ export function foldEvent(state: FrameState, event: SessionEvent, deps: FoldDeps
       // Notice- and relay-form injections are terminal-visible: a background
       // subagent settling, a job finishing, another agent's report.
       if (visibleNoticeForm(source) !== undefined) {
-        const notice = noticeFrame(event.seq, source, content)
+        const notice = noticeFrame(event.seq, source, content, deps.childLabels)
         return notice === undefined
           ? { state, lines: [] }
           : {
@@ -410,13 +416,6 @@ export function foldEvent(state: FrameState, event: SessionEvent, deps: FoldDeps
         lines: renderPlanLines(todos),
       }
     }
-    case 'team/task-write':
-      // The shared team list is whole-list replaced and never turn-cleared:
-      // it outlives turns until the next write supersedes it.
-      return {
-        state: { ...state, teamTasks: event.data.tasks },
-        lines: renderTeamTaskLines(event.data.tasks),
-      }
     case 'step/start':
       // One step is one model call plus its tool executions; the thinking
       // indicator clocks from here until the step settles.

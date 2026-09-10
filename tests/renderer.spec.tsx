@@ -377,24 +377,6 @@ describe('TuiApp rendering', () => {
     expect(frame.indexOf('● todolist进行中...')).toBeLessThan(frame.indexOf('❯'))
   })
 
-  it('renders the team task panel superseding the personal plan', () => {
-    const s = {
-      ...state([]),
-      plan: [{ content: 'personal task', status: 'pending' as const }],
-      teamTasks: [
-        { id: 't1', content: 'design the api', status: 'in_progress' as const, owner: 'arch' },
-        { id: 't2', content: 'implement it', status: 'pending' as const, blockedBy: ['t1'] },
-      ],
-    }
-    const { lastFrame } = renderApp(<TuiApp state={s} handlers={noopHandlers()} />)
-    const frame = lastFrame() ?? ''
-    expect(frame).toContain('● 团队任务')
-    expect(frame).toContain('◼ design the api @arch')
-    expect(frame).toContain('◻ implement it (blocked)')
-    // The team list occupies the plan slot, hiding the personal plan.
-    expect(frame).not.toContain('todolist进行中')
-  })
-
   it('renders the user-interruption marker after the interrupted turn', () => {
     const frames: Frame[] = [{ kind: 'interrupted', seq: 3 }]
     const { lastFrame } = renderApp(<TuiApp state={state(frames)} handlers={noopHandlers()} />)

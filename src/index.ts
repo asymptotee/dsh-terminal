@@ -161,7 +161,11 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
   // Rebuild the display from the durable log before the live stream attaches:
   // a resumed session's seeded events are not re-broadcast, so the fold runs
   // over them once here and live events fold through the same path below.
-  const deps: FoldDeps = { tools: ctx.get('tools') ?? { get: () => undefined } }
+  // Child session id → friendly label, captured from every child's descriptor
+  // event on the global bus, so relay/settlement notice text can rename the
+  // raw session id it embeds to match the roster.
+  const childLabels = new Map<string, string>()
+  const deps: FoldDeps = { tools: ctx.get('tools') ?? { get: () => undefined }, childLabels }
   let state = createFrameState()
   // The status bar shows the effective sandbox mode: the policy service folds
   // the session's override onto the deployment default (config or env).
@@ -283,7 +287,10 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
     let entry = children.get(childId)
     if (entry === undefined) {
       entry = {
-        label: `subagent ${childId.slice(0, 8)}`,
+        // The friendly label is captured from the child's seeded descriptor in
+        // the session/event handler before this fold runs; fall back to a
+        // shortened id when no descriptor label is available.
+        label: childLabels.get(childId) ?? `subagent ${childId.slice(0, 8)}`,
         startedAt: event.time,
         inputTokens: 0,
         state: createFrameState(),
@@ -291,12 +298,6 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
         fadeAt: undefined,
       }
       children.set(childId, entry)
-    }
-    // The descriptor carries the child's durable label; the merged event kind
-    // reaches this driver structurally because it never imports dsh-subagent.
-    if ((event as { type: string }).type === 'subagent/descriptor') {
-      const label = (event.data as { label?: unknown }).label
-      if (typeof label === 'string' && label !== '') entry.label = label
     }
     if (event.type === 'assistant/message' && event.data.usage !== undefined) {
       entry.inputTokens += event.data.usage.inputTokens + (event.data.usage.cacheReadTokens ?? 0)
@@ -320,6 +321,14 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
   }
   ctx.on('session/event', (session, event: SessionEvent) => {
     if (session.header.id !== agent.session.id) {
+      // Descriptors are seeded at session creation, not live-appended, so they
+      // never fire on this bus; read the child's friendly label from its own
+      // event log the first time any of its events reaches us.
+      if (!childLabels.has(session.header.id)) {
+        const descriptor = session.snapshotEvents().find((e) => (e as { type: string }).type === 'subagent/descriptor')
+        const label = descriptor === undefined ? undefined : (descriptor.data as { label?: unknown }).label
+        if (typeof label === 'string' && label !== '') childLabels.set(session.header.id, label)
+      }
       // Direct children feed the panel below the status bar; deeper
       // descendants stay in their own sessions.
       if (session.header.parentSession === agent.session.id) foldChildEvent(session.header.id, event)

@@ -1,94 +1,24 @@
 /**
- * The team task list plugin: registers the `team_task_write` /
- * `team_task_read` tools and the `teamTasks` projection unit. The shared list
- * lives in the coordinator session's log — for a teammate (a child session)
- * that is its `parentSession`, for the main agent its own session — so event
- * sourcing provides persistence, replay, and resume reconciliation for free.
- *
- * Whole-list replacement mirrors `todo_write`: every write carries the
- * complete list, replay is last-write-wins, and there is no partial update.
- * Unlike the single-owner todo list, entries carry team identity: a stable
- * `id` (claiming survives whole-list writes), an `owner` label, and
- * `blockedBy` task dependencies. Concurrency is deliberately lock-free —
- * last-write-wins with claim discipline expressed in the tool description.
+ * The team coordination plugin: registers the `team_send` relay tool and the
+ * `/team` command. Teammates coordinate purely through messages (team_send);
+ * dependencies are expressed in duty descriptions rather than a shared task
+ * board, eliminating the whole-list-replacement race. User visibility comes
+ * from the subagent roster and coordinator reports.
  * @module dsh-terminal/team
  */
 
-import { z as zod } from 'zod'
 import { createUserMessage, defineTool, z } from '../dsh-adapter/services.ts'
 import type { Agent, Context, SubagentListEntry } from '../dsh-adapter/types.ts'
-import type { TeamTask } from './types.ts'
 
 export const name = 'tool-team'
 
-export const inject = ['tools', 'sessionProjections', 'subagents', 'commands']
+export const inject = ['tools', 'subagents', 'commands']
 
-/** Plugin config: reserved for later milestones (M1 takes no settings). */
+/** Plugin config: reserved for later milestones (takes no settings). */
 export interface Config {}
 
 /** Schemastery configuration for the team plugin consumer. */
 export const Config: z<Config> = z.object({})
-
-/** One task as the model submits it (schema-checked; ids/content validated in execute). */
-interface TeamTaskInput {
-  id: string
-  content: string
-  status: 'pending' | 'in_progress' | 'completed'
-  owner?: string | undefined
-  blockedBy?: string[] | undefined
-}
-
-/** Wire payload schema of the `teamTasks` projection (whole list or pre-first-write null). */
-const teamTasksProjectionSchema = zod.union([
-  zod.array(zod.object({
-    id: zod.string(),
-    content: zod.string(),
-    status: zod.union([zod.literal('pending'), zod.literal('in_progress'), zod.literal('completed')]),
-    owner: zod.string().optional(),
-    blockedBy: zod.array(zod.string()).optional(),
-  })),
-  zod.null(),
-])
-
-/**
- * Validate the value constraints the ParameterSchemaSpec cannot express and
- * build the canonical {@link TeamTask}[]: non-empty unique ids, trimmed
- * non-empty unique content, and `blockedBy` entries that reference existing
- * ids. Exported for the unit suite.
- * @param raw - the model-submitted list, already schema-checked.
- * @returns the canonical list.
- * @throws when an id/content is empty, duplicated, or a dependency dangles.
- */
-export function toTeamTasks(raw: readonly TeamTaskInput[]): TeamTask[] {
-  const tasks: TeamTask[] = []
-  const ids = new Set<string>()
-  const contents = new Set<string>()
-  for (const task of raw) {
-    const id = task.id.trim()
-    if (id.length === 0) throw new Error('invalid team task: `id` must be a non-empty string')
-    if (ids.has(id)) throw new Error(`invalid team tasks: duplicate id ${JSON.stringify(id)}`)
-    ids.add(id)
-    const content = task.content.trim()
-    if (content.length === 0) throw new Error('invalid team task: `content` must be a non-empty string')
-    if (contents.has(content)) throw new Error(`invalid team tasks: duplicate content ${JSON.stringify(content)}`)
-    contents.add(content)
-    tasks.push({
-      id,
-      content,
-      status: task.status,
-      ...task.owner === undefined ? {} : { owner: task.owner },
-      ...task.blockedBy === undefined ? {} : { blockedBy: task.blockedBy },
-    })
-  }
-  for (const task of tasks) {
-    for (const dependency of task.blockedBy ?? []) {
-      if (!ids.has(dependency)) {
-        throw new Error(`invalid team tasks: task ${JSON.stringify(task.id)} depends on unknown id ${JSON.stringify(dependency)}`)
-      }
-    }
-  }
-  return tasks
-}
 
 /**
  * Build the relayed message envelope. The protocol-level sender of a relay is
@@ -145,16 +75,15 @@ export function parseTeamRoles(rawInput: string): TeamRole[] {
 /** The fixed team discipline every teammate prompt must carry. */
 export const TEAM_DISCIPLINE = [
   '- Respond in Chinese',
-  '- Before starting work, use team_task_read to check the shared task list; claim tasks whose owner is you and which are not blocked, and update status via team_task_write (whole-list replacement; read before writing; never modify the content text)',
-  '- Mark a task completed as soon as it is done',
   '- To hand a deliverable to another teammate, use team_send(to: <teammate label>, message: <self-contained content>) — the recipient sees only this message, not your transcript',
-  '- A blocked task waits until its blockedBy dependencies are resolved',
+  "- If your duty depends on another teammate's output, wait for their team_send message before starting your work",
+  '- When your duty is done, report your completion to the coordinator (via send_message). Do NOT decide on your own when your work is finished — the coordinator decides when the team is done and will notify you to stop. Keep cooperating with teammates as needed until the coordinator tells you to stop.',
 ].join('\n')
 
 /**
  * The standard teammate prompt: role identity, the fixed team discipline
- * (claim via team_task_read/team_task_write, hand off via team_send, respect
- * blockedBy), and the role's duty. Exported for the unit suite.
+ * (hand off via team_send, wait for dependencies), and the role's duty.
+ * Exported for the unit suite.
  * @param label - the teammate's roster label.
  * @param duty - the role's duty description.
  * @returns the complete teammate prompt.
@@ -165,179 +94,35 @@ export function rolePrompt(label: string, duty: string): string {
 
 /**
  * The `/team` spawn instruction handed to the coordinator model: the roster
- * with duties, the discipline template every teammate prompt must carry, the
- * initial task-list directive, and the coordinator's own role — so the model
- * spawns with full knowledge instead of discovering the team after the fact.
- * Exported for the unit suite.
+ * with duties, the discipline template every teammate prompt must carry, and
+ * the coordinator's own role — so the model spawns with full knowledge instead
+ * of discovering the team after the fact. Exported for the unit suite.
  * @param roles - the parsed roster.
  * @returns the complete instruction text.
  */
 export function teamInstruction(roles: readonly TeamRole[]): string {
-  const roster = roles.map((role, index) => `- ${role.label} (duty: ${role.duty}) → shared task t${index + 1}`).join('\n')
+  const roster = roles.map((role) => `- ${role.label} (duty: ${role.duty})`).join('\n')
   return [
     'Assemble the team and start the collaboration.',
     '',
     'Respond to the user in Chinese.',
     '',
-    'You are the team coordinator. Spawn the following teammates one by one with the subagent tool (background mode); their labels must match these names exactly:',
+    "You are the team coordinator. Spawn the following teammates one by one with the subagent tool (background mode). For each teammate, set the subagent tool's `description` parameter to EXACTLY the role name below — this becomes the teammate's display label, so do not wrap, prefix, or rephrase it:",
     roster,
     '',
     "Every teammate's prompt must include the following team discipline verbatim, followed by that teammate's duty:",
     TEAM_DISCIPLINE,
     '',
-    'Then create the shared task list with team_task_write: one task per teammate (ids t1, t2, ...; owner pre-assigned to the teammate; status pending; express ordering with blockedBy where duties depend on each other).',
-    '',
-    "Coordinator duties: watch the team task board, coordinate when dependencies resolve or a teammate stalls, and aggregate the final results for the user. Do not perform teammates' tasks yourself; teammates hand off directly via team_send.",
+    "Coordinator duties: watch for teammate messages, coordinate when a teammate stalls, and aggregate the final results for the user. Do not perform teammates' tasks yourself; teammates hand off directly via team_send. Communicate with teammates using send_message (not team_send — that is for teammates only). Wait for teammate notifications; do not poll list_agents repeatedly. Teammate messages arrive automatically — you do not need to send extra messages to wake idle teammates. You decide when the team's work is complete: watch teammates' messages, and when you judge all work is done, notify teammates to stop (via send_message), then aggregate the final results once.",
   ].join('\n')
 }
 
 /**
- * Register the two team tools on `ctx.tools` and the `teamTasks` unit on
- * `ctx.sessionProjections`.
- * @param ctx - registrant context carrying the tool and projection registries.
- * @param _config - reserved; M1 takes no settings.
+ * Register the `team_send` relay tool on `ctx.tools` and the `/team` command.
+ * @param ctx - registrant context carrying the tool and command registries.
+ * @param _config - reserved; takes no settings.
  */
 export function apply(ctx: Context, _config: Config): void {
-  ctx.sessionProjections.register({
-    key: 'teamTasks',
-    stateSchema: teamTasksProjectionSchema,
-    init: () => null,
-    apply: (state, event) => {
-      if (event.type === 'team/task-write') return event.data.tasks
-      return state
-    },
-    wire: {
-      viewSchema: teamTasksProjectionSchema,
-      view: (state) => state,
-    },
-    stateVersion: 1,
-  })
-
-  /** The session that owns the shared list: a child reads its parent's, the main agent its own. */
-  const listSession = (agent: Agent) => {
-    const parentId = agent.session.header.parentSession
-    if (parentId === undefined) return agent.session
-    return ctx.get('sessions')?.get(parentId)
-  }
-
-  ctx.tools.register(defineTool({
-    name: 'team_task_write',
-    description:
-      'Replace the team\'s shared task list with the COMPLETE list — whole-list replacement, no partial updates. '
-      + 'Each task carries a stable id, content, status, the owner label of the teammate that claimed it, and '
-      + 'blockedBy ids of tasks that must finish first. Claim a task by reading the current list first '
-      + '(team_task_read) and setting owner only on tasks without one; concurrent writers are last-write-wins, '
-      + 'so re-read before every write.',
-    parameters: {
-      tasks: {
-        type: 'array',
-        required: true,
-        description: 'The COMPLETE team task list, replacing any previous list.',
-        items: {
-          type: 'object',
-          additionalProperties: false,
-          properties: {
-            id: { type: 'string', required: true, description: 'Stable task identity; survives whole-list replacement.' },
-            content: { type: 'string', required: true, description: 'What the task is — a short imperative line.' },
-            status: { type: 'string', required: true, enum: ['pending', 'in_progress', 'completed'], description: 'pending | in_progress | completed.' },
-            owner: { type: 'string', description: 'The teammate label that claimed this task.' },
-            blockedBy: { type: 'array', items: { type: 'string' }, description: 'Ids of tasks that must complete before this one may start.' },
-          },
-        },
-      },
-    },
-    output: {
-      schema: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          count: { type: 'integer', required: true },
-          counts: {
-            type: 'object',
-            additionalProperties: false,
-            required: true,
-            properties: {
-              pending: { type: 'integer', required: true },
-              inProgress: { type: 'integer', required: true },
-              completed: { type: 'integer', required: true },
-            },
-          },
-        },
-      },
-      render: (_args, value) => [{
-        type: 'text',
-        text: `Updated team tasks: ${value.counts.pending} pending, ${value.counts.inProgress} in progress, ${value.counts.completed} completed.`,
-      }],
-    },
-    execute(args, exec) {
-      const tasks = toTeamTasks(args.tasks)
-      if (!exec.agent) throw new Error('team_task_write requires an owning agent session')
-      const session = listSession(exec.agent)
-      if (!session) throw new Error('team_task_write could not resolve the coordinator session')
-      session.append('team/task-write', { tasks })
-      const count = (status: TeamTask['status']) => tasks.filter((task) => task.status === status).length
-      return Promise.resolve({
-        count: tasks.length,
-        counts: { pending: count('pending'), inProgress: count('in_progress'), completed: count('completed') },
-      })
-    },
-    presentCall: () => ({ card: 'generic', title: 'Update team tasks', kind: 'other' }),
-  }))
-
-  ctx.tools.register(defineTool({
-    name: 'team_task_read',
-    description: 'Read the team\'s current shared task list. Read before claiming or writing — the list is whole-list replaced and concurrent writers are last-write-wins.',
-    parameters: {},
-    output: {
-      schema: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          tasks: {
-            type: 'array',
-            required: true,
-            items: {
-              type: 'object',
-              additionalProperties: false,
-              properties: {
-                id: { type: 'string', required: true },
-                content: { type: 'string', required: true },
-                status: { type: 'string', required: true, enum: ['pending', 'in_progress', 'completed'] },
-                owner: { type: 'string' },
-                blockedBy: { type: 'array', items: { type: 'string' } },
-              },
-            },
-          },
-        },
-      },
-      render: (_args, value) => [{
-        type: 'text',
-        text: value.tasks.length === 0
-          ? 'The team task list is empty.'
-          : value.tasks.map((task) => `[${task.status}] ${task.id}: ${task.content}${task.owner === undefined ? '' : ` (@${task.owner})`}`).join('\n'),
-      }],
-    },
-    execute(_args, exec) {
-      if (!exec.agent) throw new Error('team_task_read requires an owning agent session')
-      const session = listSession(exec.agent)
-      if (!session) throw new Error('team_task_read could not resolve the coordinator session')
-      let tasks: TeamTask[] = []
-      for (const event of session.snapshotEvents()) {
-        if (event.type === 'team/task-write') tasks = event.data.tasks
-      }
-      return Promise.resolve({
-        tasks: tasks.map((task) => ({
-          id: task.id,
-          content: task.content,
-          status: task.status,
-          ...task.owner === undefined ? {} : { owner: task.owner },
-          ...task.blockedBy === undefined ? {} : { blockedBy: task.blockedBy },
-        })),
-      })
-    },
-    presentCall: () => ({ card: 'generic', title: 'Read team tasks', kind: 'other' }),
-  }))
-
   ctx.tools.register(defineTool({
     name: 'team_send',
     description:
@@ -387,7 +172,7 @@ export function apply(ctx: Context, _config: Config): void {
 
   ctx.get('commands')?.register({
     name: 'team',
-    description: 'Spawn a teammate roster with the standard team discipline and an initial task list.',
+    description: 'Spawn a teammate roster with the standard team discipline.',
     input: { hint: 'role:duty, role:duty ...' },
     handler(invocation) {
       let roles: TeamRole[]
