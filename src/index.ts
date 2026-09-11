@@ -18,7 +18,7 @@ import { randomUUID } from 'node:crypto'
 import type { AgentSetup, ApprovalOutcome, CommandRuntime, Context, ModelSelectionRef, SessionEvent } from './dsh-adapter/types.ts'
 import { createUserMessage, installModelSelection, SessionId, z } from './dsh-adapter/services.ts'
 import './dsh-adapter/effects.ts'
-import { createFrameState, foldEvent } from './frames.ts'
+import { createFrameState, foldEvent, readableFailureMessage } from './frames.ts'
 import type { FoldDeps, FrameState } from './frames.ts'
 import { createInkRenderer } from './renderer.tsx'
 import type { Overlay, RenderView, SubagentRow, TuiRenderer } from './renderer.tsx'
@@ -165,7 +165,11 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
   // event on the global bus, so relay/settlement notice text can rename the
   // raw session id it embeds to match the roster.
   const childLabels = new Map<string, string>()
-  const deps: FoldDeps = { tools: ctx.get('tools') ?? { get: () => undefined }, childLabels }
+  // Child session id → the error detail of its last failed turn, so the child's
+  // settlement notice can show the concrete cause instead of just "failed".
+  // Cleared by any later non-error turn, so a child that recovered shows none.
+  const childErrors = new Map<string, { message: string; code: string }>()
+  const deps: FoldDeps = { tools: ctx.get('tools') ?? { get: () => undefined }, childLabels, childErrors }
   let state = createFrameState()
   // The status bar shows the effective sandbox mode: the policy service folds
   // the session's override onto the deployment default (config or env).
@@ -305,6 +309,18 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
     entry.state = foldEvent(entry.state, event, deps).state
     scheduleRender(event.type !== 'assistant/chunk')
   }
+  // Capture one direct child's terminal turn outcome: an error turn stores its
+  // structured failure so the child's settlement notice can surface the cause;
+  // any other turn end clears a stale entry so a recovered child shows none.
+  const trackChildError = (childId: string, event: SessionEvent): void => {
+    if (event.type !== 'turn/end') return
+    const reason = event.data.reason
+    if (reason.kind === 'error') {
+      childErrors.set(childId, { message: readableFailureMessage(reason.error.message), code: reason.error.code })
+    } else {
+      childErrors.delete(childId)
+    }
+  }
   // The footer's context ratio follows the latest step's token report.
   const trackUsage = (event: SessionEvent): void => {
     if (event.type !== 'assistant/message' || event.data.usage === undefined) return
@@ -330,8 +346,13 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
         if (typeof label === 'string' && label !== '') childLabels.set(session.header.id, label)
       }
       // Direct children feed the panel below the status bar; deeper
-      // descendants stay in their own sessions.
-      if (session.header.parentSession === agent.session.id) foldChildEvent(session.header.id, event)
+      // descendants stay in their own sessions. Error capture here runs for
+      // every direct-child turn end, so the later settlement notice can show
+      // the concrete cause.
+      if (session.header.parentSession === agent.session.id) {
+        trackChildError(session.header.id, event)
+        foldChildEvent(session.header.id, event)
+      }
       return
     }
     trackUsage(event)

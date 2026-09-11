@@ -11,6 +11,7 @@ import type { ContentBlock, MessageSource, SessionEvent, TodoItem, ToolCallView,
 import {
   contentToText,
   renderCommandLine,
+  renderErrorLine,
   renderInterruptedLine,
   renderNoticeLines,
   renderPlanLines,
@@ -66,11 +67,22 @@ export type Frame =
     summary: string
     /** The remaining message text; absent when the message carries only the account. */
     body?: string
+    /** Captured error detail of the settled child's last turn; present only when it failed. */
+    error?: { message: string; code: string }
   }
   | {
     /** The user-interruption marker appended at a user-cancelled turn end. */
     kind: 'interrupted'
     seq: number
+  }
+  | {
+    /** The main-agent turn-failure marker, appended when the turn ended in error. */
+    kind: 'error'
+    seq: number
+    /** The most readable message pulled from the provider failure body. */
+    message: string
+    /** The structured failure code. */
+    code: string
   }
 
 /** The fold's adopted display state: the stream plus the open/pending registries. */
@@ -101,6 +113,8 @@ export interface FoldDeps {
   tools: { get(name: string): ToolPresentation | undefined }
   /** Child session id → friendly label, used to rename raw session ids embedded in notice text. */
   childLabels: ReadonlyMap<string, string>
+  /** Child session id → error detail of its last failed turn, shown on its settlement notice. */
+  childErrors: ReadonlyMap<string, { message: string; code: string }>
 }
 
 /** The result of folding one event: the adopted state plus the lines it renders. */
@@ -143,6 +157,50 @@ function thinkingSeconds(thinking: { startedAt: number }, endTime: number): numb
 }
 
 /**
+ * Best-effort extraction of one human-readable message from a provider
+ * failure body. Envelopes vary by backend: plain JSON with a nested
+ * `message` (most providers), or an SSE error frame wrapping JSON (some
+ * gateways). This pulls the innermost readable `message` it can find and
+ * otherwise falls back to the raw text, so an unrecognized format still
+ * surfaces verbatim instead of being dropped.
+ * @param raw - the failure message exactly as the provider returned it.
+ * @returns the most readable message found, or `raw` when nothing parses.
+ */
+export function readableFailureMessage(raw: string): string {
+  // Recursively pull the first human-readable `message` out of a JSON value:
+  // a string is itself the message; an object recurses into `message`, then
+  // into a nested `error` envelope.
+  const pull = (value: unknown): string | undefined => {
+    if (typeof value === 'string') return value
+    if (typeof value !== 'object' || value === null) return undefined
+    const obj = value as Record<string, unknown>
+    if (typeof obj.message === 'string') return obj.message
+    if (obj.error !== undefined) return pull(obj.error)
+    return undefined
+  }
+  // Layer 1: the whole body is JSON.
+  let candidate = raw
+  try {
+    const pulled = pull(JSON.parse(raw))
+    if (pulled !== undefined) candidate = pulled
+  } catch {
+    // Not JSON; keep the raw text for the later layers.
+  }
+  // Layer 2: the candidate may still be an SSE frame wrapping JSON.
+  const dataMatch = /data:(\{[\s\S]*\})/.exec(candidate)
+  if (dataMatch !== null) {
+    try {
+      const pulled = pull(JSON.parse(dataMatch[1]))
+      if (pulled !== undefined) return pulled
+    } catch {
+      // Malformed data payload; fall through to the raw candidate.
+    }
+  }
+  // Layer 3: fall back to the best we have.
+  return candidate
+}
+
+/**
  * The terminal-visible injection forms of a message source. The source union
  * is merge-extensible across packages (a subagent settlement notice arrives
  * under a kind this package never imports), so eligibility is read off the
@@ -167,6 +225,7 @@ function noticeFrame(
   source: MessageSource,
   content: readonly ContentBlock[],
   childLabels: ReadonlyMap<string, string>,
+  childErrors: ReadonlyMap<string, { message: string; code: string }>,
 ): Extract<Frame, { kind: 'notice' }> | undefined {
   const [head, ...rest] = content
   const headIsText = head !== undefined && head.type === 'text'
@@ -182,7 +241,23 @@ function noticeFrame(
   const rename = (text: string): string =>
     label === undefined || senderId === undefined ? text : text.split(senderId).join(label)
   const renamedBody = rename(body)
-  return { kind: 'notice', seq, summary: rename(summary), ...renamedBody === '' ? {} : { body: renamedBody } }
+  // Attach the captured error detail only to settlement notices (the `notice`
+  // form states a child failed); a relay is live teammate content and never
+  // carries a turn error.
+  const error = visibleNoticeForm(source) === 'notice' && senderId !== undefined
+    ? childErrors.get(senderId)
+    : undefined
+  return {
+    kind: 'notice',
+    seq,
+    summary: rename(summary),
+    // A failed child (error present) shows only the summary and the cause; the
+    // settlement notice's "Its closing message:" body is redundant next to the
+    // error, so it is suppressed for display (the coordinator's own context is
+    // unaffected — this is a fold-only change).
+    ...error !== undefined || renamedBody === '' ? {} : { body: renamedBody },
+    ...error === undefined ? {} : { error },
+  }
 }
 
 /** Join the reasoning blocks of a content sequence; other blocks are dropped. */
@@ -225,7 +300,7 @@ export function foldEvent(state: FrameState, event: SessionEvent, deps: FoldDeps
       // Notice- and relay-form injections are terminal-visible: a background
       // subagent settling, a job finishing, another agent's report.
       if (visibleNoticeForm(source) !== undefined) {
-        const notice = noticeFrame(event.seq, source, content, deps.childLabels)
+        const notice = noticeFrame(event.seq, source, content, deps.childLabels, deps.childErrors)
         return notice === undefined
           ? { state, lines: [] }
           : {
@@ -440,18 +515,26 @@ export function foldEvent(state: FrameState, event: SessionEvent, deps: FoldDeps
     }
     case 'turn/end': {
       const closed = closeOpenAssistant(state, event.time)
+      const reason = event.data.reason
       // Only a user-initiated cancel leaves a visible marker; disposal and
       // parent cancels happen while the surface is already tearing down.
-      const byUser = event.data.reason.kind === 'aborted'
-        && event.data.reason.reason.kind === 'user'
+      const byUser = reason.kind === 'aborted' && reason.reason.kind === 'user'
+      // A failed main-agent turn surfaces the concrete cause instead of
+      // stopping the stream silently.
+      const errorFrame = reason.kind === 'error'
+        ? { kind: 'error' as const, seq: event.seq, message: readableFailureMessage(reason.error.message), code: reason.error.code }
+        : undefined
       return {
         state: {
           ...state,
           ...closed,
           activeStep: undefined,
           ...byUser ? { frames: [...closed.frames, { kind: 'interrupted' as const, seq: event.seq }] } : {},
+          ...errorFrame !== undefined ? { frames: [...closed.frames, errorFrame] } : {},
         },
-        lines: byUser ? [renderInterruptedLine()] : [],
+        lines: byUser
+          ? [renderInterruptedLine()]
+          : errorFrame !== undefined ? [renderErrorLine(errorFrame)] : [],
       }
     }
     default:

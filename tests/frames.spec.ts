@@ -6,7 +6,7 @@ import { ToolCallId } from '@deepseek-ai/dsh-llm/brand'
 import { createAssistantMessage, createToolResultMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { MessageSource } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent, SessionEventType } from '@deepseek-ai/dsh-session'
-import { createFrameState, foldEvent } from '../src/frames.ts'
+import { createFrameState, foldEvent, readableFailureMessage } from '../src/frames.ts'
 import type { FoldDeps, Frame, ToolPresentation } from '../src/frames.ts'
 
 let nextSeq = 0
@@ -16,8 +16,12 @@ function ev<T extends SessionEventType>(type: T, data: SessionEvent<T>['data']):
   return { type, seq: nextSeq, time: 0, data } as SessionEvent<T>
 }
 
-function deps(tools: Record<string, ToolPresentation> = {}, childLabels: ReadonlyMap<string, string> = new Map()): FoldDeps {
-  return { tools: { get: name => tools[name] }, childLabels }
+function deps(
+  tools: Record<string, ToolPresentation> = {},
+  childLabels: ReadonlyMap<string, string> = new Map(),
+  childErrors: ReadonlyMap<string, { message: string; code: string }> = new Map(),
+): FoldDeps {
+  return { tools: { get: name => tools[name] }, childLabels, childErrors }
 }
 
 function assistant(text: string): SessionEvent<'assistant/message'> {
@@ -210,6 +214,95 @@ describe('fold: notices', () => {
       deps(),
     )
     expect(folded.state.frames[0]).toMatchObject({ kind: 'notice', summary: 'Background subagent child-1 finished.' })
+  })
+
+  it('attaches the captured error detail to a failed child settlement notice', () => {
+    const source = {
+      kind: 'subagent-settled',
+      form: 'notice',
+      summary: 'Background subagent child-1 failed before it finished.',
+      senderSessionId: 'child-1',
+    } as unknown as MessageSource
+    const folded = foldEvent(
+      createFrameState(),
+      ev('user/message', createUserMessage({
+        content: [{ type: 'text', text: 'Background subagent child-1 failed before it finished.' }],
+        source,
+      })),
+      deps({}, new Map(), new Map([['child-1', { message: 'Connection reset by peer', code: 'NETWORK_ERROR' }]])),
+    )
+    expect(folded.state.frames).toEqual([{
+      kind: 'notice',
+      seq: 1,
+      summary: 'Background subagent child-1 failed before it finished.',
+      error: { message: 'Connection reset by peer', code: 'NETWORK_ERROR' },
+    }])
+    expect(folded.lines).toContain('  Error: Connection reset by peer (code: NETWORK_ERROR)\n')
+  })
+
+  it('suppresses the closing-message body when the child failed', () => {
+    const source = {
+      kind: 'subagent-settled',
+      form: 'notice',
+      summary: 'Background subagent child-1 failed before it finished.',
+      senderSessionId: 'child-1',
+    } as unknown as MessageSource
+    const folded = foldEvent(
+      createFrameState(),
+      ev('user/message', createUserMessage({
+        content: [
+          { type: 'text', text: 'Background subagent child-1 failed before it finished.' },
+          { type: 'text', text: 'Its closing message:' },
+          { type: 'text', text: 'partial work before the failure' },
+        ],
+        source,
+      })),
+      deps({}, new Map(), new Map([['child-1', { message: 'Rate limit exceeded', code: 'QUOTA' }]])),
+    )
+    // The failed notice shows only the summary and the cause, not the body.
+    expect(folded.state.frames).toEqual([{
+      kind: 'notice',
+      seq: 1,
+      summary: 'Background subagent child-1 failed before it finished.',
+      error: { message: 'Rate limit exceeded', code: 'QUOTA' },
+    }])
+    expect(folded.lines).not.toContain('  partial work before the failure\n')
+  })
+
+  it('leaves the notice without an error when the child recovered or never failed', () => {
+    const source = {
+      kind: 'subagent-settled',
+      form: 'notice',
+      summary: 'Background subagent child-1 finished.',
+      senderSessionId: 'child-1',
+    } as unknown as MessageSource
+    const folded = foldEvent(
+      createFrameState(),
+      ev('user/message', createUserMessage({
+        content: [{ type: 'text', text: 'Background subagent child-1 finished.' }],
+        source,
+      })),
+      // No childErrors entry: the child's last turn did not fail.
+      deps(),
+    )
+    expect(folded.state.frames[0]).not.toHaveProperty('error')
+  })
+
+  it('does not attach an error to a relay even if the sender id matches', () => {
+    const source = {
+      kind: 'subagent-report',
+      form: 'relay',
+      senderSessionId: 'child-1',
+    } as unknown as MessageSource
+    const folded = foldEvent(
+      createFrameState(),
+      ev('user/message', createUserMessage({
+        content: [{ type: 'text', text: 'handoff content' }],
+        source,
+      })),
+      deps({}, new Map(), new Map([['child-1', { message: 'boom', code: 'X' }]])),
+    )
+    expect(folded.state.frames[0]).not.toHaveProperty('error')
   })
 
   it('keeps the full text as body when the first content block is not text', () => {
@@ -613,5 +706,50 @@ describe('fold: replay determinism', () => {
       ev('turn/end', { turn: 1, reason: { kind: 'completed' } }),
     ]
     expect(replay(events)).toEqual(replay(events))
+  })
+})
+
+describe('readableFailureMessage', () => {
+  it('extracts the message from a standard nested JSON envelope', () => {
+    expect(readableFailureMessage('{"error":{"type":"overloaded_error","message":"Overloaded"}}'))
+      .toBe('Overloaded')
+    expect(readableFailureMessage('{"message":"rate limited","code":429}'))
+      .toBe('rate limited')
+  })
+
+  it('extracts the inner message from an SSE frame wrapping JSON', () => {
+    const raw = '{"error":{"message":"event:error\\ndata:{\\"id\\":\\"r-1\\",\\"code\\":\\"rate_limit\\",\\"message\\":\\"Rate limit exceeded\\"}\\n\\n","type":"invalid_request_error"},"type":"error"}'
+    expect(readableFailureMessage(raw)).toBe('Rate limit exceeded')
+  })
+
+  it('falls back to the raw text for plain-text and unparseable bodies', () => {
+    expect(readableFailureMessage('Connection reset by peer')).toBe('Connection reset by peer')
+    expect(readableFailureMessage('{"truncated":')).toBe('{"truncated":')
+  })
+})
+
+describe('fold: main-agent turn failure', () => {
+  it('appends a readable error frame when the turn ends in error', () => {
+    const folded = foldEvent(
+      createFrameState(),
+      ev('turn/end', {
+        turn: 1,
+        reason: { kind: 'error', error: { message: '{"error":{"message":"Overloaded"}}', code: 'OVERLOADED' } },
+      }),
+      deps(),
+    )
+    expect(folded.state.frames).toEqual([{ kind: 'error', seq: 1, message: 'Overloaded', code: 'OVERLOADED' }])
+    expect(folded.lines).toEqual(['[error] Error: Overloaded (code: OVERLOADED)\n'])
+  })
+
+  it('appends no error frame for a completed or user-cancelled turn', () => {
+    const completed = foldEvent(createFrameState(), ev('turn/end', { turn: 1, reason: { kind: 'completed' } }), deps())
+    expect(completed.state.frames).toEqual([])
+    const interrupted = foldEvent(
+      createFrameState(),
+      ev('turn/end', { turn: 1, reason: { kind: 'aborted', reason: { kind: 'user' } } }),
+      deps(),
+    )
+    expect(interrupted.state.frames.map(frame => frame.kind)).toEqual(['interrupted'])
   })
 })

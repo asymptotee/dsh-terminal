@@ -441,6 +441,7 @@ function frameMutable(frame: Frame): boolean {
     case 'user':
     case 'notice':
     case 'interrupted':
+    case 'error':
       return false
     case 'assistant':
       return frame.streaming
@@ -457,6 +458,7 @@ function frameKey(frame: Frame): string {
     case 'assistant':
     case 'notice':
     case 'interrupted':
+    case 'error':
       return `${frame.kind}:${frame.seq}`
     case 'tool':
       return `${frame.kind}:${frame.callId}`
@@ -474,6 +476,13 @@ function FrameRow({ frame, expandedOutput }: { frame: Frame; expandedOutput: boo
         <Box flexDirection="column">
           <Text><Text color="green">●</Text> {frame.summary}</Text>
           {frame.body === undefined ? null : <IndentedBlock text={trimNewline(frame.body)} expanded={expandedOutput} />}
+          {frame.error === undefined ? null : (
+            <Text>
+              <Text dimColor>  ⎿  </Text>
+              <Text color="red">Error: {frame.error.message}</Text>
+              <Text dimColor> (code: {frame.error.code})</Text>
+            </Text>
+          )}
         </Box>
       )
     case 'assistant': {
@@ -509,6 +518,12 @@ function FrameRow({ frame, expandedOutput }: { frame: Frame; expandedOutput: boo
       return <CommandRow frame={frame} />
     case 'interrupted':
       return <Text><Text color="red">● Interrupted</Text> · What should dsh do instead?</Text>
+    case 'error':
+      return (
+        <Text>
+          <Text color="red">● Error: {frame.message}</Text> <Text dimColor>(code: {frame.code})</Text>
+        </Text>
+      )
   }
 }
 
@@ -575,10 +590,11 @@ function PlanPanel({ todos }: { todos: FrameState['plan'] & object }): React.JSX
             : <Text dimColor>◻</Text>
         // The first line carries the `⎿` connector; continuations align under
         // its text (`⎿` is one cell wide, so `  ⎿  ` is five display columns).
-        // Dim covers only the content text: dim inherits into nested Text, so
-        // a dim row wrapper would also mute the colored status markers.
+        // The connector is dim like every other connector in the project; dim
+        // is scoped to its own Text so it does not mute the colored status
+        // markers, and the content text takes its own dim wrapper.
         const prefix = index === 0 ? '  ⎿  ' : '     '
-        return <Text key={index}>{prefix}{mark} <Text dimColor>{todo.content}</Text></Text>
+        return <Text key={index}><Text dimColor>{prefix}</Text>{mark} <Text dimColor>{todo.content}</Text></Text>
       })}
     </Box>
   )
@@ -702,33 +718,28 @@ const TRUNCATED_OUTPUT_LINES = 6
 function IndentedBlock({ text, expanded, error }: { text: string; expanded: boolean; error?: boolean }): React.JSX.Element {
   const lines = text.split('\n')
   const hidden = lines.length - TRUNCATED_OUTPUT_LINES
+  // The `⎿` connector is always dim across the whole project, whether or not
+  // the result is an error; only the content text takes the error color.
+  const row = (line: string, index: number): React.JSX.Element => (
+    <Text key={index}>
+      <Text dimColor>{index === 0 ? '  ⎿  ' : '     '}</Text>
+      {error ? <Text color="red">{line}</Text> : <Text dimColor>{line}</Text>}
+    </Text>
+  )
   if (!expanded && hidden > 0) {
     const visible = lines.slice(0, TRUNCATED_OUTPUT_LINES)
     return (
       <Box flexDirection="column">
-        {visible.map((line, index) => error
-          ? <Text key={index} color="red">{connector(index, line)}</Text>
-          : <Text key={index} dimColor>{connector(index, line)}</Text>)}
+        {visible.map(row)}
         <Text dimColor>     … {hidden} more lines (ctrl+o to expand)</Text>
       </Box>
     )
   }
   return (
     <Box flexDirection="column">
-      {lines.map((line, index) => error
-        ? <Text key={index} color="red">{connector(index, line)}</Text>
-        : <Text key={index} dimColor>{connector(index, line)}</Text>)}
+      {lines.map(row)}
     </Box>
   )
-}
-
-/**
- * The first output line carries the `⎿` connector; continuation lines align
- * under its text. `⎿` renders one cell wide, so `  ⎿  ` is five display
- * columns and continuations take five spaces.
- */
-function connector(index: number, line: string): string {
-  return index === 0 ? `  ⎿  ${line}` : `     ${line}`
 }
 
 /** Split a line into styled runs: bold `**` spans and pale-blue `` `code` `` spans, Claude Code-style. */

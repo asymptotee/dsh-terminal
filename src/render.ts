@@ -136,6 +136,15 @@ export function renderInterruptedLine(): string {
 }
 
 /**
+ * The main-agent turn-failure marker as one plain-text line.
+ * @param frame - the error frame carrying the readable message and code.
+ * @returns the newline-terminated error line.
+ */
+export function renderErrorLine(frame: Extract<Frame, { kind: 'error' }>): string {
+  return `[error] Error: ${frame.message} (code: ${frame.code})\n`
+}
+
+/**
  * One slash-command invocation as a terminal line.
  * @param frame - the pending command frame.
  * @returns the newline-terminated command line.
@@ -154,6 +163,7 @@ export function renderNoticeLines(frame: Extract<Frame, { kind: 'notice' }>): re
   return [
     `[notice] ${frame.summary}\n`,
     ...(frame.body === undefined ? [] : splitLines(frame.body).map(line => `  ${line}\n`)),
+    ...(frame.error === undefined ? [] : [`  Error: ${frame.error.message} (code: ${frame.error.code})\n`]),
   ]
 }
 
