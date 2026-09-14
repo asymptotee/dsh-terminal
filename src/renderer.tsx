@@ -368,7 +368,7 @@ function StatusBar({
         <Box flexGrow={1} />
         <Box paddingRight={1}>
           <Text dimColor>
-            {status.effort !== undefined ? `◈ ${status.effort} · ` : ''}/effort
+            {status.effort !== undefined ? `● effort: ${status.effort}` : ''}
           </Text>
         </Box>
       </Box>

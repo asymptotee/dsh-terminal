@@ -587,9 +587,9 @@ describe('TuiApp rendering', () => {
     expect(frame).toContain('~/repo')
     // The mode sits on its own row below the model line.
     expect(frame.indexOf('read-only')).toBeGreaterThan(frame.indexOf('~/repo'))
-    // The effort hint sits right-aligned on the model line.
-    expect(frame).toContain('◈ max · /effort')
-    expect(frame.indexOf('◈ max')).toBeGreaterThan(frame.indexOf('context'))
+    // The effort badge sits right-aligned on the model line.
+    expect(frame).toContain('● effort: max')
+    expect(frame.indexOf('● effort: max')).toBeGreaterThan(frame.indexOf('~/repo'))
   })
 
   it('renders the welcome block with title, model, and cwd', () => {
