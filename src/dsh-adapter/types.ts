@@ -7,11 +7,11 @@
  */
 
 export type { Context } from '@deepseek-ai/cordis'
-export type { ContentBlock, MessageSource } from '@deepseek-ai/dsh-llm'
+export type { ContentBlock, MessageSource, StreamChunk } from '@deepseek-ai/dsh-llm'
 export type { SessionEvent } from '@deepseek-ai/dsh-session'
 export type { TodoItem } from '@deepseek-ai/dsh-tool-todo'
 export type { ToolCallView, ToolResult, ToolResultView } from '@deepseek-ai/dsh-tools'
-export type { Agent, AgentSetup, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
+export type { Agent, AgentSetup, AssistantStreamFrame, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 export type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval'
 export type { SubagentListEntry } from '@deepseek-ai/dsh-subagent'
 export type { default as CommandRuntime } from '@deepseek-ai/dsh-commands'

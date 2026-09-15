@@ -8,7 +8,7 @@
  */
 
 /** The harness package version line all @deepseek-ai/dsh-* dependencies pin to. */
-export const DSH_VERSION_LINE = '0.1.2-rc.1'
+export const DSH_VERSION_LINE = '0.1.5-rc.2'
 
 /** One blessed upstream package and its pinned version. */
 export interface BlessedPackage {

@@ -15,10 +15,10 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import type { AgentSetup, ApprovalOutcome, CommandRuntime, Context, ModelSelectionRef, SessionEvent } from './dsh-adapter/types.ts'
+import type { AgentSetup, ApprovalOutcome, AssistantStreamFrame, CommandRuntime, Context, ModelSelectionRef, SessionEvent } from './dsh-adapter/types.ts'
 import { createUserMessage, installModelSelection, SessionId, z } from './dsh-adapter/services.ts'
 import './dsh-adapter/effects.ts'
-import { createFrameState, foldEvent, readableFailureMessage } from './frames.ts'
+import { createFrameState, foldAssistantStreamChunk, foldEvent, readableFailureMessage } from './frames.ts'
 import type { FoldDeps, FrameState } from './frames.ts'
 import { createInkRenderer } from './renderer.tsx'
 import type { Overlay, RenderView, SubagentRow, TuiRenderer } from './renderer.tsx'
@@ -307,7 +307,9 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
       entry.inputTokens += event.data.usage.inputTokens + (event.data.usage.cacheReadTokens ?? 0)
     }
     entry.state = foldEvent(entry.state, event, deps).state
-    scheduleRender(event.type !== 'assistant/chunk')
+    // Streaming rides the assistant-stream bus, not durable child events, so
+    // every child session event here is low-frequency and renders immediately.
+    scheduleRender(true)
   }
   // Capture one direct child's terminal turn outcome: an error turn stores its
   // structured failure so the child's settlement notice can surface the cause;
@@ -356,7 +358,40 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
       return
     }
     trackUsage(event)
-    adopt(foldEvent(state, event, deps).state, event.type !== 'assistant/chunk')
+    // Streaming no longer rides durable session events (the harness publishes it
+    // on the agent-scoped assistant-stream bus instead), so every remaining
+    // session event is low-frequency and renders immediately.
+    adopt(foldEvent(state, event, deps).state, true)
+  })
+  // Live assistant streaming arrives on the agent-scoped `agent/assistant-stream`
+  // event as transient start/chunk/end frames. Chunk frames carry only the
+  // attemptId, so the opening frame's turn/step are remembered per attempt and a
+  // synthetic, never-colliding seq stands in for the durable session seq live
+  // frames lack. The main agent folds into the primary stream; a direct child
+  // folds into its panel entry when one already exists.
+  const liveAttempts = new Map<string, { turn: number; step: number; seq: number }>()
+  let liveSeq = 0
+  ctx.on('agent/assistant-stream', ({ agent: subject, frame }: { agent: typeof agent; frame: AssistantStreamFrame }) => {
+    if (frame.type === 'start') {
+      liveSeq -= 1
+      liveAttempts.set(frame.attemptId, { turn: frame.turn, step: frame.step, seq: liveSeq })
+      return
+    }
+    if (frame.type === 'end') {
+      liveAttempts.delete(frame.attemptId)
+      return
+    }
+    const attempt = liveAttempts.get(frame.attemptId)
+    if (attempt === undefined) return
+    if (subject === agent) {
+      adopt(foldAssistantStreamChunk(state, attempt.turn, attempt.step, frame.chunk, frame.time, attempt.seq).state, false)
+      return
+    }
+    if (subject.session.header.parentSession !== agent.session.id) return
+    const entry = children.get(subject.session.header.id)
+    if (entry === undefined) return
+    entry.state = foldAssistantStreamChunk(entry.state, attempt.turn, attempt.step, frame.chunk, frame.time, attempt.seq).state
+    scheduleRender(false)
   })
   // The panel ticks once a second: elapsed rows refresh, a child whose agent
   // left the registry (its run settled) fades out after its delay, and the

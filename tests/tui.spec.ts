@@ -2,8 +2,8 @@
 
 import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import AgentRegistry, { Inbox } from '@deepseek-ai/dsh-agent'
-import type { Agent, AgentHandle, CreateAgentOptions, ResumeAgentOptions } from '@deepseek-ai/dsh-agent'
+import AgentRegistry from '@deepseek-ai/dsh-agent'
+import type { Agent, AgentHandle, CreateAgentOptions, Inbox, ResumeAgentOptions } from '@deepseek-ai/dsh-agent'
 import AgentDefaultModelConfig from '@deepseek-ai/dsh-agent-default-model'
 import { CommandId } from '@deepseek-ai/dsh-commands'
 import { ToolCallId } from '@deepseek-ai/dsh-llm/brand'
@@ -52,6 +52,7 @@ function appendTurn(
       content: [{ type: 'text', text }],
       source: { provider: 'test-provider', model: 'test-model' },
     }),
+    stream: [],
   }, { surfaceOp: 'append' })
   session.append('step/end', { turn, step: 1 })
   session.append('turn/end', { turn, reason: { kind: 'completed' } })
@@ -95,7 +96,9 @@ async function bench(script: Script): Promise<BenchHandle> {
       id: session.id,
       options: agentOptions ?? {},
       session,
-      inbox: new Inbox(session, { inserted: () => {}, discarded: () => {}, claimed: () => {} }),
+      // Inbox is an interface in the new harness; the scripted agent only needs
+      // a no-op append (the driver never reads the pending lists).
+      inbox: { nextTurn: [], nextStep: [], append: () => {} } as unknown as Inbox,
       status: 'idle',
       ctx: agentCtx,
       cancel: () => {},
@@ -109,7 +112,7 @@ async function bench(script: Script): Promise<BenchHandle> {
       inject: () => {},
       whenIdle: () => idle,
     } satisfies Partial<Agent>)
-    await setup?.(agentCtx)
+    await setup?.(agentCtx, agent)
     script.seed?.(session)
     ctx.agents.register(agent)
     agentRef = agent
@@ -188,14 +191,16 @@ describe('tui driver', () => {
     await test.ctx.fiber.dispose()
   })
 
-  it('streams assistant chunks into one open frame and commits it', async () => {
+  it('commits an assistant message into a closed frame', async () => {
+    // Live streaming now rides the agent-scoped assistant-stream bus (transient
+    // frames), which this scripted harness does not emit; the durable settlement
+    // path is what the integration covers, and the live fold is unit-tested in
+    // frames.spec.ts via foldAssistantStreamChunk.
     const test = await bench({
       afterPrompt(_ctx, session, message, turn) {
         session.append('turn/start', { turn })
         session.append('step/start', { turn, step: 1 })
         session.append('user/message', message, { surfaceOp: 'append' })
-        session.append('assistant/chunk', { turn, step: 1, chunk: { type: 'text-delta', index: 0, text: 'Hel' } })
-        session.append('assistant/chunk', { turn, step: 1, chunk: { type: 'text-delta', index: 0, text: 'lo' } })
         session.append('assistant/message', {
           turn,
           step: 1,
@@ -203,6 +208,7 @@ describe('tui driver', () => {
             content: [{ type: 'text', text: 'Hello' }],
             source: { provider: 'test-provider', model: 'test-model' },
           }),
+          stream: [],
         }, { surfaceOp: 'append' })
         session.append('step/end', { turn, step: 1 })
         session.append('turn/end', { turn, reason: { kind: 'completed' } })
@@ -210,7 +216,6 @@ describe('tui driver', () => {
     })
     test.handlers.onCommit('stream')
     await test.agent.whenIdle()
-    // Chunk renders fold into the throttled window; let it flush.
     await new Promise(resolve => setTimeout(resolve, 100))
     test.handlers.onExit()
     await test.exited
@@ -233,6 +238,7 @@ describe('tui driver', () => {
             content: [{ type: 'text', text: 'answer' }],
             source: { provider: 'test-provider', model: 'test-model' },
           }),
+          stream: [],
           usage: { inputTokens: 63_000, outputTokens: 500 },
         }, { surfaceOp: 'append' })
         session.append('step/end', { turn, step: 1 })
@@ -310,6 +316,7 @@ describe('tui driver', () => {
             content: [{ type: 'text', text: 'done' }],
             source: { provider: 'test-provider', model: 'test-model' },
           }),
+          stream: [],
         }, { surfaceOp: 'append' })
         session.append('step/end', { turn, step: 1 })
         session.append('turn/end', { turn, reason: { kind: 'completed' } })
@@ -582,6 +589,7 @@ describe('subagent panel', () => {
         content: [{ type: 'text', text: 'thinking' }],
         source: { provider: 'test-provider', model: 'test-model' },
       }),
+      stream: [],
       usage: { inputTokens: 100, outputTokens: 5, cacheReadTokens: 50 },
     }, { surfaceOp: 'append' })
     child.append('tool/call', { turn: 1, step: 1, callId: ToolCallId('cc-1'), name: 'grep', arguments: '{"pattern":"x"}' })

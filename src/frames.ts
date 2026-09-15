@@ -7,7 +7,7 @@
  * @module dsh-terminal/src/frames
  */
 
-import type { ContentBlock, MessageSource, SessionEvent, TodoItem, ToolCallView, ToolResult, ToolResultView } from './dsh-adapter/types.ts'
+import type { ContentBlock, MessageSource, SessionEvent, StreamChunk, TodoItem, ToolCallView, ToolResult, ToolResultView } from './dsh-adapter/types.ts'
 import {
   contentToText,
   renderCommandLine,
@@ -287,6 +287,72 @@ function closeOpenAssistant(state: FrameState, endTime: number): { frames: reado
 }
 
 /**
+ * Fold one live assistant stream chunk into the streaming frame. The harness
+ * now publishes live streaming through the agent-scoped `agent/assistant-stream`
+ * event (transient chunk frames) instead of durable `assistant/chunk` session
+ * events, so the driver routes each chunk here with the turn/step recovered
+ * from the attempt's opening frame and a synthetic seq (live frames carry no
+ * durable session seq). The settlement `assistant/message` later replaces the
+ * streamed text with the committed content, so a retry that accumulated stale
+ * text still finalizes correctly.
+ * @param state - the adopted frame state.
+ * @param turn - the durable turn owning the stream.
+ * @param step - the durable step owning the stream.
+ * @param chunk - the live stream chunk.
+ * @param time - the chunk's timestamp.
+ * @param seq - synthetic frame id, stable across one attempt's chunks.
+ * @returns the adopted next state and the lines the chunk renders.
+ */
+export function foldAssistantStreamChunk(
+  state: FrameState,
+  turn: number,
+  step: number,
+  chunk: StreamChunk,
+  time: number,
+  seq: number,
+): FoldResult {
+  if (chunk.type !== 'text-delta' && chunk.type !== 'reasoning-delta') return { state, lines: [] }
+  const delta = chunk.type === 'text-delta'
+  const index = state.openAssistant.get(stepKey(turn, step))
+  const existing = index === undefined ? undefined : state.frames[index]
+  if (index === undefined || existing === undefined || existing.kind !== 'assistant') {
+    const thinking = delta ? undefined : { text: chunk.text, startedAt: time, seconds: 0 }
+    const frame: Frame = {
+      kind: 'assistant',
+      seq,
+      turn,
+      step,
+      text: delta ? chunk.text : '',
+      streaming: true,
+      ...thinking === undefined ? {} : { thinking },
+    }
+    return {
+      state: {
+        ...state,
+        frames: [...state.frames, frame],
+        openAssistant: new Map(state.openAssistant).set(stepKey(turn, step), state.frames.length),
+      },
+      lines: delta ? [chunk.text] : [],
+    }
+  }
+  const updated: Frame = delta
+    ? { ...existing, text: existing.text + chunk.text }
+    : {
+      ...existing,
+      thinking: {
+        text: (existing.thinking?.text ?? '') + chunk.text,
+        startedAt: existing.thinking?.startedAt ?? time,
+        // Each reasoning delta refreshes the span so the live UI ticks.
+        seconds: thinkingSeconds({ startedAt: existing.thinking?.startedAt ?? time }, time),
+      },
+    }
+  return {
+    state: { ...state, frames: replaceAt(state.frames, index, updated) },
+    lines: delta ? [chunk.text] : [],
+  }
+}
+
+/**
  * Fold one durable session event into the display state.
  * @param state - the adopted frame state.
  * @param event - the durable event to fold.
@@ -315,48 +381,6 @@ export function foldEvent(state: FrameState, event: SessionEvent, deps: FoldDeps
       return {
         state: { ...state, frames: [...state.frames, { kind: 'user', seq: event.seq, text }] },
         lines: [renderUserLine(text)],
-      }
-    }
-    case 'assistant/chunk': {
-      const { turn, step, chunk } = event.data
-      if (chunk.type !== 'text-delta' && chunk.type !== 'reasoning-delta') return { state, lines: [] }
-      const delta = chunk.type === 'text-delta'
-      const index = state.openAssistant.get(stepKey(turn, step))
-      const existing = index === undefined ? undefined : state.frames[index]
-      if (index === undefined || existing === undefined || existing.kind !== 'assistant') {
-        const thinking = delta ? undefined : { text: chunk.text, startedAt: event.time, seconds: 0 }
-        const frame: Frame = {
-          kind: 'assistant',
-          seq: event.seq,
-          turn,
-          step,
-          text: delta ? chunk.text : '',
-          streaming: true,
-          ...thinking === undefined ? {} : { thinking },
-        }
-        return {
-          state: {
-            ...state,
-            frames: [...state.frames, frame],
-            openAssistant: new Map(state.openAssistant).set(stepKey(turn, step), state.frames.length),
-          },
-          lines: delta ? [chunk.text] : [],
-        }
-      }
-      const updated: Frame = delta
-        ? { ...existing, text: existing.text + chunk.text }
-        : {
-          ...existing,
-          thinking: {
-            text: (existing.thinking?.text ?? '') + chunk.text,
-            startedAt: existing.thinking?.startedAt ?? event.time,
-            // Each reasoning delta refreshes the span so the live UI ticks.
-            seconds: thinkingSeconds({ startedAt: existing.thinking?.startedAt ?? event.time }, event.time),
-          },
-        }
-      return {
-        state: { ...state, frames: replaceAt(state.frames, index, updated) },
-        lines: delta ? [chunk.text] : [],
       }
     }
     case 'assistant/message': {

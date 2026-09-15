@@ -6,8 +6,8 @@ import { ToolCallId } from '@deepseek-ai/dsh-llm/brand'
 import { createAssistantMessage, createToolResultMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { MessageSource } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent, SessionEventType } from '@deepseek-ai/dsh-session'
-import { createFrameState, foldEvent, readableFailureMessage } from '../src/frames.ts'
-import type { FoldDeps, Frame, ToolPresentation } from '../src/frames.ts'
+import { createFrameState, foldAssistantStreamChunk, foldEvent, readableFailureMessage } from '../src/frames.ts'
+import type { FoldDeps, FoldResult, Frame, FrameState, ToolPresentation } from '../src/frames.ts'
 
 let nextSeq = 0
 beforeEach(() => { nextSeq = 0 })
@@ -32,11 +32,23 @@ function assistant(text: string): SessionEvent<'assistant/message'> {
       content: [{ type: 'text', text }],
       source: { provider: 'test-provider', model: 'test-model' },
     }),
+    stream: [],
   })
 }
 
-function chunk(text: string): SessionEvent<'assistant/chunk'> {
-  return ev('assistant/chunk', { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text } })
+/**
+ * Fold one live assistant stream chunk. The harness publishes streaming on the
+ * agent-scoped assistant-stream bus (transient frames), not durable session
+ * events, so the suite drives it through the dedicated fold with a synthetic
+ * seq — mirroring how the driver routes each chunk frame.
+ */
+function streamChunk(state: FrameState, text: string, seq: number): FoldResult {
+  return foldAssistantStreamChunk(state, 1, 1, { type: 'text-delta', index: 0, text }, 0, seq)
+}
+
+/** Fold a live reasoning chunk the same way. */
+function streamReasoning(state: FrameState, text: string, seq: number, time: number): FoldResult {
+  return foldAssistantStreamChunk(state, 1, 1, { type: 'reasoning-delta', index: 0, text }, time, seq)
 }
 
 /** Fold a full event sequence from an empty state and collect the output. */
@@ -367,16 +379,30 @@ describe('fold: notices', () => {
 
 describe('fold: assistant streaming', () => {
   it('accumulates text deltas into one open frame and streams them verbatim', () => {
-    const { lines, state } = replay([chunk('Hel'), chunk('lo')])
+    let state = createFrameState()
+    const lines: string[] = []
+    for (const text of ['Hel', 'lo']) {
+      const folded = streamChunk(state, text, -1)
+      state = folded.state
+      lines.push(...folded.lines)
+    }
     expect(lines).toEqual(['Hel', 'lo'])
-    expect(state.frames).toEqual([{ kind: 'assistant', seq: 1, turn: 1, step: 1, text: 'Hello', streaming: true }])
+    expect(state.frames).toEqual([{ kind: 'assistant', seq: -1, turn: 1, step: 1, text: 'Hello', streaming: true }])
   })
 
   it('commits the stream: replaces text, closes the frame, and closes the line', () => {
-    const { lines, state } = replay([chunk('Hel'), chunk('lo'), assistant('Hello')])
+    let state = createFrameState()
+    const lines: string[] = []
+    for (const text of ['Hel', 'lo']) {
+      const folded = streamChunk(state, text, -1)
+      state = folded.state
+      lines.push(...folded.lines)
+    }
+    const committed = foldEvent(state, assistant('Hello'), deps())
+    lines.push(...committed.lines)
     expect(lines).toEqual(['Hel', 'lo', '\n'])
-    // The committed frame keeps the seq of the first chunk that opened it.
-    expect(state.frames).toEqual([{ kind: 'assistant', seq: 1, turn: 1, step: 1, text: 'Hello', streaming: false }])
+    // The committed frame keeps the synthetic seq of the live frame that opened it.
+    expect(committed.state.frames).toEqual([{ kind: 'assistant', seq: -1, turn: 1, step: 1, text: 'Hello', streaming: false }])
   })
 
   it('prints the committed text when no stream preceded it', () => {
@@ -386,18 +412,18 @@ describe('fold: assistant streaming', () => {
   })
 
   it('does not reprint or pad a committed text already ending in a newline', () => {
-    const { lines } = replay([chunk('x\n'), assistant('x\n')])
-    expect(lines).toEqual(['x\n'])
+    const streamed = streamChunk(createFrameState(), 'x\n', -1)
+    const committed = foldEvent(streamed.state, assistant('x\n'), deps())
+    expect([...streamed.lines, ...committed.lines]).toEqual(['x\n'])
   })
 
   it('folds reasoning deltas into the open frame thinking', () => {
-    const first = { type: 'assistant/chunk', seq: 1, time: 1000, data: { turn: 1, step: 1, chunk: { type: 'reasoning-delta', index: 0, text: 'think' } } } as SessionEvent<'assistant/chunk'>
-    const second = { type: 'assistant/chunk', seq: 2, time: 2000, data: { turn: 1, step: 1, chunk: { type: 'reasoning-delta', index: 0, text: 'ing' } } } as SessionEvent<'assistant/chunk'>
-    const { lines, state } = replay([first, second])
-    expect(lines).toEqual([])
-    expect(state.frames).toEqual([{
+    const first = streamReasoning(createFrameState(), 'think', -1, 1000)
+    const second = streamReasoning(first.state, 'ing', -1, 2000)
+    expect([...first.lines, ...second.lines]).toEqual([])
+    expect(second.state.frames).toEqual([{
       kind: 'assistant',
-      seq: 1,
+      seq: -1,
       turn: 1,
       step: 1,
       text: '',
@@ -408,17 +434,16 @@ describe('fold: assistant streaming', () => {
   })
 
   it('computes thinking seconds from event times at the commit point', () => {
-    const started = { type: 'assistant/chunk', seq: 1, time: 10_000, data: { turn: 1, step: 1, chunk: { type: 'reasoning-delta', index: 0, text: 'hmm' } } } as SessionEvent<'assistant/chunk'>
-    const committed = {
+    const started = streamReasoning(createFrameState(), 'hmm', -1, 10_000)
+    const committed = foldEvent(started.state, {
       type: 'assistant/message',
       seq: 2,
       time: 14_600,
-      data: { turn: 1, step: 1, message: createAssistantMessage({ content: [{ type: 'text', text: 'answer' }], source: { provider: 'p', model: 'm' } }) },
-    } as SessionEvent<'assistant/message'>
-    const { state } = replay([started, committed])
-    expect(state.frames).toEqual([{
+      data: { turn: 1, step: 1, stream: [], message: createAssistantMessage({ content: [{ type: 'text', text: 'answer' }], source: { provider: 'p', model: 'm' } }) },
+    } as unknown as SessionEvent<'assistant/message'>, deps())
+    expect(committed.state.frames).toEqual([{
       kind: 'assistant',
-      seq: 1,
+      seq: -1,
       turn: 1,
       step: 1,
       text: 'answer',
@@ -428,10 +453,9 @@ describe('fold: assistant streaming', () => {
   })
 
   it('computes thinking seconds when the turn ends mid-stream', () => {
-    const started = { type: 'assistant/chunk', seq: 1, time: 1000, data: { turn: 1, step: 1, chunk: { type: 'reasoning-delta', index: 0, text: 'hmm' } } } as SessionEvent<'assistant/chunk'>
-    const ended = { type: 'turn/end', seq: 2, time: 4500, data: { turn: 1, reason: { kind: 'completed' } } } as SessionEvent<'turn/end'>
-    const { state } = replay([started, ended])
-    expect(state.frames[0]).toMatchObject({ kind: 'assistant', streaming: false, thinking: { text: 'hmm', seconds: 4 } })
+    const started = streamReasoning(createFrameState(), 'hmm', -1, 1000)
+    const ended = foldEvent(started.state, { type: 'turn/end', seq: 2, time: 4500, data: { turn: 1, reason: { kind: 'completed' } } } as SessionEvent<'turn/end'>, deps())
+    expect(ended.state.frames[0]).toMatchObject({ kind: 'assistant', streaming: false, thinking: { text: 'hmm', seconds: 4 } })
   })
 
   it('extracts reasoning from a committed message with no stream', () => {
@@ -442,12 +466,13 @@ describe('fold: assistant streaming', () => {
       data: {
         turn: 1,
         step: 1,
+        stream: [],
         message: createAssistantMessage({
           content: [{ type: 'reasoning', text: 'why' }, { type: 'text', text: 'answer' }],
           source: { provider: 'p', model: 'm' },
         }),
       },
-    } as SessionEvent<'assistant/message'>
+    } as unknown as SessionEvent<'assistant/message'>
     const { state } = replay([committed])
     expect(state.frames[0]).toMatchObject({ kind: 'assistant', text: 'answer', streaming: false, thinking: { text: 'why', seconds: 0 } })
   })
@@ -678,9 +703,10 @@ describe('fold: commands', () => {
 
 describe('fold: turn boundaries', () => {
   it('closes streaming assistant frames on turn/end', () => {
-    const { state } = replay([chunk('partial'), ev('turn/end', { turn: 1, reason: { kind: 'completed' } })])
-    expect(state.frames).toEqual([{ kind: 'assistant', seq: 1, turn: 1, step: 1, text: 'partial', streaming: false }])
-    expect(state.openAssistant.size).toBe(0)
+    const streamed = streamChunk(createFrameState(), 'partial', -1)
+    const ended = foldEvent(streamed.state, ev('turn/end', { turn: 1, reason: { kind: 'completed' } }), deps())
+    expect(ended.state.frames).toEqual([{ kind: 'assistant', seq: -1, turn: 1, step: 1, text: 'partial', streaming: false }])
+    expect(ended.state.openAssistant.size).toBe(0)
   })
 
   it('ignores unknown event families', () => {
@@ -696,10 +722,10 @@ describe('fold: turn boundaries', () => {
 
 describe('fold: replay determinism', () => {
   it('folds the same event sequence into the same frames and lines', () => {
+    // Live stream chunks are transient (assistant-stream bus), so replay
+    // determinism covers the durable events only.
     const events = [
       ev('user/message', createUserMessage({ content: [{ type: 'text', text: 'hello' }], source: { kind: 'user' } })),
-      chunk('Hel'),
-      chunk('lo'),
       assistant('Hello'),
       ev('todo/write', { todos: [{ content: 'task', status: 'in_progress' }] }),
       ev('turn/start', { turn: 2 }),
