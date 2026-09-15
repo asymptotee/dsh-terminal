@@ -18,10 +18,6 @@
       "types": "./lib/startup.d.ts",
       "default": "./lib/startup.js"
     },
-    "./team": {
-      "types": "./lib/team/index.d.ts",
-      "default": "./lib/team/index.js"
-    },
     "./package.json": "./package.json"
   },
   "files": [
@@ -45,6 +41,8 @@
     "verify:contract": "tsx scripts/verify-contract.ts"
   },
   "dependencies": {
+    "@deepseek-ai/dsh-experimental-agent-team": "0.1.5-rc.2",
+    "@deepseek-ai/dsh-experimental-tool-agent-team": "0.1.5-rc.2",
     "commander": "^15.0.0",
     "ink": "^7.1.1",
     "react": "^19.2.0",

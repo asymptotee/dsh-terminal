@@ -19,10 +19,15 @@
     mode: !!js process.env.DSH_TOOLS_MODE
 
 - insert:
-    # Shared team task list (M1 of the star-topology Agent Teams design):
-    # team_task_write/team_task_read tools plus the teamTasks projection.
-    - id: tool-team
-      name: 'dsh-terminal/team'
+    # Official experimental Agent Teams: durable peer mailbox, shared task DAG,
+    # and roster (runtime) plus the model-facing tools. Replaces the prior
+    # custom star-topology team plugin; dsh-terminal now renders team state
+    # (members/tasks/messages) from the agentTeam projection instead of
+    # providing its own relay tools.
+    - id: agent-team
+      name: '@deepseek-ai/dsh-experimental-agent-team'
+    - id: tool-agent-team
+      name: '@deepseek-ai/dsh-experimental-tool-agent-team'
 
     # Bare package names: the dsh plugin mechanism installs this package into
     # the profile's node_modules, where the Loader resolves its exports.

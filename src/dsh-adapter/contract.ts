@@ -40,6 +40,7 @@ export const BLESSED_PACKAGES: readonly BlessedPackage[] = [
   { name: '@deepseek-ai/dsh-tool-todo', version: DSH_VERSION_LINE },
   { name: '@deepseek-ai/dsh-tools', version: DSH_VERSION_LINE },
   { name: '@deepseek-ai/dsh-user-approval', version: DSH_VERSION_LINE },
+  { name: '@deepseek-ai/dsh-experimental-agent-team', version: DSH_VERSION_LINE },
 ]
 
 /**
