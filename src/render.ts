@@ -174,7 +174,7 @@ export function renderNoticeLines(frame: Extract<Frame, { kind: 'notice' }>): re
  * @returns the newline-terminated plan lines.
  */
 export function renderPlanLines(todos: readonly TodoItem[]): readonly string[] {
-  const lines = ['● todolist进行中...\n']
+  const lines = ['● Todo list\n']
   todos.forEach((todo, index) => {
     const mark = todo.status === 'completed' ? '✔' : todo.status === 'in_progress' ? '◼' : '◻'
     const prefix = index === 0 ? '  ⎿  ' : '     '

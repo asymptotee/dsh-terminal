@@ -602,7 +602,7 @@ describe('fold: todo plan', () => {
     const turnStart = ev('turn/start', { turn: 2 })
     const { lines, state } = replay([write, turnStart])
     expect(lines).toEqual([
-      '● todolist进行中...\n',
+      '● Todo list\n',
       '  ⎿  ◻ pending task\n',
       '     ◼ active task\n',
       '     ✔ done task\n',

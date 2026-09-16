@@ -487,11 +487,11 @@ describe('TuiApp rendering', () => {
     expect(frame).toContain('  ⎿  ◼ task one')
     expect(frame).toContain('     ◻ task two')
     // The header carries the same green dot as the tool call lines.
-    expect(frame).toContain('● todolist进行中...')
+    expect(frame).toContain('● Todo list')
     // The panel is pinned directly above the input bar: below the stream's
     // welcome block, above the `❯` input marker.
-    expect(frame.indexOf('DeepSeek Harness — Terminal')).toBeLessThan(frame.indexOf('● todolist进行中...'))
-    expect(frame.indexOf('● todolist进行中...')).toBeLessThan(frame.indexOf('❯'))
+    expect(frame.indexOf('DeepSeek Harness — Terminal')).toBeLessThan(frame.indexOf('● Todo list'))
+    expect(frame.indexOf('● Todo list')).toBeLessThan(frame.indexOf('❯'))
   })
 
   it('renders the user-interruption marker after the interrupted turn', () => {
@@ -524,7 +524,7 @@ describe('TuiApp rendering', () => {
     }
     const { lastFrame } = renderApp(<TuiApp state={thinking} handlers={noopHandlers()} />)
     const frame = lastFrame() ?? ''
-    expect(frame.indexOf('● todolist进行中...')).toBeLessThan(frame.indexOf('✶ Running…'))
+    expect(frame.indexOf('● Todo list')).toBeLessThan(frame.indexOf('✶ Running…'))
     // A step covers the model call and its tool executions: the heartbeat
     // stays up — and keeps its single label — while a tool runs.
     const busy: FrameState = { ...thinking, pendingTools: new Map([['c1', 0]]) }

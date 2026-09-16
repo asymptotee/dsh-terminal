@@ -718,8 +718,8 @@ function CommandRow({ frame }: { frame: Extract<Frame, { kind: 'command' }> }): 
 /** The standing todo plan as a checklist panel above the stream. */
 function PlanPanel({ todos }: { todos: FrameState['plan'] & object }): React.JSX.Element {
   return (
-    <Box flexDirection="column">
-      <Text><Text color="#51cf66">●</Text> todolist进行中...</Text>
+    <Box flexDirection="column" marginBottom={1}>
+      <Text><Text color="#51cf66">●</Text> Todo list</Text>
       {todos.map((todo, index) => {
         const mark = todo.status === 'completed'
           ? <Text color="green">✔</Text>
