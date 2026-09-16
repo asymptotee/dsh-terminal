@@ -856,6 +856,120 @@ describe('subagent panel', () => {
     expect(lastFrame()).not.toContain('◯ main')
   })
 
+  it('renders the team panel with roster and task board', () => {
+    const { lastFrame } = renderApp(
+      <TuiApp
+        state={state([])}
+        handlers={noopHandlers()}
+        view={{
+          team: {
+            members: [
+              { name: 'lead', description: 'team lead', phase: 'active' },
+              { name: 'researcher', description: '调研包结构', phase: 'active' },
+            ],
+            tasks: [
+              { subject: 'investigate', status: 'in_progress', ownerName: 'researcher', blocked: false },
+              { subject: 'write report', status: 'pending', blocked: true },
+            ],
+          },
+        }}
+      />,
+    )
+    const frame = lastFrame() ?? ''
+    expect(frame).toContain('Teammates · 2')
+    // Members render by name (the description is dropped); unselected rows use ◯.
+    expect(frame).toContain('researcher')
+    expect(frame).toContain('◯')
+    expect(frame).not.toContain('调研包结构')
+    expect(frame).toContain('Tasks · 2')
+    expect(frame).toContain('investigate')
+    expect(frame).toContain('researcher · in_progress')
+    expect(frame).toContain('unowned · pending')
+  })
+
+  it('hides the team panel when there is no team', () => {
+    const { lastFrame } = renderApp(<TuiApp state={state([])} handlers={noopHandlers()} />)
+    expect(lastFrame()).not.toContain('Teammates ·')
+  })
+
+  it('shows navigation hints and marks the selected team member', () => {
+    const { lastFrame } = renderApp(
+      <TuiApp
+        state={state([])}
+        handlers={noopHandlers()}
+        view={{
+          team: {
+            members: [
+              { name: 'researcher', description: '调研', phase: 'active' },
+              { name: 'writer', description: '写文档', phase: 'active' },
+            ],
+            tasks: [],
+          },
+          teamSelected: 1,
+        }}
+      />,
+    )
+    const frame = lastFrame() ?? ''
+    // The hint only renders while the team panel holds focus.
+    expect(frame).toContain('↑↓ 选择')
+    expect(frame).toContain('researcher')
+    expect(frame).toContain('writer')
+  })
+
+  it('omits navigation hints when the team panel is not focused', () => {
+    const { lastFrame } = renderApp(
+      <TuiApp
+        state={state([])}
+        handlers={noopHandlers()}
+        view={{ team: { members: [{ name: 'researcher', description: '调研', phase: 'active' }], tasks: [] } }}
+      />,
+    )
+    expect(lastFrame() ?? '').not.toContain('↑↓ 选择')
+  })
+
+  it('hides the input caret while the team panel holds focus', () => {
+    const { lastFrame } = renderApp(
+      <TuiApp
+        state={state([])}
+        handlers={noopHandlers()}
+        view={{
+          team: { members: [{ name: 'researcher', description: '调研', phase: 'active' }], tasks: [] },
+          teamSelected: 0,
+        }}
+      />,
+    )
+    // The caret only renders while the input bar holds focus.
+    expect(lastFrame() ?? '').not.toContain('▏')
+  })
+
+  it('renders a member enriched with live runtime (activity, elapsed, tokens)', () => {
+    const { lastFrame } = renderApp(
+      <TuiApp
+        state={state([])}
+        handlers={noopHandlers()}
+        view={{
+          team: {
+            members: [{
+              name: 'researcher',
+              description: '调研包结构',
+              phase: 'active',
+              activity: 'grep(pattern)',
+              startedAt: Date.now() - 90_000,
+              inputTokens: 12_300,
+            }],
+            tasks: [],
+          },
+        }}
+      />,
+    )
+    const frame = lastFrame() ?? ''
+    expect(frame).toContain('Teammates · 1')
+    expect(frame).toContain('researcher')
+    expect(frame).toContain('grep(pattern)')
+    expect(frame).toContain('1m 30s')
+    expect(frame).toContain('↓ 12.3k tokens')
+  })
+
   it('marks the selected panel row', () => {
     const { lastFrame } = renderApp(<TuiApp state={state([])} handlers={noopHandlers()} view={panelView({ subagentSelected: 1 })} />)
     const frame = lastFrame() ?? ''

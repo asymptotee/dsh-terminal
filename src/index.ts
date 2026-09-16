@@ -21,7 +21,7 @@ import './dsh-adapter/effects.ts'
 import { createFrameState, foldAssistantStreamChunk, foldEvent, readableFailureMessage } from './frames.ts'
 import type { FoldDeps, FrameState } from './frames.ts'
 import { createInkRenderer } from './renderer.tsx'
-import type { Overlay, RenderView, SubagentRow, TuiRenderer } from './renderer.tsx'
+import type { Overlay, RenderView, SubagentRow, TeamPanelInfo, TeamTaskRow, TuiRenderer } from './renderer.tsx'
 
 // Re-exported so driver suites import the renderer contract without reaching
 // the ink view's .tsx module directly (the host aggregate compiles specs).
@@ -31,7 +31,7 @@ export type { InputHandlers, OpenSubagent, Overlay, RenderView, SubagentRow, Tui
 export const name = 'tui'
 
 /** Core services required before the interactive turn loop can start. */
-export const inject = ['agentDefaultModel', 'agents', 'sessions']
+export const inject = ['agentDefaultModel', 'agents', 'sessions', 'sessionProjections']
 
 /** Plugin config: the resume target resolved from the startup provider. */
 export interface Config {
@@ -158,6 +158,12 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
     })
   const agent = handle.agent
 
+  // The Agent Teams runtime owns the authoritative team state through the
+  // `agentTeam` session projection; the driver re-reads it whenever a team
+  // event crosses the session bus rather than re-folding the events itself, so
+  // the rendered roster and task board cannot drift from the runtime's state.
+  const sessionProjections = ctx.sessionProjections
+
   // Rebuild the display from the durable log before the live stream attaches:
   // a resumed session's seeded events are not re-broadcast, so the fold runs
   // over them once here and live events fold through the same path below.
@@ -224,6 +230,8 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
   // roster changes without threading them through the overlay/status setters.
   const children = new Map<string, ChildEntry>()
   let panelSelected: number | undefined
+  /** The selected team-member row in the team panel; undefined keeps focus elsewhere. */
+  let teamSelected: number | undefined
   let openChild: string | undefined
 
   /** The child's latest visible activity: the most recent tool card's title. */
@@ -232,19 +240,83 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
     return last !== undefined && last.kind === 'tool' ? last.call.title : undefined
   }
 
-  /** The panel rows in roster insertion order. */
+  /**
+   * The subagent panel rows in roster insertion order, excluding team members —
+   * a teammate is rendered (and navigated) in the team panel instead, so listing
+   * it here too would duplicate it across both panels.
+   */
   function rosterRows(): SubagentRow[] {
-    return [...children.entries()].map(([childId, entry]) => {
-      const activity = childActivity(entry.state)
-      return {
-        childId,
-        label: entry.label,
-        ...activity === undefined ? {} : { activity },
-        startedAt: entry.startedAt,
-        inputTokens: entry.inputTokens,
-        fading: entry.fading,
-      }
-    })
+    const teamMemberIds = new Set(teamBase?.members.map(member => member.id) ?? [])
+    return [...children.entries()]
+      .filter(([childId]) => !teamMemberIds.has(childId))
+      .map(([childId, entry]) => {
+        const activity = childActivity(entry.state)
+        return {
+          childId,
+          label: entry.label,
+          ...activity === undefined ? {} : { activity },
+          startedAt: entry.startedAt,
+          inputTokens: entry.inputTokens,
+          fading: entry.fading,
+        }
+      })
+  }
+
+  /**
+   * Refresh the team panel's projection-derived data. Members keep their session
+   * id so withPanel can enrich each with its live child runtime (activity,
+   * elapsed, tokens) at render time — those fields move on child events and the
+   * panel tick, not on team events, so enriching per render keeps them fresh.
+   * Cleared while no team exists, so the panel stays hidden until the first
+   * teammate is spawned.
+   */
+  let teamBase: { members: { id: string; name: string; description: string; phase: string }[]; tasks: TeamTaskRow[] } | undefined
+  function refreshTeam(): void {
+    const team = sessionProjections?.stateOf(agent.session, 'agentTeam')
+    if (team === undefined || team.members.length === 0) {
+      teamBase = undefined
+      return
+    }
+    teamBase = {
+      members: team.members.map(member => ({ id: member.id, name: member.name, description: member.description, phase: member.phase })),
+      tasks: team.tasks
+        .filter(task => task.status !== 'deleted')
+        .map(task => {
+          const ownerName = task.ownerId === undefined
+            ? undefined
+            : team.members.find(member => member.id === task.ownerId)?.name
+          return {
+            subject: task.subject,
+            status: task.status,
+            ...ownerName === undefined ? {} : { ownerName },
+            // A task stays blocked while any blocker is not yet completed.
+            blocked: task.blockedBy.some(blockerId => team.tasks.find(candidate => candidate.id === blockerId)?.status !== 'completed'),
+          }
+        }),
+    }
+  }
+
+  /** Enrich the projection members with their live child runtime for the panel. */
+  function teamPanel(): TeamPanelInfo | undefined {
+    if (teamBase === undefined) return undefined
+    return {
+      members: teamBase.members.map(member => {
+        // Show live runtime (activity, elapsed, tokens) only while the member's
+        // agent is still resident (working). Once it settles and is disposed,
+        // the row drops back to its roster identity so a finished teammate does
+        // not show a clock that keeps ticking.
+        const entry = agents?.get(SessionId(member.id)) === undefined ? undefined : children.get(member.id)
+        const activity = entry === undefined ? undefined : childActivity(entry.state)
+        return {
+          name: member.name,
+          description: member.description,
+          phase: member.phase,
+          ...activity === undefined ? {} : { activity },
+          ...entry === undefined ? {} : { startedAt: entry.startedAt, inputTokens: entry.inputTokens },
+        }
+      }),
+      tasks: teamBase.tasks,
+    }
   }
 
   /** The base view plus the panel slice computed from the live roster. */
@@ -254,6 +326,11 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
     if (rows.length > 0) {
       next.subagents = rows
       if (panelSelected !== undefined) next.subagentSelected = Math.min(panelSelected, rows.length)
+    }
+    const team = teamPanel()
+    if (team !== undefined) {
+      next.team = team
+      if (teamSelected !== undefined) next.teamSelected = Math.min(teamSelected, Math.max(0, team.members.length - 1))
     }
     if (openChild !== undefined) {
       const opened = children.get(openChild)
@@ -337,6 +414,9 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
     trackUsage(event)
     adopt(foldEvent(state, event, deps).state, true)
   }
+  // Seed the team panel from the durable log so a resumed session with an
+  // existing team shows its roster and task board immediately.
+  refreshTeam()
   ctx.on('session/event', (session, event: SessionEvent) => {
     if (session.header.id !== agent.session.id) {
       // Descriptors are seeded at session creation, not live-appended, so they
@@ -358,6 +438,9 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
       return
     }
     trackUsage(event)
+    // A team event moves the authoritative agentTeam projection, so re-read it
+    // before the render below to keep the team panel current.
+    if ((event.type as string).startsWith('team/')) refreshTeam()
     // Streaming no longer rides durable session events (the harness publishes it
     // on the agent-scoped assistant-stream bus instead), so every remaining
     // session event is low-frequency and renders immediately.
@@ -399,7 +482,11 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
   const panelTick = setInterval(() => {
     if (children.size === 0 && state.activeStep === undefined) return
     const now = Date.now()
+    const teamMemberIds = new Set(teamBase?.members.map(member => member.id) ?? [])
     for (const [childId, entry] of children) {
+      // Team members keep their transcript for the team panel's Enter-to-open,
+      // so they are never reaped; other children fade once their agent settles.
+      if (teamMemberIds.has(childId)) continue
       if (!entry.fading && entry.state.frames.length > 0 && agents.get(SessionId(childId)) === undefined) {
         entry.fading = true
         entry.fadeAt = now + SUBAGENT_FADE_MS
@@ -470,30 +557,66 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
       pendingApproval?.(allow ? 'allowed-once' : 'rejected')
     },
     onPanelOpen: () => {
-      if (exiting || children.size === 0) return
-      panelSelected = 0
+      if (exiting) return
+      // The team panel owns navigation while a team exists (its members are the
+      // interesting rows); otherwise the subagent panel takes over for any
+      // non-team children. Enter from either opens the selected transcript.
+      if (teamBase !== undefined && teamBase.members.length > 0) {
+        teamSelected = 0
+        panelSelected = undefined
+      } else if (rosterRows().length > 0) {
+        panelSelected = 0
+        teamSelected = undefined
+      } else {
+        return
+      }
       scheduleRender(true)
     },
     onPanelMove: (delta) => {
-      if (exiting || panelSelected === undefined) return
-      panelSelected = Math.min(children.size, Math.max(0, panelSelected + delta))
+      if (exiting) return
+      if (teamSelected !== undefined) {
+        // ↑ at the first teammate leaves the team panel back to the input bar
+        // (mirrors how ↓ entered it), so no separate Esc is needed to exit.
+        if (delta < 0 && teamSelected === 0) {
+          teamSelected = undefined
+          scheduleRender(true)
+          return
+        }
+        const count = teamBase?.members.length ?? 0
+        if (count === 0) return
+        teamSelected = Math.min(count - 1, Math.max(0, teamSelected + delta))
+        scheduleRender(true)
+        return
+      }
+      if (panelSelected === undefined) return
+      panelSelected = Math.min(rosterRows().length, Math.max(0, panelSelected + delta))
       scheduleRender(true)
     },
     onPanelEnter: () => {
-      if (exiting || panelSelected === undefined) return
+      if (exiting) return
+      if (teamSelected !== undefined) {
+        // Keep teamSelected while the transcript is open, so Esc back returns
+        // to the team panel with the same member still selected.
+        const member = teamBase?.members[teamSelected]
+        if (member !== undefined) openChild = member.id
+        scheduleRender(true)
+        return
+      }
+      if (panelSelected === undefined) return
       if (panelSelected === 0) {
         panelSelected = undefined
         scheduleRender(true)
         return
       }
-      const childId = [...children.keys()][panelSelected - 1]
+      const row = rosterRows()[panelSelected - 1]
       panelSelected = undefined
-      if (childId !== undefined) openChild = childId
+      if (row !== undefined) openChild = row.childId
       scheduleRender(true)
     },
     onPanelBack: () => {
       if (exiting) return
       if (openChild !== undefined) openChild = undefined
+      else if (teamSelected !== undefined) teamSelected = undefined
       else panelSelected = undefined
       scheduleRender(true)
     },

@@ -82,6 +82,37 @@ export interface OpenSubagent {
 }
 
 /** Everything the driver renders besides the frame state. */
+/** One Agent Teams member row for the team panel roster. */
+export interface TeamMemberRow {
+  name: string
+  description: string
+  /** The durable membership phase: provisioning, active, or failed. */
+  phase: string
+  /** The member's latest visible activity, enriched from its live child fold; absent when not running. */
+  activity?: string
+  /** When the member's run began; absent when it is not a live child. */
+  startedAt?: number
+  /** The member's reported input tokens; absent when it is not a live child. */
+  inputTokens?: number
+}
+
+/** One shared task row for the team panel task board. */
+export interface TeamTaskRow {
+  subject: string
+  /** The task status: pending, in_progress, or completed. */
+  status: string
+  /** The claiming member's name; absent when unowned. */
+  ownerName?: string
+  /** Whether an incomplete blocker keeps the task from being claimable. */
+  blocked: boolean
+}
+
+/** The team roster and task board, read from the authoritative agentTeam projection. */
+export interface TeamPanelInfo {
+  members: readonly TeamMemberRow[]
+  tasks: readonly TeamTaskRow[]
+}
+
 export interface RenderView {
   overlay?: Overlay
   status?: StatusInfo
@@ -91,6 +122,10 @@ export interface RenderView {
   subagentSelected?: number
   /** The child transcript opened from the panel; replaces the input region while set. */
   openSubagent?: OpenSubagent
+  /** The Agent Teams roster and task board; absent hides the team panel. */
+  team?: TeamPanelInfo
+  /** The selected team-member row; absent means the team panel is not focused. */
+  teamSelected?: number
 }
 
 /** The presentation seam the driver drives; driver suites substitute a capture. */
@@ -189,7 +224,7 @@ export function TuiApp({
   // live region below it (input bar, panel, and status bar).
   const focusMode: 'input' | 'panel' | 'child' = opened !== undefined
     ? 'child'
-    : view?.subagentSelected !== undefined ? 'panel' : 'input'
+    : view?.subagentSelected !== undefined || view?.teamSelected !== undefined ? 'panel' : 'input'
 
   return (
     <Box flexDirection="column">
@@ -224,7 +259,7 @@ export function TuiApp({
         onApprovalSelect={onApprovalSelect}
         history={history}
         focusMode={focusMode}
-        panelAvailable={subagents.length > 0}
+        panelAvailable={subagents.length > 0 || (view?.team?.members.length ?? 0) > 0}
       />
       {opened === undefined ? (
         <>
@@ -234,6 +269,7 @@ export function TuiApp({
           {subagents.length > 0
             ? <SubagentPanel rows={subagents} selected={view?.subagentSelected} />
             : null}
+          {view?.team !== undefined ? <TeamPanel team={view.team} selected={view.teamSelected} /> : null}
         </>
       ) : null}
     </Box>
@@ -269,6 +305,62 @@ function SubagentPanel({
           </Box>
         )
       })}
+    </Box>
+  )
+}
+
+/** The Agent Teams roster and shared task board, read from the agentTeam projection. */
+function TeamPanel({ team, selected }: { team: TeamPanelInfo; selected: number | undefined }): React.JSX.Element {
+  const width = useTerminalWidth()
+  return (
+    <Box flexDirection="column">
+      <Text dimColor>{'─'.repeat(width)}</Text>
+      <Text>
+        Teammates · {team.members.length}
+        {selected !== undefined ? <Text dimColor>  (↑↓ 选择 · Enter 打开 · ↑/Esc 返回)</Text> : null}
+      </Text>
+      {team.members.map((member, index) => {
+        const isSelected = selected === index
+        const marker = isSelected ? '●' : '◯'
+        return (
+          <Box key={member.name}>
+            {/* Two-space indent aligns the member marker under the task marker. */}
+            <Text>  </Text>
+            <Text>{isSelected ? <Text color="green">{marker}</Text> : <Text dimColor>{marker}</Text>}</Text>
+            <Text> </Text>
+            {member.phase === 'failed'
+              ? <Text bold={isSelected} color="red">{member.name}</Text>
+              : member.phase === 'provisioning'
+                ? <Text bold={isSelected} color="yellow">{member.name}</Text>
+                : <Text bold={isSelected}>{member.name}</Text>}
+            {member.activity !== undefined ? <Text dimColor>  {member.activity}</Text> : null}
+            <Box flexGrow={1} />
+            {member.startedAt !== undefined
+              ? <Text dimColor>{formatElapsed(Date.now() - member.startedAt)} · ↓ {formatTokenCount(member.inputTokens ?? 0)} tokens</Text>
+              : null}
+          </Box>
+        )
+      })}
+      {team.tasks.length > 0 ? (
+        <>
+          <Text>Tasks · {team.tasks.length}</Text>
+          {team.tasks.map((task, index) => {
+            const mark = task.status === 'completed'
+              ? <Text color="green">✔</Text>
+              : task.status === 'in_progress'
+                ? <Text color="#a5d8ff">◼</Text>
+                : task.blocked
+                  ? <Text dimColor>⊘</Text>
+                  : <Text dimColor>◻</Text>
+            return (
+              <Box key={index}>
+                <Text>  {mark} {task.subject} </Text>
+                <Text dimColor>({task.ownerName ?? 'unowned'} · {task.status})</Text>
+              </Box>
+            )
+          })}
+        </>
+      ) : null}
     </Box>
   )
 }
@@ -967,7 +1059,9 @@ export function InputBar({
     <Box flexDirection="column">
       <Text dimColor>{'─'.repeat(width)}</Text>
       {lines.map((line, index) => {
-        const marked = index === cursorLine
+        // The caret only shows while the input bar holds focus; a focused panel
+        // (subagent or team) hides it so the selection highlight is unambiguous.
+        const marked = focusMode === 'input' && index === cursorLine
           ? `${line.slice(0, cursorColumn)}▏${line.slice(cursorColumn)}`
           : line
         return (
