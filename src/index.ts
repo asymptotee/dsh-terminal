@@ -502,7 +502,7 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
   // left the registry (its run settled) fades out after its delay, and the
   // thinking indicator's elapsed seconds advance.
   const panelTick = setInterval(() => {
-    if (children.size === 0 && state.activeStep === undefined) return
+    if (children.size === 0 && state.turnStartedAt === undefined) return
     const now = Date.now()
     const teamMemberIds = new Set(teamBase?.members.map(member => member.id) ?? [])
     for (const [childId, entry] of children) {
@@ -559,11 +559,11 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
           content: [{ type: 'text', text }],
           source: { kind: 'user' },
         })
-        // While a step is in flight the follow-up turn cannot start, so its
+        // While a turn is in flight the follow-up turn cannot start, so its
         // durable echo is delayed; render a local queued echo now so the
         // submission is visible instead of silently swallowed. The session/event
         // handler drops it once the real user/message frame lands.
-        if (state.activeStep !== undefined) {
+        if (state.turnStartedAt !== undefined) {
           pendingUser.push({ id: message.id as string, text })
           scheduleRender(true)
         }

@@ -93,6 +93,13 @@ export interface FrameState {
   readonly plan: readonly TodoItem[] | undefined
   /** The step whose model call is in flight; the thinking indicator's clock source. */
   readonly activeStep: { turn: number; step: number; startedAt: number } | undefined
+  /** When the in-flight turn started; the heartbeat's clock source. Set on
+   *  turn/start, cleared on turn/end, so the heartbeat spans the whole turn
+   *  (across its steps) instead of flickering step to step. */
+  readonly turnStartedAt: number | undefined
+  /** Output tokens generated so far this turn; reset on turn/start and summed
+   *  across the turn's steps, so the heartbeat shows a per-turn figure. */
+  readonly turnTokens: number
   /** Open (streaming) assistant frame index by `${turn}:${step}`. */
   readonly openAssistant: ReadonlyMap<string, number>
   /** Pending tool frame index by callId. */
@@ -129,7 +136,7 @@ export interface FoldResult {
  * @returns an empty fold state.
  */
 export function createFrameState(): FrameState {
-  return { frames: [], plan: undefined, activeStep: undefined, openAssistant: new Map(), pendingTools: new Map(), pendingCommands: new Map() }
+  return { frames: [], plan: undefined, activeStep: undefined, turnStartedAt: undefined, turnTokens: 0, openAssistant: new Map(), pendingTools: new Map(), pendingCommands: new Map() }
 }
 
 const stepKey = (turn: number, step: number): string => `${turn}:${step}`
@@ -385,6 +392,8 @@ export function foldEvent(state: FrameState, event: SessionEvent, deps: FoldDeps
     }
     case 'assistant/message': {
       const { turn, step, message } = event.data
+      // Accumulate this step's generated output into the per-turn total.
+      const turnTokens = state.turnTokens + (event.data.usage?.outputTokens ?? 0)
       const text = contentToText(message.content)
       const thinkingText = contentToThinking(message.content)
       const index = state.openAssistant.get(stepKey(turn, step))
@@ -402,7 +411,7 @@ export function foldEvent(state: FrameState, event: SessionEvent, deps: FoldDeps
           ...thinking === undefined ? {} : { thinking },
         }
         return {
-          state: { ...state, frames: [...state.frames, frame] },
+          state: { ...state, frames: [...state.frames, frame], turnTokens },
           lines: text === '' ? [] : [text.endsWith('\n') ? text : text + '\n'],
         }
       }
@@ -417,7 +426,7 @@ export function foldEvent(state: FrameState, event: SessionEvent, deps: FoldDeps
       const openAssistant = new Map(state.openAssistant)
       openAssistant.delete(stepKey(turn, step))
       return {
-        state: { ...state, frames: replaceAt(state.frames, index, updated), openAssistant },
+        state: { ...state, frames: replaceAt(state.frames, index, updated), openAssistant, turnTokens },
         // The streamed deltas already went out; close the line unless the
         // committed text already ends on a newline.
         lines: text === '' || text.endsWith('\n') ? [] : ['\n'],
@@ -534,8 +543,10 @@ export function foldEvent(state: FrameState, event: SessionEvent, deps: FoldDeps
       }
     case 'turn/start': {
       // Turn-scoped plan lifetime: the standing list clears on the next turn.
+      // turnStartedAt clocks the heartbeat across the whole turn; turnTokens
+      // resets so the per-turn output count starts fresh.
       const closed = closeOpenAssistant(state, event.time)
-      return { state: { ...state, ...closed, plan: undefined }, lines: [] }
+      return { state: { ...state, ...closed, plan: undefined, turnStartedAt: event.time, turnTokens: 0 }, lines: [] }
     }
     case 'turn/end': {
       const closed = closeOpenAssistant(state, event.time)
@@ -553,6 +564,7 @@ export function foldEvent(state: FrameState, event: SessionEvent, deps: FoldDeps
           ...state,
           ...closed,
           activeStep: undefined,
+          turnStartedAt: undefined,
           ...byUser ? { frames: [...closed.frames, { kind: 'interrupted' as const, seq: event.seq }] } : {},
           ...errorFrame !== undefined ? { frames: [...closed.frames, errorFrame] } : {},
         },

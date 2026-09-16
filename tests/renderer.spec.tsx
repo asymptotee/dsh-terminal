@@ -502,27 +502,33 @@ describe('TuiApp rendering', () => {
     expect(frame).toContain('· What should dsh do instead?')
   })
 
-  it('renders the heartbeat above the input bar while a step is in flight', () => {
-    const working: FrameState = { ...state([]), activeStep: { turn: 1, step: 1, startedAt: Date.now() } }
+  it('renders the heartbeat above the input bar while a turn is in flight', () => {
+    const working: FrameState = { ...state([]), turnStartedAt: Date.now() }
     const { lastFrame } = renderApp(<TuiApp state={working} handlers={noopHandlers()} />)
     const frame = lastFrame() ?? ''
-    expect(frame).toContain('✢ Running… (0s)')
-    expect(frame.indexOf('✢ Running…')).toBeLessThan(frame.indexOf('❯'))
+    expect(frame).toContain('✶ Running… (0s)')
+    expect(frame.indexOf('✶ Running…')).toBeLessThan(frame.indexOf('❯'))
+  })
+
+  it('shows the per-turn output token count in the heartbeat', () => {
+    const working: FrameState = { ...state([]), turnStartedAt: Date.now(), turnTokens: 3400 }
+    const { lastFrame } = renderApp(<TuiApp state={working} handlers={noopHandlers()} />)
+    expect(lastFrame()).toContain('✶ Running… (0s · ↓ 3.4k tokens)')
   })
 
   it('pins the heartbeat below the plan and keeps the label while a tool is pending', () => {
     const plan = [{ content: 'task one', status: 'in_progress' as const }]
     const thinking: FrameState = {
       ...state([], plan),
-      activeStep: { turn: 1, step: 1, startedAt: Date.now() },
+      turnStartedAt: Date.now(),
     }
     const { lastFrame } = renderApp(<TuiApp state={thinking} handlers={noopHandlers()} />)
     const frame = lastFrame() ?? ''
-    expect(frame.indexOf('● todolist进行中...')).toBeLessThan(frame.indexOf('✢ Running…'))
+    expect(frame.indexOf('● todolist进行中...')).toBeLessThan(frame.indexOf('✶ Running…'))
     // A step covers the model call and its tool executions: the heartbeat
     // stays up — and keeps its single label — while a tool runs.
     const busy: FrameState = { ...thinking, pendingTools: new Map([['c1', 0]]) }
-    expect(renderApp(<TuiApp state={busy} handlers={noopHandlers()} />).lastFrame()).toContain('✢ Running…')
+    expect(renderApp(<TuiApp state={busy} handlers={noopHandlers()} />).lastFrame()).toContain('✶ Running…')
   })
 
   it('renders a failed generic tool result bare, without the console fence', () => {

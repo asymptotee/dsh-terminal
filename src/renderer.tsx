@@ -262,8 +262,8 @@ export function TuiApp({
           approval overlay waits on the user and the child view, which
           replaces this region entirely, hides it. */}
       {opened === undefined && view?.overlay === undefined
-        && state.activeStep !== undefined
-        ? <HeartbeatLine startedAt={state.activeStep.startedAt} />
+        && state.turnStartedAt !== undefined
+        ? <HeartbeatLine startedAt={state.turnStartedAt} tokens={state.turnTokens} />
         : null}
       {/* The input bar stays mounted in every focus mode — it owns the single
           stdin listener; in the child view it renders nothing and only routes
@@ -740,12 +740,31 @@ function PlanPanel({ todos }: { todos: FrameState['plan'] & object }): React.JSX
 
 
 /** The step heartbeat: one label for the whole step — the model call and its tool executions. */
-function HeartbeatLine({ startedAt }: { startedAt: number }): React.JSX.Element {
+/** Star glyphs cycled in order to animate the heartbeat marker: a smooth
+ *  same-family twinkle (bloom out then back), not mixed star shapes. */
+const HEARTBEAT_FRAMES = ['✶', '✸', '✹', '✺', '✹', '✸']
+const HEARTBEAT_INTERVAL_MS = 120
+
+function HeartbeatLine({ startedAt, tokens }: { startedAt: number; tokens: number | undefined }): React.JSX.Element {
+  // Self-driven animation: cycle the star glyph on an interval so the heartbeat
+  // pulses — and the elapsed clock ticks — even while no session event arrives.
+  // The timer is unref'd so it never holds the event loop open (tests exit cleanly).
+  const [tick, setTick] = useState(0)
+  React.useEffect(() => {
+    const timer = setInterval(() => setTick(current => current + 1), HEARTBEAT_INTERVAL_MS)
+    timer.unref()
+    return () => { clearInterval(timer) }
+  }, [])
+  const glyph = HEARTBEAT_FRAMES[tick % HEARTBEAT_FRAMES.length]
+  // The token figure is this turn's generated output, summed across its steps
+  // (dsh only reports usage at step end), so it steps up per completed step and
+  // resets when the next turn starts. The `↓` matches the panel's token marker.
+  const tokenNote = tokens !== undefined && tokens > 0 ? ` · ↓ ${formatTokenCount(tokens)} tokens` : ''
   // One blank row of breathing room between the heartbeat and the input bar.
   return (
     <Box marginBottom={1}>
       <Text>
-        <Text color="#a5d8ff">✢</Text> Running… <Text dimColor>({formatElapsed(Date.now() - startedAt)})</Text>
+        <Text color="#a5d8ff">{glyph} Running…</Text> <Text dimColor>({formatElapsed(Date.now() - startedAt)}{tokenNote})</Text>
       </Text>
     </Box>
   )

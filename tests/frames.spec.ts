@@ -668,6 +668,58 @@ describe('fold: active step', () => {
   })
 })
 
+describe('fold: turn clock', () => {
+  it('opens the heartbeat clock on turn/start and holds it across step boundaries', () => {
+    const started = replay([ev('turn/start', { turn: 1 })])
+    expect(started.state.turnStartedAt).toBe(0)
+    // The clock survives step/end so the heartbeat does not flicker between steps.
+    const mid = replay([
+      ev('turn/start', { turn: 1 }),
+      ev('step/start', { turn: 1, step: 1 }),
+      ev('step/end', { turn: 1, step: 1 }),
+    ])
+    expect(mid.state.turnStartedAt).toBe(0)
+    expect(mid.state.activeStep).toBeUndefined()
+  })
+
+  it('clears the heartbeat clock on turn/end', () => {
+    const ended = replay([
+      ev('turn/start', { turn: 1 }),
+      ev('turn/end', { turn: 1, reason: { kind: 'completed' } }),
+    ])
+    expect(ended.state.turnStartedAt).toBeUndefined()
+  })
+})
+
+describe('fold: per-turn token count', () => {
+  // One settled step carrying its generated output count.
+  const step = (turn: number, stepNumber: number, outputTokens: number): SessionEvent<'assistant/message'> =>
+    ev('assistant/message', {
+      turn,
+      step: stepNumber,
+      stream: [],
+      message: createAssistantMessage({ content: [{ type: 'text', text: 'x' }], source: { provider: 'p', model: 'm' } }),
+      usage: { inputTokens: 10, outputTokens },
+    })
+
+  it('sums output tokens across a turn and resets on the next turn/start', () => {
+    const within = replay([
+      ev('turn/start', { turn: 1 }),
+      step(1, 1, 800),
+      step(1, 2, 1200),
+    ])
+    expect(within.state.turnTokens).toBe(2000)
+    const across = replay([
+      ev('turn/start', { turn: 1 }),
+      step(1, 1, 800),
+      ev('turn/start', { turn: 2 }),
+      step(2, 1, 500),
+    ])
+    // The second turn starts fresh: only its own 500 counts.
+    expect(across.state.turnTokens).toBe(500)
+  })
+})
+
 describe('fold: commands', () => {
   it('renders a user slash command and pairs its settled outcome', () => {
     const run = ev('command/run', { commandId: CommandId('c1'), name: 'quit', args: '', source: { kind: 'user' } })
