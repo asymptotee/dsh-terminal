@@ -646,22 +646,7 @@ function FrameRow({ frame, expandedOutput }: { frame: Frame; expandedOutput: boo
       return (
         <Box flexDirection="column">
           {frame.thinking !== undefined ? <ThinkingBlock thinking={frame.thinking} /> : null}
-          {first === -1 ? null : lines.slice(first).map((line, index) => {
-            const heading = headingText(line)
-            const content = heading ?? line
-            return (
-              <Text key={index}>
-                {index === 0 ? '● ' : '  '}
-                {heading !== undefined
-                  ? <Text bold>{content}</Text>
-                  : inlineSegments(content).map((segment, i) => segment.bold
-                    ? <Text key={i} bold>{segment.text}</Text>
-                    : segment.code
-                      ? <Text key={i} color="#a5d8ff">{segment.text}</Text>
-                      : segment.text)}
-              </Text>
-            )
-          })}
+          {first === -1 ? null : assistantContent(lines.slice(first))}
         </Box>
       )
     }
@@ -926,6 +911,107 @@ function inlineSegments(line: string): readonly { bold: boolean; code: boolean; 
 function headingText(line: string): string | undefined {
   const match = /^#{1,6} /.exec(line)
   return match === null ? undefined : line.slice(match[0].length)
+}
+
+/** Whether a line is a markdown table separator row such as `| --- | :---: |`. */
+function isTableSeparator(line: string): boolean {
+  const t = line.trim()
+  return /^[\s|:-]+$/.test(t) && t.includes('-') && t.includes('|')
+}
+
+/** Whether the line at `index` opens a markdown table: a `|`-led row followed by a separator row. */
+function isTableStart(lines: readonly string[], index: number): boolean {
+  const line = lines[index]
+  if (line === undefined || !line.trim().startsWith('|')) return false
+  return isTableSeparator(lines[index + 1] ?? '')
+}
+
+/** Split one `|`-delimited table row into trimmed cell strings. */
+function tableCells(row: string): string[] {
+  let t = row.trim()
+  if (t.startsWith('|')) t = t.slice(1)
+  if (t.endsWith('|')) t = t.slice(0, -1)
+  return t.split('|').map(cell => cell.trim())
+}
+
+/**
+ * Render one markdown table block (header row, separator, body rows) as
+ * box-bordered lines. Columns are padded to their widest cell measured by
+ * display width, so CJK and emoji align correctly.
+ */
+function renderTable(tableLines: readonly string[]): string[] {
+  const header = tableCells(tableLines[0])
+  const body = tableLines.slice(2).map(tableCells)
+  const columnCount = Math.max(header.length, ...body.map(row => row.length))
+  const widths: number[] = []
+  for (let col = 0; col < columnCount; col++) {
+    let max = 0
+    for (const cell of [header[col], ...body.map(row => row[col])]) {
+      if (cell !== undefined) max = Math.max(max, stringWidth(cell))
+    }
+    widths.push(max)
+  }
+  const pad = (cell: string | undefined, width: number): string => {
+    const text = cell ?? ''
+    return text + ' '.repeat(Math.max(0, width - stringWidth(text)))
+  }
+  const rule = (left: string, joint: string, right: string): string =>
+    left + widths.map(w => '─'.repeat(w + 2)).join(joint) + right
+  const rowLine = (cells: readonly string[]): string =>
+    '│' + widths.map((w, col) => ` ${pad(cells[col], w)} `).join('│') + '│'
+  return [
+    rule('┌', '┬', '┐'),
+    rowLine(header),
+    rule('├', '┼', '┤'),
+    // A rule between every body row keeps adjacent rows visually separated.
+    ...body.flatMap((row, idx) =>
+      idx < body.length - 1 ? [rowLine(row), rule('├', '┼', '┤')] : [rowLine(row)],
+    ),
+    rule('└', '┴', '┘'),
+  ]
+}
+
+/**
+ * Render the visible lines of an assistant message. Consecutive `|`-led lines
+ * that form a markdown table are grouped and drawn as one bordered block; every
+ * other line renders as before. The first visible line carries the `●` marker.
+ */
+function assistantContent(lines: readonly string[]): React.JSX.Element[] {
+  const elements: React.JSX.Element[] = []
+  let markedFirst = false
+  let i = 0
+  while (i < lines.length) {
+    if (isTableStart(lines, i)) {
+      let end = i
+      while (end < lines.length && lines[end].trim().startsWith('|')) end++
+      const tableRows = renderTable(lines.slice(i, end))
+      tableRows.forEach((row, r) => {
+        const isFirst = !markedFirst && r === 0
+        elements.push(<Text key={`table-${i}-${r}`}>{isFirst ? '● ' : '  '}{row}</Text>)
+      })
+      markedFirst = true
+      i = end
+      continue
+    }
+    const line = lines[i]
+    const heading = headingText(line)
+    const content = heading ?? line
+    elements.push(
+      <Text key={`line-${i}`}>
+        {markedFirst ? '  ' : '● '}
+        {heading !== undefined
+          ? <Text bold>{content}</Text>
+          : inlineSegments(content).map((segment, s) => segment.bold
+            ? <Text key={s} bold>{segment.text}</Text>
+            : segment.code
+              ? <Text key={s} color="#a5d8ff">{segment.text}</Text>
+              : segment.text)}
+      </Text>,
+    )
+    markedFirst = true
+    i++
+  }
+  return elements
 }
 
 /** Split newline-terminated content without a phantom trailing empty line. */

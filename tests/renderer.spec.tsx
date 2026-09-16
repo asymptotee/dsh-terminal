@@ -110,6 +110,41 @@ describe('TuiApp rendering', () => {
     expect(rows[two]).toContain('  line two')
   })
 
+  it('renders a markdown table as an aligned bordered grid', () => {
+    const text = [
+      '任务板：',
+      '| 任务 | ID | 就绪 |',
+      '| --- | --- | --- |',
+      '| 任务A：分析架构 | task-1 | ✅ |',
+      '| 任务B | task-2 | ✅ |',
+    ].join('\n')
+    const frames: Frame[] = [{ kind: 'assistant', seq: 1, turn: 1, step: 1, text, streaming: false }]
+    const { lastFrame } = renderApp(<TuiApp state={state(frames)} handlers={noopHandlers()} />)
+    const frame = lastFrame() ?? ''
+    const rows = frame.split('\n')
+    const top = (rows.find(row => row.includes('┌')) ?? '').trim()
+    const mid = (rows.find(row => row.includes('├')) ?? '').trim()
+    const bottom = (rows.find(row => row.includes('└')) ?? '').trim()
+    expect(top).not.toBe('')
+    // Every horizontal rule spans the same display width, so CJK columns align.
+    expect(stringWidth(top)).toBe(stringWidth(mid))
+    expect(stringWidth(top)).toBe(stringWidth(bottom))
+    // Two body rows get a rule between them, so adjacent rows stay separated:
+    // one rule under the header plus one between the two body rows.
+    expect(rows.filter(row => row.includes('├'))).toHaveLength(2)
+    // Cells render; the raw separator row is consumed, not shown as pipes.
+    expect(frame).toContain('task-1')
+    expect(frame).not.toContain('| --- |')
+  })
+
+  it('leaves a lone pipe line as plain text when no separator row follows', () => {
+    const frames: Frame[] = [{ kind: 'assistant', seq: 1, turn: 1, step: 1, text: 'a | b', streaming: false }]
+    const { lastFrame } = renderApp(<TuiApp state={state(frames)} handlers={noopHandlers()} />)
+    const frame = lastFrame() ?? ''
+    expect(frame).toContain('a | b')
+    expect(frame).not.toContain('┌')
+  })
+
   it('renders a notice frame with its account line and truncated body', () => {
     const frames: Frame[] = [
       { kind: 'notice', seq: 1, summary: 'Background subagent child-1 finished.', body: 'a\nb\nc\nd\ne\nf\ng\nh' },
