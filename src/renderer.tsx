@@ -311,7 +311,7 @@ function SubagentPanel({
         const marker = isSelected ? '●' : '◯'
         return (
           <Box key={row === undefined ? 'main' : row.childId}>
-            <Text>{isSelected ? <Text color="green">{marker}</Text> : <Text dimColor>{marker}</Text>}</Text>
+            <Text>{isSelected ? <Text color="#51cf66">{marker}</Text> : <Text dimColor>{marker}</Text>}</Text>
             <Text> </Text>
             <Text bold={isSelected}>{row === undefined ? 'main' : row.label}</Text>
             {row !== undefined && row.activity !== undefined ? <Text dimColor>  {row.activity}</Text> : null}
@@ -343,7 +343,7 @@ function TeamPanel({ team, selected }: { team: TeamPanelInfo; selected: number |
           <Box key={member.name}>
             {/* Two-space indent aligns the member marker under the task marker. */}
             <Text>  </Text>
-            <Text>{isSelected ? <Text color="green">{marker}</Text> : <Text dimColor>{marker}</Text>}</Text>
+            <Text>{isSelected ? <Text color="#51cf66">{marker}</Text> : <Text dimColor>{marker}</Text>}</Text>
             <Text> </Text>
             {member.phase === 'failed'
               ? <Text bold={isSelected} color="red">{member.name}</Text>
@@ -388,7 +388,7 @@ function ChildView({ opened }: { opened: OpenSubagent }): React.JSX.Element {
   return (
     <Box flexDirection="column">
       <Text dimColor>{'─'.repeat(width)}</Text>
-      <Text><Text color="green">●</Text> subagent: <Text bold>{opened.label}</Text> <Text dimColor>(Esc 返回)</Text></Text>
+      <Text><Text color="#51cf66">●</Text> subagent: <Text bold>{opened.label}</Text> <Text dimColor>(Esc 返回)</Text></Text>
       {opened.state.plan !== undefined ? <PlanPanel todos={opened.state.plan} /> : null}
       {opened.state.frames.map((frame, index) => (
         <Box key={frameKey(frame)} flexDirection="column" marginBottom={index === opened.state.frames.length - 1 ? 0 : 1}>
@@ -627,7 +627,7 @@ function FrameRow({ frame, expandedOutput }: { frame: Frame; expandedOutput: boo
     case 'notice':
       return (
         <Box flexDirection="column">
-          <Text><Text color="green">●</Text> {frame.summary}</Text>
+          <Text><Text color="#51cf66">●</Text> {frame.summary}</Text>
           {frame.body === undefined ? null : <IndentedBlock text={trimNewline(frame.body)} expanded={expandedOutput} />}
           {frame.error === undefined ? null : (
             <Text>
@@ -734,7 +734,7 @@ function CommandRow({ frame }: { frame: Extract<Frame, { kind: 'command' }> }): 
 function PlanPanel({ todos }: { todos: FrameState['plan'] & object }): React.JSX.Element {
   return (
     <Box flexDirection="column">
-      <Text><Text color="green">●</Text> todolist进行中...</Text>
+      <Text><Text color="#51cf66">●</Text> todolist进行中...</Text>
       {todos.map((todo, index) => {
         const mark = todo.status === 'completed'
           ? <Text color="green">✔</Text>
@@ -788,7 +788,7 @@ function ToolCallView({ frame }: { frame: Extract<Frame, { kind: 'tool' }> }): R
     : call.title.startsWith(`${label} `) ? call.title.slice(label.length + 1) : call.title
   return (
     <Text>
-      <Text color="green">●</Text> {label}
+      <Text color="#51cf66">●</Text> {label}
       ({invocation})
     </Text>
   )
