@@ -11,7 +11,8 @@
 // tsc build uses react-jsx; React.useRef below keeps the import used.
 import os from 'node:os'
 import React, { useState } from 'react'
-import { Box, Static, Text, render, useInput, useStdout } from 'ink'
+import { Box, Static, Text, render, useInput, usePaste, useStdout } from 'ink'
+import stringWidth from 'string-width'
 import type { Frame, FrameState } from './frames.ts'
 import { createFrameState } from './frames.ts'
 import { contentToText, stripOuterCodeFence } from './render.ts'
@@ -560,9 +561,29 @@ function frameKey(frame: Frame): string {
 }
 
 function FrameRow({ frame, expandedOutput }: { frame: Frame; expandedOutput: boolean }): React.JSX.Element {
+  // The user echo pads each line to the full terminal width so its background
+  // spans the row; every other frame renders its natural width.
+  const width = useTerminalWidth()
   switch (frame.kind) {
-    case 'user':
-      return <Text><Text color="magenta">❯ </Text>{frame.text}</Text>
+    case 'user': {
+      // Echo the submitted message with the same prompt style as the input bar:
+      // the marker leads the first line, later lines indent two columns so a
+      // multi-line submission stays aligned. A dark-gray background spans the
+      // full row (each line is space-padded to the terminal width, measured by
+      // display columns so CJK and emoji pad correctly) so the user's own input
+      // reads as a distinct block. This styles only the scroll-region echo; the
+      // live InputBar is untouched.
+      const echoLines = frame.text.split('\n')
+      return (
+        <Box flexDirection="column">
+          {echoLines.map((line, index) => (
+            <Text key={index} backgroundColor="#3a3a3a">
+              {padToWidth((index === 0 ? '❯ ' : '  ') + line, width)}
+            </Text>
+          ))}
+        </Box>
+      )
+    }
     case 'notice':
       return (
         <Box flexDirection="column">
@@ -1041,8 +1062,24 @@ export function InputBar({
       return
     }
     if (input !== '') {
-      setBuffer({ value: value.slice(0, cursor) + input + value.slice(cursor), cursor: cursor + input.length })
+      // Fallback for terminals without bracketed paste: a pasted chunk that
+      // reaches useInput carries CR/CRLF line endings, which the renderer
+      // (split on LF) would draw as overlapping lines. Normalize to LF so the
+      // paste lands as proper buffer newlines. A lone Enter is handled above
+      // (key.return) and never reaches here.
+      const text = input.replace(/\r\n|\r/g, '\n')
+      setBuffer({ value: value.slice(0, cursor) + text + value.slice(cursor), cursor: cursor + text.length })
     }
+  })
+
+  // Bracketed paste (auto-enabled by usePaste) delivers the whole pasted string
+  // on a channel separate from useInput, so multi-line paste never trips the
+  // Enter-to-commit path. Normalize CR/CRLF to LF for the LF-splitting renderer.
+  usePaste((text) => {
+    if (approvalPending || focusMode !== 'input') return
+    const { value, cursor } = bufferRef.current
+    const normalized = text.replace(/\r\n|\r/g, '\n')
+    setBuffer({ value: value.slice(0, cursor) + normalized + value.slice(cursor), cursor: cursor + normalized.length })
   })
 
   const { value, cursor } = buffer
@@ -1066,7 +1103,9 @@ export function InputBar({
           : line
         return (
           <Text key={index}>
-            {index === lines.length - 1 ? <Text color="magenta">❯ </Text> : null}
+            {/* The prompt marker leads the first line in the body color; later
+                lines indent two columns so every line's text aligns. */}
+            {index === 0 ? <Text>❯ </Text> : '  '}
             {marked}
           </Text>
         )
@@ -1080,4 +1119,17 @@ export function InputBar({
 function useTerminalWidth(fallback = 80): number {
   const { stdout } = useStdout()
   return typeof stdout.columns === 'number' && stdout.columns > 0 ? stdout.columns : fallback
+}
+
+/**
+ * Pad content with spaces to exactly `width` display columns, so a background
+ * color spans the whole row. Width is measured with string-width, so CJK and
+ * emoji (double-width) pad to the true terminal column count; content already
+ * at or past `width` is returned unchanged (never negative padding).
+ * @param content - the text to pad.
+ * @param width - the target display width in terminal columns.
+ * @returns the content padded to `width` columns.
+ */
+export function padToWidth(content: string, width: number): string {
+  return content + ' '.repeat(Math.max(0, width - stringWidth(content)))
 }

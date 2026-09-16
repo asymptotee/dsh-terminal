@@ -3,7 +3,8 @@
 import os from 'node:os'
 import { describe, expect, it, vi } from 'vitest'
 import { render } from 'ink-testing-library'
-import { TuiApp } from '../src/renderer.tsx'
+import stringWidth from 'string-width'
+import { TuiApp, padToWidth } from '../src/renderer.tsx'
 import type { InputHandlers, RenderView } from '../src/renderer.tsx'
 import { createFrameState } from '../src/frames.ts'
 import type { Frame, FrameState } from '../src/frames.ts'
@@ -67,7 +68,28 @@ describe('TuiApp rendering', () => {
       { kind: 'assistant', seq: 2, turn: 1, step: 1, text: 'answer', streaming: false },
     ]
     const { lastFrame } = renderApp(<TuiApp state={state(frames)} handlers={noopHandlers()} />)
-    expect(lastFrame()).toMatch(/❯ hello\n\n+● answer/)
+    // The user echo pads its line to full width, so allow trailing spaces.
+    expect(lastFrame()).toMatch(/❯ hello.*\n\n+● answer/)
+  })
+
+  it('echoes a multi-line user message aligned under the prompt', () => {
+    const frames: Frame[] = [{ kind: 'user', seq: 1, text: 'line one\nline two' }]
+    const { lastFrame } = renderApp(<TuiApp state={state(frames)} handlers={noopHandlers()} />)
+    const rows = (lastFrame() ?? '').split('\n')
+    const one = rows.findIndex(row => row.includes('line one'))
+    const two = rows.findIndex(row => row.includes('line two'))
+    // The marker leads the first line; the continuation indents to align.
+    expect(rows[one]).toContain('❯ line one')
+    expect(rows[two]).toContain('  line two')
+  })
+
+  it('pads content to the terminal width by display columns', () => {
+    // CJK counts double: '你好 hi' is 2+2+1+2 = 7 columns, padded out to 20.
+    expect(stringWidth(padToWidth('你好 hi', 20))).toBe(20)
+    // The prompt marker plus a short message pads to the full row width.
+    expect(stringWidth(padToWidth('❯ hi', 100))).toBe(100)
+    // Content already past the target is returned unchanged (no negative pad).
+    expect(padToWidth('x'.repeat(30), 20)).toBe('x'.repeat(30))
   })
 
   it('renders a notice frame with its account line and truncated body', () => {
@@ -357,6 +379,48 @@ describe('TuiApp rendering', () => {
     stdin.write('l')
     await settled()
     expect(lastFrame()).toContain('❯ l▏')
+  })
+
+  it('inserts a bracketed multi-line paste as distinct lines', async () => {
+    const { lastFrame, stdin } = renderApp(<TuiApp state={state([])} handlers={noopHandlers()} />)
+    // A real paste arrives wrapped in bracketed-paste markers; usePaste delivers
+    // the inner text on its own channel, so its newlines never trip Enter-commit.
+    stdin.write('[200~line one\nline two[201~')
+    await settled()
+    const rows = (lastFrame() ?? '').split('\n')
+    const one = rows.findIndex(row => row.includes('line one'))
+    const two = rows.findIndex(row => row.includes('line two'))
+    expect(one).toBeGreaterThanOrEqual(0)
+    expect(two).toBeGreaterThanOrEqual(0)
+    // Distinct rows: the newlines split the buffer instead of overlapping via CR.
+    expect(one).not.toBe(two)
+    // The prompt marker leads the first pasted line; the caret sits on the last
+    // (the buffer end), and the text stays in the editor (not committed).
+    expect(rows[one]).toContain('❯ line one')
+    expect(rows[two]).toContain('line two▏')
+  })
+
+  it('normalizes CR line endings from a non-bracketed paste', async () => {
+    const { lastFrame, stdin } = renderApp(<TuiApp state={state([])} handlers={noopHandlers()} />)
+    // Terminals without bracketed-paste support route CR-separated text through
+    // useInput; the insert path normalizes CR to LF so lines do not overlap.
+    stdin.write('line one\rline two')
+    await settled()
+    const rows = (lastFrame() ?? '').split('\n')
+    const one = rows.findIndex(row => row.includes('line one'))
+    const two = rows.findIndex(row => row.includes('line two'))
+    expect(one).toBeGreaterThanOrEqual(0)
+    expect(two).toBeGreaterThanOrEqual(0)
+    expect(one).not.toBe(two)
+  })
+
+  it('does not commit a pasted newline as a turn', async () => {
+    const committed: string[] = []
+    const handlers = { ...noopHandlers(), onCommit: (text: string) => { committed.push(text) } }
+    const { stdin } = renderApp(<TuiApp state={state([])} handlers={handlers} />)
+    stdin.write('[200~line one\nline two[201~')
+    await settled()
+    expect(committed).toEqual([])
   })
 
   it('renders the standing plan panel pinned above the input bar', () => {
