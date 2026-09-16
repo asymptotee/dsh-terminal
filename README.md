@@ -6,7 +6,7 @@ DeepSeek Harness 的终端 UI 插件：经官方 dsh 的 profile 插件机制挂
 
 - **纯插件挂载** —— 不自带宿主运行时：官方 `dsh` CLI 提供 launcher 与 base bundle（`dsh-base` 是 profile 的第一层），本包只提供 TUI 插件行（`tui-startup`/`tui-runner`，经 `cordis.patch.yml` insert）与 `dsh.bundle.patch` 元数据。运行时依赖全部声明为 peerDependencies。
 - **Adapter 边界** —— 官方 `@deepseek-ai/*` 包只允许在 `src/dsh-adapter/` 内被 import；UI 与 driver 一律通过 adapter 的类型 re-export 和服务 facade 间接接触上游。`pnpm run verify:boundary` 扫描源码，发现越界 import 即失败。
-- **上游契约** —— adapter 消费的所有依赖按 `src/dsh-adapter/contract.ts` 中的版本线精确钉版（当前 `0.1.2-rc.1`；cordis/loader/schemastery 钉在对应已发布版本）。`pnpm run verify:contract` 对漂移直接失败；上游升版时只需升版本线并修 adapter 暴露的 API 差异。
+- **上游契约** —— adapter 消费的所有依赖按 `src/dsh-adapter/contract.ts` 中的版本线精确钉版（当前 `0.1.5-rc.2`；cordis/loader/schemastery 钉在对应已发布版本）。`pnpm run verify:contract` 对漂移直接失败；上游升版时只需升版本线并修 adapter 暴露的 API 差异。
 
 ## 安装与使用
 
@@ -38,4 +38,11 @@ pnpm run verify:boundary
 pnpm run verify:contract
 ```
 
-迭代安装：`pnpm build && pnpm pack && dsh plugin --profile dsh-terminal add ./dsh-terminal-<版本>.tgz`（重装会覆盖 profile 里的旧版本）。
+迭代安装：**版本号不变时 `add` 会被 pnpm 跳过（`Already up to date`），必须先 `remove` 再 `add`**：
+
+```sh
+pnpm build && pnpm pack
+dsh plugin --profile dsh-terminal remove dsh-terminal
+dsh plugin --profile dsh-terminal add ./dsh-terminal-<版本>.tgz
+```
+
