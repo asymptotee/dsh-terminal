@@ -670,7 +670,7 @@ function FrameRow({ frame, expandedOutput }: { frame: Frame; expandedOutput: boo
     case 'command':
       return <CommandRow frame={frame} />
     case 'interrupted':
-      return <Text><Text color="red">● Interrupted</Text> · What should dsh do instead?</Text>
+      return <Text color="#ffd43b">● Interrupted · What should dsh do instead?</Text>
     case 'error':
       return (
         <Text>
