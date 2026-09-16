@@ -92,6 +92,24 @@ describe('TuiApp rendering', () => {
     expect(padToWidth('x'.repeat(30), 20)).toBe('x'.repeat(30))
   })
 
+  it('renders a follow-up committed mid-step as a queued echo', () => {
+    const view: RenderView = { pendingUser: [{ id: 'm1', text: 'wake pro-jsonl' }] }
+    const { lastFrame } = renderApp(<TuiApp state={state([])} handlers={noopHandlers()} view={view} />)
+    const frame = lastFrame() ?? ''
+    expect(frame).toContain('❯ wake pro-jsonl')
+    expect(frame).toContain('queued')
+  })
+
+  it('aligns a multi-line queued echo under the prompt', () => {
+    const view: RenderView = { pendingUser: [{ id: 'm2', text: 'line one\nline two' }] }
+    const { lastFrame } = renderApp(<TuiApp state={state([])} handlers={noopHandlers()} view={view} />)
+    const rows = (lastFrame() ?? '').split('\n')
+    const one = rows.findIndex(row => row.includes('line one'))
+    const two = rows.findIndex(row => row.includes('line two'))
+    expect(rows[one]).toContain('❯ line one')
+    expect(rows[two]).toContain('  line two')
+  })
+
   it('renders a notice frame with its account line and truncated body', () => {
     const frames: Frame[] = [
       { kind: 'notice', seq: 1, summary: 'Background subagent child-1 finished.', body: 'a\nb\nc\nd\ne\nf\ng\nh' },

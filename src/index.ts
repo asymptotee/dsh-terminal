@@ -176,6 +176,11 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
   // settlement notice can show the concrete cause instead of just "failed".
   // Cleared by any later non-error turn, so a child that recovered shows none.
   const childErrors = new Map<string, { message: string; code: string }>()
+  // Follow-ups submitted while a step is in flight queue behind the running
+  // turn, so their durable user/message echo is delayed; render one local echo
+  // per such submission now (keyed by message id) and drop it the moment the
+  // real event lands, so input is never silently swallowed while the agent is busy.
+  const pendingUser: { id: string; text: string }[] = []
   // The official Agent Teams tools register without presentation, so a local
   // table renders their calls; every other tool reads the presentation its own
   // registration carries (absent tools fall back to the generic card).
@@ -345,6 +350,7 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
       const opened = children.get(openChild)
       if (opened !== undefined) next.openSubagent = { childId: openChild, label: opened.label, state: opened.state }
     }
+    if (pendingUser.length > 0) next.pendingUser = [...pendingUser]
     return next
   }
 
@@ -450,6 +456,13 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
     // A team event moves the authoritative agentTeam projection, so re-read it
     // before the render below to keep the team panel current.
     if ((event.type as string).startsWith('team/')) refreshTeam()
+    // A follow-up committed while a step was in flight rendered a local queued
+    // echo; now that its durable user/message frame folds in below, drop the
+    // local copy so the message does not appear twice.
+    if (event.type === 'user/message' && event.data.source.kind === 'user') {
+      const queued = pendingUser.findIndex(pending => pending.id === (event.data.id as string))
+      if (queued !== -1) pendingUser.splice(queued, 1)
+    }
     // Streaming no longer rides durable session events (the harness publishes it
     // on the agent-scoped assistant-stream bus instead), so every remaining
     // session event is low-frequency and renders immediately.
@@ -542,10 +555,19 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
       if (exiting) return
       setOverlay(undefined)
       if (!text.startsWith('/')) {
-        agent.followup(createUserMessage({
+        const message = createUserMessage({
           content: [{ type: 'text', text }],
           source: { kind: 'user' },
-        }))
+        })
+        // While a step is in flight the follow-up turn cannot start, so its
+        // durable echo is delayed; render a local queued echo now so the
+        // submission is visible instead of silently swallowed. The session/event
+        // handler drops it once the real user/message frame lands.
+        if (state.activeStep !== undefined) {
+          pendingUser.push({ id: message.id as string, text })
+          scheduleRender(true)
+        }
+        agent.followup(message)
         return
       }
       const commands: CommandRuntime | undefined = ctx.get('commands')

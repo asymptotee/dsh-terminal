@@ -191,6 +191,28 @@ describe('tui driver', () => {
     await test.ctx.fiber.dispose()
   })
 
+  it('echoes a mid-step follow-up as queued, then drops it when the durable event lands', async () => {
+    const test = await bench({
+      afterPrompt(_ctx, session, message, turn) { appendTurn(session, turn, message, 'done') },
+    })
+    // Put the main agent mid-step (a step/start with no matching end) so the
+    // follow-up queues behind the running turn instead of starting its own.
+    test.agent.session.append('step/start', { turn: 99, step: 1 })
+    test.handlers.onCommit('wake pro-jsonl')
+    // The commit renders a queued echo immediately, before the turn can start.
+    expect(test.views.at(-1)?.pendingUser).toMatchObject([{ text: 'wake pro-jsonl' }])
+    // The follow-up turn runs; its durable user/message carries the same id.
+    await test.agent.whenIdle()
+    // The queued echo is dropped once the real frame folds in, leaving exactly
+    // one user frame for the message (no duplicate).
+    expect(test.views.at(-1)?.pendingUser ?? []).toEqual([])
+    const users = test.states.at(-1)!.frames.filter(frame => frame.kind === 'user' && frame.text === 'wake pro-jsonl')
+    expect(users).toHaveLength(1)
+    test.handlers.onExit()
+    await test.exited
+    await test.ctx.fiber.dispose()
+  })
+
   it('commits an assistant message into a closed frame', async () => {
     // Live streaming now rides the agent-scoped assistant-stream bus (transient
     // frames), which this scripted harness does not emit; the durable settlement

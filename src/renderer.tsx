@@ -127,6 +127,16 @@ export interface RenderView {
   team?: TeamPanelInfo
   /** The selected team-member row; absent means the team panel is not focused. */
   teamSelected?: number
+  /** Follow-ups submitted while a step was in flight; shown immediately as queued until their durable echo lands. */
+  pendingUser?: readonly PendingUserEcho[]
+}
+
+/** One follow-up submitted while the agent was busy: echoed at once, marked queued. */
+export interface PendingUserEcho {
+  /** The message id, used to drop the echo when its durable user/message event lands. */
+  id: string
+  /** The submitted text. */
+  text: string
 }
 
 /** The presentation seam the driver drives; driver suites substitute a capture. */
@@ -234,6 +244,12 @@ export function TuiApp({
         live={live}
         expandedOutput={expandedOutput}
       />
+      {/* Follow-ups queued behind a running step echo immediately (dimmed, no
+          committed background) so the submission is never silently swallowed;
+          each is dropped once its durable user/message frame lands above. */}
+      {view?.pendingUser !== undefined && view.pendingUser.length > 0
+        ? <PendingUserEchoes items={view.pendingUser} />
+        : null}
       {view?.overlay !== undefined
         ? <OverlayLine key={overlayKey(view.overlay)} overlay={view.overlay} selected={view.overlay.kind === 'approval' ? approvalIndex : 0} />
         : null}
@@ -524,6 +540,30 @@ export function SessionStream({
           <FrameRow frame={frame} expandedOutput={expandedOutput} />
         </Box>
       ))}
+    </Box>
+  )
+}
+
+/**
+ * The optimistic echoes of follow-ups submitted while a step was in flight.
+ * Rendered dimmed and without the committed user background so a queued message
+ * reads as pending; each is removed once its durable user/message frame lands in
+ * the scrollback above.
+ */
+function PendingUserEchoes({ items }: { items: readonly PendingUserEcho[] }): React.JSX.Element {
+  return (
+    <Box flexDirection="column">
+      {items.map(item => {
+        const lines = item.text.split('\n')
+        return (
+          <Box key={item.id} flexDirection="column" marginBottom={1}>
+            {lines.map((line, index) => (
+              <Text key={index} dimColor>{index === 0 ? '❯ ' : '  '}{line}</Text>
+            ))}
+            <Text dimColor>  (queued — runs when the current turn ends)</Text>
+          </Box>
+        )
+      })}
     </Box>
   )
 }
