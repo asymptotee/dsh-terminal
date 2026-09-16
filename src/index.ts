@@ -20,6 +20,7 @@ import { createUserMessage, installModelSelection, SessionId, z } from './dsh-ad
 import './dsh-adapter/effects.ts'
 import { createFrameState, foldAssistantStreamChunk, foldEvent, readableFailureMessage } from './frames.ts'
 import type { FoldDeps, FrameState } from './frames.ts'
+import { teamToolPresentation } from './team-present.ts'
 import { createInkRenderer } from './renderer.tsx'
 import type { Overlay, RenderView, SubagentRow, TeamPanelInfo, TeamTaskRow, TuiRenderer } from './renderer.tsx'
 
@@ -175,7 +176,15 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
   // settlement notice can show the concrete cause instead of just "failed".
   // Cleared by any later non-error turn, so a child that recovered shows none.
   const childErrors = new Map<string, { message: string; code: string }>()
-  const deps: FoldDeps = { tools: ctx.get('tools') ?? { get: () => undefined }, childLabels, childErrors }
+  // The official Agent Teams tools register without presentation, so a local
+  // table renders their calls; every other tool reads the presentation its own
+  // registration carries (absent tools fall back to the generic card).
+  const registeredTools = ctx.get('tools')
+  const deps: FoldDeps = {
+    tools: { get: name => teamToolPresentation(name) ?? registeredTools?.get(name) },
+    childLabels,
+    childErrors,
+  }
   let state = createFrameState()
   // The status bar shows the effective sandbox mode: the policy service folds
   // the session's override onto the deployment default (config or env).
