@@ -4,7 +4,7 @@ import os from 'node:os'
 import { describe, expect, it, vi } from 'vitest'
 import { render } from 'ink-testing-library'
 import stringWidth from 'string-width'
-import { TuiApp, padToWidth } from '../src/renderer.tsx'
+import { TuiApp, padToWidth, truncateToWidth } from '../src/renderer.tsx'
 import type { InputHandlers, RenderView } from '../src/renderer.tsx'
 import { createFrameState } from '../src/frames.ts'
 import type { Frame, FrameState } from '../src/frames.ts'
@@ -90,6 +90,31 @@ describe('TuiApp rendering', () => {
     expect(stringWidth(padToWidth('❯ hi', 100))).toBe(100)
     // Content already past the target is returned unchanged (no negative pad).
     expect(padToWidth('x'.repeat(30), 20)).toBe('x'.repeat(30))
+  })
+
+  it('truncates text to a display-width budget with an ellipsis', () => {
+    expect(truncateToWidth('abcdef', 10)).toBe('abcdef')   // fits: unchanged
+    expect(truncateToWidth('abcdef', 4)).toBe('abc…')      // cut to 3 + ellipsis
+    // CJK counts double, so the cut respects display width, not char count.
+    expect(stringWidth(truncateToWidth('你好你好', 5))).toBeLessThanOrEqual(5)
+    expect(truncateToWidth('anything', 0)).toBe('')        // no room: empty
+  })
+
+  it('clamps a long tool invocation to one row and reveals it with ctrl+o', async () => {
+    const longCmd = 'echo ' + 'x'.repeat(150)
+    const frames: Frame[] = [{
+      kind: 'tool', seq: 1, turn: 1, step: 1, callId: 'c1', name: 'bash',
+      args: { command: longCmd }, call: { card: 'terminal', title: longCmd },
+    }]
+    const { lastFrame, stdin } = renderApp(<TuiApp state={state(frames)} handlers={noopHandlers()} />)
+    // Collapsed: clamped to 60% of the 100-col test terminal, so the full
+    // command is gone and an ellipsis marks the cut.
+    expect(lastFrame()).toContain('…')
+    expect(lastFrame()).not.toContain(longCmd)
+    // ctrl+o expands: the full invocation shows (no ellipsis), wrapping normally.
+    stdin.write('\x0f')
+    await settled()
+    expect(lastFrame()).not.toContain('…')
   })
 
   it('renders a follow-up committed mid-step as a queued echo', () => {

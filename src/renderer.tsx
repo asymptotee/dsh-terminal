@@ -775,21 +775,26 @@ function ToolRow({ frame, expandedOutput }: { frame: Extract<Frame, { kind: 'too
   const completed = frame.result !== undefined || frame.resultContent !== undefined
   return (
     <Box flexDirection="column">
-      <ToolCallView frame={frame} />
+      <ToolCallView frame={frame} expandedOutput={expandedOutput} />
       {completed ? <ToolResultView frame={frame} expandedOutput={expandedOutput} /> : null}
     </Box>
   )
 }
 
 /** The Claude Code-style call line: a green dot, then the tool name in the default foreground. */
-function ToolCallView({ frame }: { frame: Extract<Frame, { kind: 'tool' }> }): React.JSX.Element {
+function ToolCallView({ frame, expandedOutput }: { frame: Extract<Frame, { kind: 'tool' }>; expandedOutput: boolean }): React.JSX.Element {
   const call = frame.call
   const label = toolLabel(frame.name)
-  const invocation = call.card === 'diff'
+  const full = call.card === 'diff'
     ? call.diffs.map(diff => `${diff.path}${diff.oldText === null ? ' (new)' : ''}`).join(', ')
     // Generic titles often start with the tool name (`Read /tmp/test.txt`);
     // strip it so the label on the left is not repeated.
     : call.title.startsWith(`${label} `) ? call.title.slice(label.length + 1) : call.title
+  // Keep the call line on one row: clamp the invocation to CALL_WIDTH_RATIO of
+  // the terminal width, minus the `● Label(…)` overhead. ctrl+o (expandedOutput)
+  // reveals the full invocation, which then wraps normally.
+  const budget = Math.floor(useTerminalWidth() * CALL_WIDTH_RATIO) - (stringWidth(label) + 4)
+  const invocation = expandedOutput ? full : truncateToWidth(full, budget)
   return (
     <Text>
       <Text color="#51cf66">●</Text> {label}
@@ -1277,4 +1282,30 @@ function useTerminalWidth(fallback = 80): number {
  */
 export function padToWidth(content: string, width: number): string {
   return content + ' '.repeat(Math.max(0, width - stringWidth(content)))
+}
+
+/** Fraction of the terminal width a tool call line may occupy before its
+ *  invocation is truncated with an ellipsis (ctrl+o reveals the full text). */
+const CALL_WIDTH_RATIO = 0.6
+
+/**
+ * Truncate text to fit `maxWidth` display columns, appending `…` when cut.
+ * Width is measured with string-width so CJK and emoji count correctly; text
+ * already within budget is returned unchanged.
+ * @param text - the text to truncate.
+ * @param maxWidth - the maximum display width, including the ellipsis.
+ * @returns the text, truncated to `maxWidth` columns with a trailing `…` if cut.
+ */
+export function truncateToWidth(text: string, maxWidth: number): string {
+  if (maxWidth <= 0) return ''
+  if (stringWidth(text) <= maxWidth) return text
+  let width = 0
+  let out = ''
+  for (const char of text) {
+    const charWidth = stringWidth(char)
+    if (width + charWidth > maxWidth - 1) break
+    out += char
+    width += charWidth
+  }
+  return out + '…'
 }
