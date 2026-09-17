@@ -186,7 +186,8 @@ describe('fold: notices', () => {
   it('reads merge-extensible notice kinds from other packages structurally', () => {
     // dsh-terminal does not import dsh-subagent, so its settlement/report source
     // kinds sit outside the compile-time MessageSource union; the fold reads
-    // their form and summary fields structurally.
+    // their form and summary fields structurally. The settlement's redundant
+    // closing-message body is dropped, leaving the one-line summary.
     const source = {
       kind: 'subagent-settled',
       form: 'notice',
@@ -208,7 +209,6 @@ describe('fold: notices', () => {
       kind: 'notice',
       seq: 1,
       summary: 'Background subagent child-1 finished.',
-      body: 'done.',
     }])
   })
 
@@ -230,11 +230,12 @@ describe('fold: notices', () => {
       })),
       deps({}, new Map([['child-1', 'architect']])),
     )
+    // The friendly label replaces the raw session id in the summary (quoted);
+    // the settlement body is suppressed, so only the renamed summary remains.
     expect(folded.state.frames).toEqual([{
       kind: 'notice',
       seq: 1,
-      summary: 'Background subagent architect finished.',
-      body: 'closing note about architect.',
+      summary: 'Background subagent "architect" finished.',
     }])
   })
 

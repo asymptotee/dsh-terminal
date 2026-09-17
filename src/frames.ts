@@ -253,24 +253,27 @@ function noticeFrame(
   // for the friendly roster label when known, so notices match the roster.
   const senderId = 'senderSessionId' in source ? (source as { senderSessionId?: string }).senderSessionId : undefined
   const label = senderId === undefined ? undefined : childLabels.get(senderId)
+  // Swap the raw session id for the friendly label, quoted so the agent name
+  // reads as a distinct token inside the settlement sentence.
   const rename = (text: string): string =>
-    label === undefined || senderId === undefined ? text : text.split(senderId).join(label)
+    label === undefined || senderId === undefined ? text : text.split(senderId).join(`"${label}"`)
   const renamedBody = rename(body)
-  // Attach the captured error detail only to settlement notices (the `notice`
-  // form states a child failed); a relay is live teammate content and never
-  // carries a turn error.
-  const error = visibleNoticeForm(source) === 'notice' && senderId !== undefined
-    ? childErrors.get(senderId)
-    : undefined
+  // A subagent settlement notice is the `notice` form carrying a sender session
+  // id; capture it so the failure detail can attach and the redundant body can
+  // drop. Relays, team peer deliveries, and plugin notices have no such id.
+  const settlementSenderId = visibleNoticeForm(source) === 'notice' ? senderId : undefined
+  const error = settlementSenderId !== undefined ? childErrors.get(settlementSenderId) : undefined
+  // A subagent settlement notice shows only its one-line summary — plus the red
+  // error line when the child failed. Its "Its closing message:" body is
+  // redundant in the terminal (the coordinator already holds the child's
+  // output), so it is never displayed. Every other notice IS its content, so
+  // the body renders.
+  const showBody = settlementSenderId === undefined && renamedBody !== ''
   return {
     kind: 'notice',
     seq,
     summary: rename(summary),
-    // A failed child (error present) shows only the summary and the cause; the
-    // settlement notice's "Its closing message:" body is redundant next to the
-    // error, so it is suppressed for display (the coordinator's own context is
-    // unaffected — this is a fold-only change).
-    ...error !== undefined || renamedBody === '' ? {} : { body: renamedBody },
+    ...showBody ? { body: renamedBody } : {},
     ...error === undefined ? {} : { error },
   }
 }
