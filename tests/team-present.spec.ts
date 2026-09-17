@@ -90,11 +90,11 @@ describe('list_agents', () => {
 describe('wait_agent', () => {
   const present = teamToolPresentation('wait_agent')!
   it('titles with the effective timeout', () => {
-    expect(callTitle(present.presentCall!({ timeout_ms: 60000 }))).toBe('waiting for team changes · timeout 60s')
-    expect(callTitle(present.presentCall!({}))).toBe('waiting for team changes · timeout 30s')
+    expect(callTitle(present.presentCall!({ timeout_ms: 60000 }))).toBe('waiting for any teammate to change · timeout 60s')
+    expect(callTitle(present.presentCall!({}))).toBe('waiting for any teammate to change · timeout 30s')
   })
   it('renders the woken outcome', () => {
-    expect(resultText(present.presentResult!({}, jsonResult({ timedOut: false })))).toBe('woken by a team change')
+    expect(resultText(present.presentResult!({}, jsonResult({ timedOut: false })))).toBe('woken by a teammate change')
   })
   it('renders the timeout outcome', () => {
     expect(resultText(present.presentResult!({ timeout_ms: 30000 }, jsonResult({ timedOut: true })))).toBe('timed out after 30s')

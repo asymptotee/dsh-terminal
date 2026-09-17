@@ -157,14 +157,16 @@ const listAgents: ToolPresentation = {
 
 const waitAgent: ToolPresentation = {
   presentCall(args) {
-    return call(`waiting for team changes · timeout ${waitSeconds(args)}s`)
+    return call(`waiting for any teammate to change · timeout ${waitSeconds(args)}s`)
   },
   presentResult(args, result) {
     const value = asRecord(resultValue(result))
     if (value === undefined) return undefined
     if (asRecord(value.noProgress) !== undefined) return lines('no active peer to wait for')
     if (value.timedOut === true) return lines(`timed out after ${waitSeconds(args)}s`)
-    if (value.timedOut === false) return lines('woken by a team change')
+    // TeamWaitResult carries only `timedOut`, so the waker's identity is not
+    // available; the note stays generic.
+    if (value.timedOut === false) return lines('woken by a teammate change')
     return undefined
   },
 }
