@@ -155,6 +155,34 @@ describe('fold: notices', () => {
     }])
   })
 
+  it('folds a team peer delivery into a clean notice naming the sender, not the message id', () => {
+    const folded = foldEvent(
+      createFrameState(),
+      ev('user/message', createUserMessage({
+        content: [
+          { type: 'text', text: 'Team message team-message-123 from judge:' },
+          { type: 'text', text: '裁决：正方更有说服力。' },
+        ],
+        source: {
+          kind: 'team-message',
+          teamId: 'team-1',
+          messageId: 'team-message-123',
+          senderId: 'sess-judge',
+          senderName: 'judge',
+        } as unknown as MessageSource,
+      })),
+      deps(),
+    )
+    // Summary uses the friendly senderName and drops the long message id; the
+    // delivered message becomes the body; no error line attaches.
+    expect(folded.state.frames).toEqual([{
+      kind: 'notice',
+      seq: 1,
+      summary: 'Message from judge',
+      body: '裁决：正方更有说服力。',
+    }])
+  })
+
   it('reads merge-extensible notice kinds from other packages structurally', () => {
     // dsh-terminal does not import dsh-subagent, so its settlement/report source
     // kinds sit outside the compile-time MessageSource union; the fold reads

@@ -217,6 +217,9 @@ export function readableFailureMessage(raw: string): string {
  * @returns the visible form, or undefined for model-side-only injections.
  */
 function visibleNoticeForm(source: MessageSource): 'notice' | 'relay' | undefined {
+  // Agent Teams peer deliveries carry no `form`; surface them like a relay so
+  // the delivered message body renders in the recipient's view.
+  if (source.kind === 'team-message') return 'relay'
   if (!('form' in source)) return undefined
   return source.form === 'notice' || source.form === 'relay' ? source.form : undefined
 }
@@ -236,7 +239,12 @@ function noticeFrame(
 ): Extract<Frame, { kind: 'notice' }> | undefined {
   const [head, ...rest] = content
   const headIsText = head !== undefined && head.type === 'text'
-  const summary = noticeSummary(source) ?? (headIsText ? head.text : '')
+  // A team peer delivery leads with a long message id in its head block, so
+  // show a clean "Message from <senderName>" account instead; subagent notices
+  // use their own summary, and anything else falls back to the head text.
+  const summary = source.kind === 'team-message'
+    ? `Message from ${source.senderName}`
+    : noticeSummary(source) ?? (headIsText ? head.text : '')
   if (summary === '') return undefined
   // Notice content blocks are paragraphs (the account header, then the child's
   // message), so the body joins them one per line rather than concatenated.
