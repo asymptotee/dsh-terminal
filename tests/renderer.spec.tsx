@@ -1004,6 +1004,24 @@ describe('subagent panel', () => {
     expect(lastFrame()).not.toContain('◯ main')
   })
 
+  it('truncates a long activity so the row stays on one line', () => {
+    const longActivity = 'find ' + 'x'.repeat(120)
+    const { lastFrame } = renderApp(
+      <TuiApp
+        state={state([])}
+        handlers={noopHandlers()}
+        view={panelView({ subagents: [{ childId: 'child-1', label: '调研包结构', activity: longActivity, startedAt: Date.now() - 86_000, inputTokens: 11_100, fading: false }] })}
+      />,
+    )
+    const frame = lastFrame() ?? ''
+    // The activity is cut with an ellipsis; the full command is gone.
+    expect(frame).toContain('…')
+    expect(frame).not.toContain(longActivity)
+    // Single row: the label and the elapsed/tokens share one line (no wrap).
+    const row = frame.split('\n').find(r => r.includes('调研包结构')) ?? ''
+    expect(row).toContain('↓ 11.1k tokens')
+  })
+
   it('renders the team panel with roster and task board', () => {
     const { lastFrame } = renderApp(
       <TuiApp

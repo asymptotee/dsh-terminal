@@ -309,16 +309,25 @@ function SubagentPanel({
       {[undefined, ...rows].map((row, index) => {
         const isSelected = selected === index
         const marker = isSelected ? '●' : '◯'
+        const label = row === undefined ? 'main' : row.label
+        const elapsed = row === undefined
+          ? ''
+          : `${formatElapsed(Date.now() - row.startedAt)} · ↓ ${formatTokenCount(row.inputTokens)} tokens`
+        // Clamp the activity so the row stays on one line with a clear gap
+        // before the right-aligned elapsed/tokens: the smaller of (terminal
+        // width minus label/elapsed/spacing) and PANEL_ACTIVITY_RATIO of width.
+        const budget = Math.min(width - stringWidth(label) - stringWidth(elapsed) - 5, Math.floor(width * PANEL_ACTIVITY_RATIO))
+        const activity = row !== undefined && row.activity !== undefined
+          ? truncateToWidth(row.activity, Math.max(0, budget))
+          : undefined
         return (
           <Box key={row === undefined ? 'main' : row.childId}>
             <Text>{isSelected ? <Text color="#51cf66">{marker}</Text> : <Text dimColor>{marker}</Text>}</Text>
             <Text> </Text>
-            <Text bold={isSelected}>{row === undefined ? 'main' : row.label}</Text>
-            {row !== undefined && row.activity !== undefined ? <Text dimColor>  {row.activity}</Text> : null}
+            <Text bold={isSelected}>{label}</Text>
+            {activity !== undefined && activity !== '' ? <Text dimColor>  {activity}</Text> : null}
             <Box flexGrow={1} />
-            {row === undefined ? null : (
-              <Text dimColor>{formatElapsed(Date.now() - row.startedAt)} · ↓ {formatTokenCount(row.inputTokens)} tokens</Text>
-            )}
+            {row === undefined ? null : <Text dimColor>{elapsed}</Text>}
           </Box>
         )
       })}
@@ -339,6 +348,16 @@ function TeamPanel({ team, selected }: { team: TeamPanelInfo; selected: number |
       {team.members.map((member, index) => {
         const isSelected = selected === index
         const marker = isSelected ? '●' : '◯'
+        const elapsed = member.startedAt !== undefined
+          ? `${formatElapsed(Date.now() - member.startedAt)} · ↓ ${formatTokenCount(member.inputTokens ?? 0)} tokens`
+          : ''
+        // Clamp the activity so the row stays on one line with a clear gap
+        // before the right-aligned elapsed/tokens: the smaller of (terminal
+        // width minus name/elapsed/spacing) and PANEL_ACTIVITY_RATIO of width.
+        const budget = Math.min(width - stringWidth(member.name) - stringWidth(elapsed) - 7, Math.floor(width * PANEL_ACTIVITY_RATIO))
+        const activity = member.activity !== undefined
+          ? truncateToWidth(member.activity, Math.max(0, budget))
+          : undefined
         return (
           <Box key={member.name}>
             {/* Two-space indent aligns the member marker under the task marker. */}
@@ -350,11 +369,9 @@ function TeamPanel({ team, selected }: { team: TeamPanelInfo; selected: number |
               : member.phase === 'provisioning'
                 ? <Text bold={isSelected} color="yellow">{member.name}</Text>
                 : <Text bold={isSelected}>{member.name}</Text>}
-            {member.activity !== undefined ? <Text dimColor>  {member.activity}</Text> : null}
+            {activity !== undefined && activity !== '' ? <Text dimColor>  {activity}</Text> : null}
             <Box flexGrow={1} />
-            {member.startedAt !== undefined
-              ? <Text dimColor>{formatElapsed(Date.now() - member.startedAt)} · ↓ {formatTokenCount(member.inputTokens ?? 0)} tokens</Text>
-              : null}
+            {elapsed !== '' ? <Text dimColor>{elapsed}</Text> : null}
           </Box>
         )
       })}
@@ -1287,6 +1304,10 @@ export function padToWidth(content: string, width: number): string {
 /** Fraction of the terminal width a tool call line may occupy before its
  *  invocation is truncated with an ellipsis (ctrl+o reveals the full text). */
 const CALL_WIDTH_RATIO = 0.6
+
+/** Fraction of the terminal width a panel row's activity may occupy before it
+ *  is truncated, keeping a clear gap before the right-aligned elapsed/tokens. */
+const PANEL_ACTIVITY_RATIO = 0.6
 
 /**
  * Truncate text to fit `maxWidth` display columns, appending `…` when cut.
