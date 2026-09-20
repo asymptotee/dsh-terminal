@@ -10,12 +10,28 @@
 // JSX), so the React namespace must be imported even though the package's own
 // tsc build uses react-jsx; React.useRef below keeps the import used.
 import os from 'node:os'
-import React, { useState } from 'react'
-import { Box, Static, Text, render, useInput, usePaste, useStdout } from 'ink'
+import React, { useEffect, useLayoutEffect, useReducer, useRef, useState } from 'react'
+import { Box, measureElement, Text, render, useInput, usePaste, useStdout } from 'ink'
 import stringWidth from 'string-width'
 import type { Frame, FrameState } from './frames.ts'
 import { createFrameState } from './frames.ts'
 import { contentToText, stripOuterCodeFence } from './render.ts'
+import {
+  containsMouseReport,
+  createScrollState,
+  CURSOR_HIDE,
+  CURSOR_SHOW,
+  ENTER_FULLSCREEN,
+  EXIT_FULLSCREEN,
+  MOUSE_OFF,
+  MOUSE_ON,
+  mouseEnabled,
+  PRE_MEASURE_MARGIN,
+  scrollReducer,
+  transcriptMarginTop,
+  wheelDeltaFromInput,
+} from './terminal.ts'
+import type { ScrollAction } from './terminal.ts'
 
 /** Callbacks the input bar hands to the driver. */
 export interface InputHandlers {
@@ -154,8 +170,40 @@ function LoadingScreen(): React.JSX.Element {
   return <Box />
 }
 
+/**
+ * Take over the terminal for the fullscreen surface: enter the alternate
+ * screen and (unless opted out) enable SGR mouse tracking so the wheel scrolls
+ * the transcript. Returns the idempotent restore, also wired to the process
+ * `exit` event so a crash or an external kill never strands the user in the
+ * alternate screen with mouse tracking on.
+ */
+function beginFullscreenTakeover(): (() => void) | undefined {
+  if (!process.stdout.isTTY) return undefined
+  // The cursor hide rides with the takeover instead of waiting for ink's
+  // first flushed render: a slow session resume would otherwise leave the
+  // shell cursor blinking on the blank alternate screen for seconds.
+  process.stdout.write(ENTER_FULLSCREEN + CURSOR_HIDE)
+  const mouse = mouseEnabled()
+  if (mouse) process.stdout.write(MOUSE_ON)
+  let restored = false
+  const restore = (): void => {
+    if (restored) return
+    restored = true
+    if (mouse) process.stdout.write(MOUSE_OFF)
+    process.stdout.write(CURSOR_SHOW + EXIT_FULLSCREEN)
+  }
+  process.on('exit', restore)
+  return () => {
+    process.off('exit', restore)
+    restore()
+  }
+}
+
 /** The ink terminal view the driver drives: stream, status, and input bar. */
 export function createInkRenderer(): TuiRenderer {
+  // The takeover precedes the first render so ink's initial frame already
+  // paints inside the alternate screen.
+  const restoreTerminal = beginFullscreenTakeover()
   let state = createFrameState()
   let view: RenderView | undefined
   let handlers: InputHandlers = {
@@ -188,110 +236,230 @@ export function createInkRenderer(): TuiRenderer {
       app.rerender(React.createElement(TuiApp, props()))
     },
     dispose(): void {
+      // Unmount first: ink's teardown repaints once inside the alternate
+      // screen, then the restore hands the terminal back to the user.
       app.unmount()
+      restoreTerminal?.()
     },
   }
 }
 
-/** The whole terminal surface: appended stream, overlay, status bar, input bar. */
+/** Transcript frames beyond this render cap are elided with a hint row. */
+const MAX_RENDERED_FRAMES = 300
+
+/** Keep the last `cap` frames, reporting how many earlier ones are elided. */
+function windowFrames(frames: readonly Frame[]): { hidden: number; visible: readonly Frame[] } {
+  const visible = frames.slice(-MAX_RENDERED_FRAMES)
+  return { hidden: frames.length - visible.length, visible }
+}
+
+/**
+ * The whole terminal surface: a scrollable transcript window filling the
+ * viewport above a fixed chrome band. Everything renders inside the alternate
+ * screen at exactly `rows` height — ink never overflows, so its clear-the-
+ * scrollback fallback is structurally unreachable; wheel/PageUp scroll the
+ * transcript through the measured `scrollTop` model in terminal.ts.
+ */
 export function TuiApp({
   state,
   handlers,
   view,
+  viewportRows,
 }: {
   state: FrameState
   handlers: InputHandlers
   view?: RenderView
+  /** Viewport height override for tests (ink-testing-library has no rows). */
+  viewportRows?: number
 }): React.JSX.Element {
   const [expandedOutput, setExpandedOutput] = useState(false)
+  // One-way latch: the welcome splash disappears as soon as typing starts and
+  // never returns for the rest of this session.
+  const [welcomeDismissed, setWelcomeDismissed] = useState(false)
   // The arrow-selected approval option; resets per question via the overlay key.
   const [approvalIndex, setApprovalIndex] = useState(0)
   const onApprovalSelect = (delta: number): void => {
     setApprovalIndex(current => Math.min(1, Math.max(0, current + delta)))
   }
+  const { columns, rows: termRows } = useTerminalSize()
+  const rows = viewportRows ?? termRows
   const frames = state.frames
   // The arrow-browsed history: the session's submitted user lines, so a
   // resumed session restores its past inputs from the replayed log.
   const history = frames
     .filter((frame): frame is Extract<Frame, { kind: 'user' }> => frame.kind === 'user')
     .map(frame => frame.text)
-  // Settled frames (and the welcome block) append once into the terminal
-  // scrollback — never redrawn, so the scrollback survives. A frame enters the
-  // scrollback only once it can no longer change: a pending tool call settled
-  // while a sibling frame runs in parallel would otherwise stay frozen without
-  // its result, because Static never redraws an appended frame. The latest
-  // frame stays live above the input bar even when settled, so streaming
-  // output and the expand key can redraw it.
-  const lastLiveIndex = Math.max(0, frames.length - 1)
-  const firstMutable = frames.findIndex(frameMutable)
-  const liveStart = firstMutable === -1 ? lastLiveIndex : Math.min(firstMutable, lastLiveIndex)
-  const settled = frames.slice(0, liveStart)
-  const live = frames.slice(liveStart)
-  const items: StreamItem[] = [{ kind: 'welcome', status: view?.status }, ...settled]
   const subagents = view?.subagents ?? []
   const opened = view?.openSubagent
-  // The main scrollback stays mounted while the child view is open, so its
-  // Static output is never re-emitted; the child transcript replaces only the
-  // live region below it (input bar, panel, and status bar).
   const focusMode: 'input' | 'panel' | 'child' = opened !== undefined
     ? 'child'
     : view?.subagentSelected !== undefined || view?.teamSelected !== undefined ? 'panel' : 'input'
 
+  // ---- Transcript scroll state ---------------------------------------
+  // The transcript is the app's own data (no terminal scrollback): the
+  // window clips a bottom-anchored content column, and `marginTop` slides it
+  // through the window. Heights come from measureElement after layout — no
+  // width/wrapping estimation anywhere. offset 0 = sticky at the live bottom.
+  const [scroll, dispatch] = useReducer(scrollReducer, undefined, createScrollState)
+  const windowRef = useRef<any>(null)
+  const contentRef = useRef<any>(null)
+  // Measure the laid-out window and content after every commit and adopt the
+  // heights when they changed. A layout effect (not a passive one) so the
+  // corrective render converges in the same tick instead of flashing a
+  // mis-anchored frame; the reducer returns identical state on equal
+  // measurements so this loop terminates.
+  useLayoutEffect(() => {
+    const win = windowRef.current
+    const content = contentRef.current
+    if (win === null || content === null) return
+    const measuredWindow = measureElement(win)
+    const measuredContent = measureElement(content)
+    if (measuredContent.height !== scroll.contentRows || measuredWindow.height !== scroll.windowRows) {
+      dispatch({ type: 'measure', contentRows: measuredContent.height, windowRows: measuredWindow.height })
+    }
+  })
+
+  // The child view swaps the transcript source (header + the child's frames);
+  // scroll position resets on enter/exit. The pinned plan in the chrome band
+  // follows the active view — the main session's plan, or the opened child's.
+  const mainWindowed = windowFrames(frames)
+  const childWindowed = opened === undefined ? undefined : windowFrames(opened.state.frames)
+  const activePlan = opened === undefined ? state.plan : opened.state.plan
+  const transcriptKey = opened === undefined ? 'main' : opened.childId
+  useLayoutEffect(() => {
+    dispatch({ type: 'reset' })
+  }, [transcriptKey])
+
+  // The welcome block is the opening splash of a fresh session: centered in
+  // the window while the transcript is empty, dismissed for good the moment
+  // the user starts typing — it never returns this session, and a resumed
+  // session (frames replayed) never shows it at all.
+  const showWelcome = opened === undefined && frames.length === 0 && !welcomeDismissed
+  // The window height for the splash's very first paint, before the measure
+  // pass lands: a fresh session's chrome is exactly the input bar (two rules
+  // plus one buffer row) and, once known, the status bar — so the splash is
+  // centered from frame one instead of flashing above center until measured.
+  const welcomeChromeRows = 3 + (view?.status !== undefined ? (view.status.mode !== undefined ? 2 : 1) + 1 : 0)
+  const welcomeWindowRows = scroll.windowRows > 0 ? scroll.windowRows : Math.max(3, rows - welcomeChromeRows)
+  const transcript = opened === undefined ? (
+    showWelcome ? (
+      <Box
+        flexDirection="column"
+        justifyContent="center"
+        alignItems="center"
+        minHeight={welcomeWindowRows}
+      >
+        <WelcomeBlock status={view?.status} />
+      </Box>
+    ) : (
+      <>
+        {mainWindowed.hidden > 0 ? <Text dimColor>… {mainWindowed.hidden} earlier frames</Text> : null}
+        {mainWindowed.visible.map(frame => (
+          <Box key={frameKey(frame)} flexDirection="column" marginBottom={1}>
+            <FrameRow frame={frame} expandedOutput={expandedOutput} />
+          </Box>
+        ))}
+      </>
+    )
+  ) : (
+    <>
+      {(childWindowed?.hidden ?? 0) > 0 ? <Text dimColor>… {childWindowed?.hidden} earlier frames</Text> : null}
+      {(childWindowed?.visible ?? []).map(frame => (
+        <Box key={frameKey(frame)} flexDirection="column" marginBottom={1}>
+          <FrameRow frame={frame} expandedOutput={expandedOutput} />
+        </Box>
+      ))}
+    </>
+  )
+
   return (
-    <Box flexDirection="column">
-      <SessionStream
-        items={items}
-        live={live}
-        expandedOutput={expandedOutput}
-      />
-      {/* Follow-ups queued behind a running step echo immediately (dimmed, no
-          committed background) so the submission is never silently swallowed;
-          each is dropped once its durable user/message frame lands above. */}
-      {view?.pendingUser !== undefined && view.pendingUser.length > 0
-        ? <PendingUserEchoes items={view.pendingUser} />
-        : null}
-      {view?.overlay !== undefined
-        ? <OverlayLine key={overlayKey(view.overlay)} overlay={view.overlay} selected={view.overlay.kind === 'approval' ? approvalIndex : 0} />
-        : null}
-      {opened !== undefined ? <ChildView opened={opened} /> : null}
-      {/* The standing plan stays pinned directly above the input bar for its
-          whole lifetime; the child view shows the child's own plan instead. */}
-      {opened === undefined && state.plan !== undefined ? <PlanPanel todos={state.plan} /> : null}
-      {/* The step heartbeat sits below the plan and above the input bar:
-          shown throughout a step — its tool executions included — while an
-          approval overlay waits on the user and the child view, which
-          replaces this region entirely, hides it. */}
-      {opened === undefined && view?.overlay === undefined
-        && state.turnStartedAt !== undefined
-        ? <HeartbeatLine startedAt={state.turnStartedAt} tokens={state.turnTokens} />
-        : null}
-      {/* The input bar stays mounted in every focus mode — it owns the single
-          stdin listener; in the child view it renders nothing and only routes
-          Esc back to the input focus. */}
-      <InputBar
-        handlers={handlers}
-        approvalPending={view?.overlay?.kind === 'approval'}
-        approvalSelected={approvalIndex}
-        onToggleExpand={() => { setExpandedOutput(current => !current) }}
-        onApprovalSelect={onApprovalSelect}
-        history={history}
-        focusMode={focusMode}
-        panelAvailable={subagents.length > 0 || (view?.team?.members.length ?? 0) > 0}
-      />
-      {opened === undefined ? (
-        <>
-          <StatusBar
-            status={view?.status}
-          />
-          {subagents.length > 0
-            ? <SubagentPanel rows={subagents} selected={view?.subagentSelected} />
-            : null}
-          {view?.team !== undefined ? <TeamPanel team={view.team} selected={view.teamSelected} /> : null}
-        </>
-      ) : null}
+    <Box flexDirection="column" height={rows}>
+      {/* The scroll window: fixed height, overflow clipped; the content
+          column slides through it via the measured marginTop. Before the
+          first measurement the welcome splash centers through its static
+          minHeight (margin 0), while a frames transcript parks above the
+          window — it appears bottom-anchored directly instead of flashing
+          top-aligned and jumping down when the measure pass lands. */}
+      <Box ref={windowRef} flexGrow={1} minHeight={3} overflow="hidden" flexDirection="column">
+        <Box
+          ref={contentRef}
+          flexDirection="column"
+          flexShrink={0}
+          marginTop={scroll.windowRows === 0 || scroll.contentRows === 0
+            ? (showWelcome ? 0 : PRE_MEASURE_MARGIN)
+            : transcriptMarginTop(scroll)}
+        >
+          {transcript}
+        </Box>
+      </Box>
+      {/* The fixed chrome band below the transcript. */}
+      <Box flexDirection="column" flexShrink={0}>
+        {/* Follow-ups queued behind a running step echo immediately (dimmed, no
+            committed background) so the submission is never silently swallowed;
+            each is dropped once its durable user/message frame lands above. */}
+        {view?.pendingUser !== undefined && view.pendingUser.length > 0
+          ? <PendingUserEchoes items={view.pendingUser} />
+          : null}
+        {view?.overlay !== undefined
+          ? <OverlayLine key={overlayKey(view.overlay)} overlay={view.overlay} selected={view.overlay.kind === 'approval' ? approvalIndex : 0} />
+          : null}
+        {/* The standing plan stays pinned above the input bar in every view;
+            it follows the active transcript (main session or opened child). */}
+        {activePlan !== undefined ? <PlanPanel todos={activePlan} /> : null}
+        {/* The step heartbeat sits below the plan and above the input bar:
+            shown throughout a step — its tool executions included — while an
+            approval overlay waits on the user. */}
+        {opened === undefined && view?.overlay === undefined
+          && state.turnStartedAt !== undefined
+          ? <HeartbeatLine startedAt={state.turnStartedAt} tokens={state.turnTokens} />
+          : null}
+        {/* The input bar stays mounted in every focus mode — it owns the single
+            stdin listener; in the child view it renders nothing and only routes
+            Esc back to the input focus. */}
+        <InputBar
+          handlers={handlers}
+          approvalPending={view?.overlay?.kind === 'approval'}
+          approvalSelected={approvalIndex}
+          onToggleExpand={() => { setExpandedOutput(current => !current) }}
+          onApprovalSelect={onApprovalSelect}
+          onScroll={dispatch}
+          onFirstInput={() => { setWelcomeDismissed(true) }}
+          history={history}
+          focusMode={focusMode}
+          panelAvailable={subagents.length > 0 || (view?.team?.members.length ?? 0) > 0}
+        />
+        {opened === undefined ? (
+          <>
+            <StatusBar
+              status={view?.status}
+            />
+            {subagents.length > 0
+              ? <SubagentPanel rows={subagents} selected={view?.subagentSelected} />
+              : null}
+            {view?.team !== undefined ? <TeamPanel team={view.team} selected={view.teamSelected} /> : null}
+          </>
+        ) : (
+          /* The child view's identity header pins at the very bottom: it is
+             standing context (which subagent, how to return), not transcript
+             content — inside the window it would be clipped at the live bottom
+             and covered by the scroll indicator at the top. */
+          <>
+            <Text dimColor>{'─'.repeat(columns)}</Text>
+            <Box justifyContent="center">
+              <Text>
+                subagent: <Text bold>{opened.label}</Text> <Text dimColor>(Esc 返回)</Text>
+              </Text>
+            </Box>
+          </>
+        )}
+      </Box>
     </Box>
   )
 }
+
+/** Panel rows beyond this cap are elided with a hint row, keeping the chrome
+ *  band bounded; the window follows the arrow selection. */
+const PANEL_MAX_ROWS = 8
 
 /** One unfinished direct subagent's row in the panel below the status bar. */
 function SubagentPanel({
@@ -303,13 +471,26 @@ function SubagentPanel({
   selected: number | undefined
 }): React.JSX.Element {
   const width = useTerminalWidth()
+  // The main row always shows; the subagent rows window around the selection
+  // (latest rows when unselected) once they exceed the cap.
+  const selectedSub = selected === undefined || selected === 0 ? undefined : selected - 1
+  const start = rows.length <= PANEL_MAX_ROWS
+    ? 0
+    : selectedSub === undefined
+      ? rows.length - PANEL_MAX_ROWS
+      : Math.min(Math.max(0, selectedSub - Math.floor(PANEL_MAX_ROWS / 2)), rows.length - PANEL_MAX_ROWS)
+  const visible = rows.slice(start, start + PANEL_MAX_ROWS)
+  const hiddenAfter = rows.length - start - visible.length
   return (
     <Box flexDirection="column">
       <Text dimColor>{'─'.repeat(width)}</Text>
-      {[undefined, ...rows].map((row, index) => {
-        const isSelected = selected === index
+      {start > 0 ? <Text dimColor>  … {start} more</Text> : null}
+      {[undefined, ...visible].map((row, index) => {
+        const isSelected = row === undefined ? selected === 0 : selected === start + index
         const marker = isSelected ? '●' : '◯'
-        const label = row === undefined ? 'main' : row.label
+        // Clamp the label so a long delegation description cannot wrap the
+        // row past one physical line and eat the transcript window's height.
+        const label = truncateToWidth(row === undefined ? 'main' : row.label, Math.max(4, Math.floor(width * 0.4)))
         const elapsed = row === undefined
           ? ''
           : `${formatElapsed(Date.now() - row.startedAt)} · ↓ ${formatTokenCount(row.inputTokens)} tokens`
@@ -331,6 +512,7 @@ function SubagentPanel({
           </Box>
         )
       })}
+      {hiddenAfter > 0 ? <Text dimColor>  … {hiddenAfter} more</Text> : null}
     </Box>
   )
 }
@@ -338,6 +520,16 @@ function SubagentPanel({
 /** The Agent Teams roster and shared task board, read from the agentTeam projection. */
 function TeamPanel({ team, selected }: { team: TeamPanelInfo; selected: number | undefined }): React.JSX.Element {
   const width = useTerminalWidth()
+  // Members window around the selection (roster head when unselected); tasks
+  // keep their reading order from the top. Both cap at PANEL_MAX_ROWS so the
+  // chrome band stays bounded.
+  const start = team.members.length <= PANEL_MAX_ROWS || selected === undefined
+    ? 0
+    : Math.min(Math.max(0, selected - Math.floor(PANEL_MAX_ROWS / 2)), team.members.length - PANEL_MAX_ROWS)
+  const visibleMembers = team.members.slice(start, start + PANEL_MAX_ROWS)
+  const hiddenMembers = team.members.length - visibleMembers.length
+  const visibleTasks = team.tasks.slice(0, PANEL_MAX_ROWS)
+  const hiddenTasks = team.tasks.length - visibleTasks.length
   return (
     <Box flexDirection="column">
       <Text dimColor>{'─'.repeat(width)}</Text>
@@ -345,16 +537,18 @@ function TeamPanel({ team, selected }: { team: TeamPanelInfo; selected: number |
         Teammates · {team.members.length}
         {selected !== undefined ? <Text dimColor>  (↑↓ 选择 · Enter 打开 · ↑/Esc 返回)</Text> : null}
       </Text>
-      {team.members.map((member, index) => {
-        const isSelected = selected === index
+      {visibleMembers.map((member, index) => {
+        const isSelected = selected === start + index
         const marker = isSelected ? '●' : '◯'
+        // Clamp the name so a long member name cannot wrap the row past one line.
+        const name = truncateToWidth(member.name, Math.max(4, Math.floor(width * 0.3)))
         const elapsed = member.startedAt !== undefined
           ? `${formatElapsed(Date.now() - member.startedAt)} · ↓ ${formatTokenCount(member.inputTokens ?? 0)} tokens`
           : ''
         // Clamp the activity so the row stays on one line with a clear gap
         // before the right-aligned elapsed/tokens: the smaller of (terminal
         // width minus name/elapsed/spacing) and PANEL_ACTIVITY_RATIO of width.
-        const budget = Math.min(width - stringWidth(member.name) - stringWidth(elapsed) - 7, Math.floor(width * PANEL_ACTIVITY_RATIO))
+        const budget = Math.min(width - stringWidth(name) - stringWidth(elapsed) - 7, Math.floor(width * PANEL_ACTIVITY_RATIO))
         const activity = member.activity !== undefined
           ? truncateToWidth(member.activity, Math.max(0, budget))
           : undefined
@@ -365,20 +559,21 @@ function TeamPanel({ team, selected }: { team: TeamPanelInfo; selected: number |
             <Text>{isSelected ? <Text color="#51cf66">{marker}</Text> : <Text dimColor>{marker}</Text>}</Text>
             <Text> </Text>
             {member.phase === 'failed'
-              ? <Text bold={isSelected} color="red">{member.name}</Text>
+              ? <Text bold={isSelected} color="red">{name}</Text>
               : member.phase === 'provisioning'
-                ? <Text bold={isSelected} color="yellow">{member.name}</Text>
-                : <Text bold={isSelected}>{member.name}</Text>}
+                ? <Text bold={isSelected} color="yellow">{name}</Text>
+                : <Text bold={isSelected}>{name}</Text>}
             {activity !== undefined && activity !== '' ? <Text dimColor>  {activity}</Text> : null}
             <Box flexGrow={1} />
             {elapsed !== '' ? <Text dimColor>{elapsed}</Text> : null}
           </Box>
         )
       })}
+      {hiddenMembers > 0 ? <Text dimColor>  … {hiddenMembers} more</Text> : null}
       {team.tasks.length > 0 ? (
         <>
           <Text>Tasks · {team.tasks.length}</Text>
-          {team.tasks.map((task, index) => {
+          {visibleTasks.map((task, index) => {
             const mark = task.status === 'completed'
               ? <Text color="green">✔</Text>
               : task.status === 'in_progress'
@@ -386,32 +581,19 @@ function TeamPanel({ team, selected }: { team: TeamPanelInfo; selected: number |
                 : task.blocked
                   ? <Text dimColor>⊘</Text>
                   : <Text dimColor>◻</Text>
+            const meta = `(${task.ownerName ?? 'unowned'} · ${task.status})`
+            // Clamp the subject so the task row stays one physical line.
+            const subject = truncateToWidth(task.subject, Math.max(4, width - stringWidth(meta) - 6))
             return (
               <Box key={index}>
-                <Text>  {mark} {task.subject} </Text>
-                <Text dimColor>({task.ownerName ?? 'unowned'} · {task.status})</Text>
+                <Text>  {mark} {subject} </Text>
+                <Text dimColor>{meta}</Text>
               </Box>
             )
           })}
+          {hiddenTasks > 0 ? <Text dimColor>  … {hiddenTasks} more</Text> : null}
         </>
       ) : null}
-    </Box>
-  )
-}
-
-/** The read-only transcript of one child session opened from the panel. */
-function ChildView({ opened }: { opened: OpenSubagent }): React.JSX.Element {
-  const width = useTerminalWidth()
-  return (
-    <Box flexDirection="column">
-      <Text dimColor>{'─'.repeat(width)}</Text>
-      <Text><Text color="#51cf66">●</Text> subagent: <Text bold>{opened.label}</Text> <Text dimColor>(Esc 返回)</Text></Text>
-      {opened.state.plan !== undefined ? <PlanPanel todos={opened.state.plan} /> : null}
-      {opened.state.frames.map((frame, index) => (
-        <Box key={frameKey(frame)} flexDirection="column" marginBottom={index === opened.state.frames.length - 1 ? 0 : 1}>
-          <FrameRow frame={frame} expandedOutput={false} />
-        </Box>
-      ))}
     </Box>
   )
 }
@@ -521,85 +703,35 @@ function formatContext(context: { used: number; window: number }): string {
   return `${compactTokens(context.used)}/${compactTokens(context.window)} (${percent}%)`
 }
 
-/** The seq-ordered frame window: settled scrollback plus the live frames. */
-/** One append-once stream entry: the welcome block or a settled frame. */
-type StreamItem = Frame | { kind: 'welcome'; status: StatusInfo | undefined }
-
-export function SessionStream({
-  items,
-  live,
-  expandedOutput,
-}: {
-  /** The welcome block and settled frames, appended once into the terminal scrollback. */
-  items: StreamItem[]
-  /** The frames awaiting updates (plus the latest frame), redrawn above the input bar. */
-  live: readonly Frame[]
-  /** Whether truncated tool outputs render in full. */
-  expandedOutput: boolean
-}): React.JSX.Element {
-  return (
-    <Box flexDirection="column">
-      <Static items={items}>
-        {item => item.kind === 'welcome'
-          ? (
-            <Box key="welcome" flexDirection="column" marginBottom={1}>
-              <WelcomeBlock status={item.status} />
-            </Box>
-          )
-          : (
-            <Box key={frameKey(item)} flexDirection="column" marginBottom={1}>
-              <FrameRow frame={item} expandedOutput={false} />
-            </Box>
-          )}
-      </Static>
-      {live.map(frame => (
-        <Box key={frameKey(frame)} flexDirection="column" marginBottom={1}>
-          <FrameRow frame={frame} expandedOutput={expandedOutput} />
-        </Box>
-      ))}
-    </Box>
-  )
-}
+/** Lines one queued echo shows before eliding the rest with a hint row. */
+const ECHO_MAX_LINES = 3
 
 /**
  * The optimistic echoes of follow-ups submitted while a step was in flight.
  * Rendered dimmed and without the committed user background so a queued message
- * reads as pending; each is removed once its durable user/message frame lands in
- * the scrollback above.
+ * reads as pending; each is removed once its durable user/message frame lands
+ * in the transcript above. Echoes cap at ECHO_MAX_LINES so a pasted follow-up
+ * cannot squeeze the transcript window.
  */
 function PendingUserEchoes({ items }: { items: readonly PendingUserEcho[] }): React.JSX.Element {
   return (
     <Box flexDirection="column">
       {items.map(item => {
         const lines = item.text.split('\n')
+        const hidden = Math.max(0, lines.length - ECHO_MAX_LINES)
+        const visible = lines.slice(0, ECHO_MAX_LINES)
         return (
           <Box key={item.id} flexDirection="column" marginBottom={1}>
-            {lines.map((line, index) => (
+            {visible.map((line, index) => (
               <Text key={index} dimColor>{index === 0 ? '❯ ' : '  '}{line}</Text>
             ))}
+            {hidden > 0 ? <Text dimColor>  … {hidden} more lines</Text> : null}
             <Text dimColor>  (queued — runs when the current turn ends)</Text>
           </Box>
         )
       })}
     </Box>
   )
-}
-
-/** Whether a frame can still receive updates and must stay out of the append-only scrollback. */
-function frameMutable(frame: Frame): boolean {
-  switch (frame.kind) {
-    case 'user':
-    case 'notice':
-    case 'interrupted':
-    case 'error':
-      return false
-    case 'assistant':
-      return frame.streaming
-    case 'tool':
-      return frame.result === undefined && frame.resultContent === undefined
-    case 'command':
-      return frame.done === undefined
-  }
 }
 
 function frameKey(frame: Frame): string {
@@ -732,12 +864,20 @@ function CommandRow({ frame }: { frame: Extract<Frame, { kind: 'command' }> }): 
   )
 }
 
-/** The standing todo plan as a checklist panel above the stream. */
+/** Todos beyond this cap are elided with a hint row, keeping the chrome band
+ *  bounded so the transcript window always keeps a usable height. */
+const PLAN_MAX_TODOS = 10
+
+/** The standing todo plan as a checklist panel above the stream; the tail
+ *  (most recent) todos win when the list exceeds the cap. */
 function PlanPanel({ todos }: { todos: FrameState['plan'] & object }): React.JSX.Element {
+  const hidden = Math.max(0, todos.length - PLAN_MAX_TODOS)
+  const visible = todos.slice(-PLAN_MAX_TODOS)
   return (
     <Box flexDirection="column" marginBottom={1}>
       <Text><Text color="#51cf66">●</Text> Todo list</Text>
-      {todos.map((todo, index) => {
+      {hidden > 0 ? <Text dimColor>  ⎿  … {hidden} earlier</Text> : null}
+      {visible.map((todo, index) => {
         const mark = todo.status === 'completed'
           ? <Text color="green">✔</Text>
           : todo.status === 'in_progress'
@@ -748,7 +888,7 @@ function PlanPanel({ todos }: { todos: FrameState['plan'] & object }): React.JSX
         // The connector is dim like every other connector in the project; dim
         // is scoped to its own Text so it does not mute the colored status
         // markers, and the content text takes its own dim wrapper.
-        const prefix = index === 0 ? '  ⎿  ' : '     '
+        const prefix = index === 0 && hidden === 0 ? '  ⎿  ' : '     '
         return <Text key={index}><Text dimColor>{prefix}</Text>{mark} <Text dimColor>{todo.content}</Text></Text>
       })}
     </Box>
@@ -1082,6 +1222,8 @@ export function InputBar({
   approvalSelected,
   onToggleExpand,
   onApprovalSelect,
+  onScroll,
+  onFirstInput,
   history = [],
   focusMode = 'input',
   panelAvailable = false,
@@ -1094,6 +1236,10 @@ export function InputBar({
   onToggleExpand: () => void
   /** Move the arrow selection of the pending approval question. */
   onApprovalSelect: (delta: number) => void
+  /** Scroll the transcript: wheel notches and PageUp/PageDown. */
+  onScroll?: (action: ScrollAction) => void
+  /** Fired once when the buffer first becomes non-empty (typing or paste). */
+  onFirstInput?: () => void
   /** The session's submitted lines; the arrows browse them (log-restored on resume). */
   history?: readonly string[]
   /** Which surface owns the keys; the panel and child view borrow them from the editor. */
@@ -1106,22 +1252,45 @@ export function InputBar({
   const bufferRef = React.useRef({ value: '', cursor: 0 })
   const [buffer, setBufferState] = useState(bufferRef.current)
   const historyRef = React.useRef<readonly string[]>(history)
-  // The session log is the authority: the driver mounts this bar before the
-  // replay folds, so the effect adopts the restored lines as they land in the
-  // frames (live commits are already in the log by the time frames change).
+  // The session log is the authority once it has caught up: the driver mounts
+  // this bar before the replay folds, so the effect adopts the restored lines
+  // as they land in the frames. A shorter prop than the local list means the
+  // frames lag behind the bar's own optimistic commits (or the harness never
+  // echoes them) — adopting it would wipe lines the user just submitted, so
+  // the local list wins until the log is at least as long.
   React.useEffect(() => {
-    historyRef.current = history
+    if (history.length >= historyRef.current.length) historyRef.current = history
   }, [history])
   const [historyIndex, setHistoryIndex] = useState(-1)
   // Two Ctrl+C presses within a second (with an empty buffer) quit.
   const lastInterruptRef = React.useRef(0)
 
   const setBuffer = (next: { value: string; cursor: number }): void => {
+    const wasEmpty = bufferRef.current.value === ''
     bufferRef.current = next
     setBufferState(next)
+    // The welcome splash is dismissed by the first text entering the box.
+    if (wasEmpty && next.value !== '') onFirstInput?.()
   }
 
   useInput((input, key) => {
+    // Mouse tracking reports (wheel, clicks) arrive as ordinary input since
+    // ink has no mouse support: wheel notches scroll the transcript, every
+    // other report is swallowed — none may reach the editor buffer. These run
+    // before the approval/panel/child branches so scrolling works everywhere.
+    if (containsMouseReport(input)) {
+      const delta = wheelDeltaFromInput(input)
+      if (delta !== 0) onScroll?.({ type: 'wheel', delta })
+      return
+    }
+    if (key.pageUp) {
+      onScroll?.({ type: 'page', delta: 1 })
+      return
+    }
+    if (key.pageDown) {
+      onScroll?.({ type: 'page', delta: -1 })
+      return
+    }
     const { value, cursor } = bufferRef.current
     if (approvalPending) {
       // The pending question owns the keys: y allows, n and Esc reject, the
@@ -1286,6 +1455,18 @@ export function InputBar({
 function useTerminalWidth(fallback = 80): number {
   const { stdout } = useStdout()
   return typeof stdout.columns === 'number' && stdout.columns > 0 ? stdout.columns : fallback
+}
+
+/**
+ * The terminal size with sane non-TTY fallbacks. `rows` sizes the fullscreen
+ * root layout; the fallback matches ink's own non-TTY default so tests and
+ * piped output degrade the same way ink's viewport logic does.
+ */
+function useTerminalSize(fallbackColumns = 80, fallbackRows = 24): { columns: number; rows: number } {
+  const { stdout } = useStdout()
+  const columns = typeof stdout.columns === 'number' && stdout.columns > 0 ? stdout.columns : fallbackColumns
+  const rows = typeof stdout.rows === 'number' && stdout.rows > 0 ? stdout.rows : fallbackRows
+  return { columns, rows }
 }
 
 /**

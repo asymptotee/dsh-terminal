@@ -2,52 +2,58 @@
 
 import { describe, expect, it } from 'vitest'
 import {
+  containsMouseReport,
   createScrollState,
   maxOffset,
   mouseEnabled,
-  parseSgrMouse,
   scrollReducer,
   transcriptMarginTop,
-  WHEEL_DOWN,
-  WHEEL_UP,
+  wheelDeltaFromInput,
+  WHEEL_SCROLL_LINES,
 } from '../src/terminal.ts'
 import type { ScrollState } from '../src/terminal.ts'
 
-describe('parseSgrMouse', () => {
-  it('decodes wheel-up and wheel-down reports', () => {
-    const { events, consumed } = parseSgrMouse('\x1b[<64;12;34M')
-    expect(events).toEqual([{ button: WHEEL_UP, x: 12, y: 34, release: false }])
-    expect(consumed).toBe('\x1b[<64;12;34M'.length)
-
-    const down = parseSgrMouse('\x1b[<65;1;1M')
-    expect(down.events[0]?.button).toBe(WHEEL_DOWN)
+describe('wheelDeltaFromInput', () => {
+  it('decodes a wheel notch with ink\'s leading ESC stripped', () => {
+    expect(wheelDeltaFromInput('[<64;12;34M')).toBe(WHEEL_SCROLL_LINES)
+    expect(wheelDeltaFromInput('[<65;12;34M')).toBe(-WHEEL_SCROLL_LINES)
   })
 
-  it('collects every report in one chunk, ignoring interleaved text', () => {
-    const { events } = parseSgrMouse('abc\x1b[<64;5;5Mxyz\x1b[<65;6;6M')
-    expect(events.map(e => e.button)).toEqual([WHEEL_UP, WHEEL_DOWN])
+  it('decodes a report that still carries its ESC', () => {
+    expect(wheelDeltaFromInput('\x1b[<64;1;1M')).toBe(WHEEL_SCROLL_LINES)
   })
 
-  it('marks release events', () => {
-    const { events } = parseSgrMouse('\x1b[<0;3;3m')
-    expect(events).toEqual([{ button: 0, x: 3, y: 3, release: true }])
+  it('sums batched notches from one fast wheel flick', () => {
+    expect(wheelDeltaFromInput('[<64;5;5M\x1b[<64;5;5M\x1b[<64;5;5M')).toBe(3 * WHEEL_SCROLL_LINES)
+    expect(wheelDeltaFromInput('[<64;5;5M\x1b[<65;5;5M')).toBe(0)
   })
 
-  it('leaves a trailing incomplete sequence unconsumed for the next chunk', () => {
-    const chunk = 'abc\x1b[<64;5'
-    const { events, consumed } = parseSgrMouse(chunk)
-    expect(events).toEqual([])
-    expect(consumed).toBe(0)
-    // The full report arrives once the rest lands.
-    const { events: after, consumed: consumedAfter } = parseSgrMouse(chunk + ';5M')
-    expect(after).toHaveLength(1)
-    expect(consumedAfter).toBe(chunk.length + 3)
+  it('masks modifier bits so shift/ctrl wheel still scrolls', () => {
+    expect(wheelDeltaFromInput('[<68;5;5M')).toBe(WHEEL_SCROLL_LINES)  // shift
+    expect(wheelDeltaFromInput('[<80;5;5M')).toBe(WHEEL_SCROLL_LINES)  // ctrl
+    expect(wheelDeltaFromInput('[<72;5;5M')).toBe(WHEEL_SCROLL_LINES)  // alt
   })
 
-  it('returns nothing for plain typed input', () => {
-    const { events, consumed } = parseSgrMouse('hello world')
-    expect(events).toEqual([])
-    expect(consumed).toBe(0)
+  it('ignores clicks and releases', () => {
+    expect(wheelDeltaFromInput('[<0;5;5M')).toBe(0)
+    expect(wheelDeltaFromInput('[<0;5;5m')).toBe(0)
+  })
+
+  it('returns 0 for plain typed input', () => {
+    expect(wheelDeltaFromInput('hello [world]')).toBe(0)
+  })
+})
+
+describe('containsMouseReport', () => {
+  it('flags any mouse report, including clicks the editor must swallow', () => {
+    expect(containsMouseReport('[<64;5;5M')).toBe(true)
+    expect(containsMouseReport('[<0;5;5M[<0;5;5m')).toBe(true)
+    expect(containsMouseReport('\x1b[<65;2;2M')).toBe(true)
+  })
+
+  it('passes ordinary typing through', () => {
+    expect(containsMouseReport('ls -la')).toBe(false)
+    expect(containsMouseReport('[not a report')).toBe(false)
   })
 })
 

@@ -20,6 +20,15 @@ export const MOUSE_ON = '\x1b[?1000h\x1b[?1006h'
 /** Disable mouse tracking, returning the wheel to the terminal emulator. */
 export const MOUSE_OFF = '\x1b[?1000l\x1b[?1006l'
 
+/** Hide the hardware cursor. Written raw at takeover: ink only hides it on
+ *  its first flushed render, which a slow session resume defers for seconds —
+ *  leaving the shell cursor blinking on the blank alternate screen. The UI
+ *  draws its own caret, and ink never shows the cursor on its own. */
+export const CURSOR_HIDE = '\x1b[?25l'
+
+/** Show the hardware cursor again, restoring the shell's blinking caret. */
+export const CURSOR_SHOW = '\x1b[?25h'
+
 /**
  * Whether mouse tracking is wanted. `DSH_TERMINAL_MOUSE=0` (or `false`)
  * disables it: keyboard scrolling still works, and native terminal selection
@@ -36,37 +45,35 @@ export const WHEEL_DOWN = 65
 /** Lines one wheel notch scrolls. */
 export const WHEEL_SCROLL_LINES = 3
 
-/** One decoded SGR mouse report (`CSI < b;x;y M|m`). */
-export interface SgrMouseEvent {
-  /** Raw button code; 64/65 are the wheel directions. */
-  button: number
-  /** 1-based report coordinates (unused for wheel scrolling, kept for hit-testing later). */
-  x: number
-  y: number
-  /** True for the release event (`m`); wheel reports are press-only in practice. */
-  release: boolean
+/**
+ * An SGR mouse report as it survives ink's input pipeline: ink strips the
+ * leading ESC from the first sequence in a chunk, so both `[<b;x;yM` and
+ * `\x1b[<b;x;yM` occur (fast wheel notches batch into one chunk).
+ */
+const MOUSE_REPORT = /\x1b?\[<(\d+);(\d+);(\d+)([Mm])/g
+
+/** Whether a useInput string carries mouse reports that must not reach the
+ *  editor buffer (wheel notches, clicks, releases). */
+export function containsMouseReport(input: string): boolean {
+  MOUSE_REPORT.lastIndex = 0
+  return MOUSE_REPORT.test(input)
 }
 
 /**
- * Parse SGR mouse reports out of a raw stdin chunk. Text typed between
- * reports is ignored. A trailing incomplete sequence stays unconsumed — the
- * caller keeps it buffered for the next chunk (pty reads can split anywhere).
+ * The total wheel-scroll row delta of a useInput string: positive scrolls
+ * toward older content. Modifier bits (shift/alt/ctrl = 4/8/16) are masked so
+ * modified wheel notches still scroll; clicks and releases contribute 0.
  */
-export function parseSgrMouse(chunk: string): { events: readonly SgrMouseEvent[]; consumed: number } {
-  const events: SgrMouseEvent[] = []
-  const re = /\x1b\[<(\d+);(\d+);(\d+)([Mm])/g
-  let consumed = 0
+export function wheelDeltaFromInput(input: string): number {
+  MOUSE_REPORT.lastIndex = 0
+  let delta = 0
   let match: RegExpExecArray | null
-  while ((match = re.exec(chunk)) !== null) {
-    events.push({
-      button: Number(match[1]),
-      x: Number(match[2]),
-      y: Number(match[3]),
-      release: match[4] === 'm',
-    })
-    consumed = re.lastIndex
+  while ((match = MOUSE_REPORT.exec(input)) !== null) {
+    const base = Number(match[1]) & ~28
+    if (base === WHEEL_UP) delta += WHEEL_SCROLL_LINES
+    else if (base === WHEEL_DOWN) delta -= WHEEL_SCROLL_LINES
   }
-  return { events, consumed }
+  return delta
 }
 
 /**
@@ -117,6 +124,9 @@ export function scrollReducer(state: ScrollState, action: ScrollAction): ScrollS
     case 'bottom':
       return state.offset === 0 ? state : { ...state, offset: 0 }
     case 'measure': {
+      // Equal measurements return the identical state so React bails out —
+      // the measure effect re-runs on every render and must not re-render.
+      if (action.contentRows === state.contentRows && action.windowRows === state.windowRows) return state
       const next = { offset: state.offset, contentRows: action.contentRows, windowRows: action.windowRows }
       // Content growth while scrolled up keeps the user's absolute position:
       // the new rows land below what they are reading. Shrinkage clamps.
@@ -126,8 +136,14 @@ export function scrollReducer(state: ScrollState, action: ScrollAction): ScrollS
         : 0
       return { ...next, offset }
     }
-    case 'reset':
-      return createScrollState()
+    case 'reset': {
+      // Identity-stable when already fresh, so the mount-time reset and the
+      // per-render measure loop converge without extra renders.
+      const fresh = createScrollState()
+      return state.offset === fresh.offset && state.contentRows === fresh.contentRows && state.windowRows === fresh.windowRows
+        ? state
+        : fresh
+    }
   }
 }
 
@@ -141,3 +157,11 @@ export function transcriptMarginTop(state: ScrollState): number {
   if (state.windowRows === 0 || state.contentRows === 0) return 0
   return state.windowRows - state.contentRows + state.offset
 }
+
+/**
+ * Pre-measurement parking position for a frames transcript: far enough above
+ * the window that the first paint shows an empty window instead of a
+ * top-aligned flash that visibly jumps down when the measured bottom
+ * anchoring lands one frame later.
+ */
+export const PRE_MEASURE_MARGIN = -1_000_000
