@@ -425,10 +425,16 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
       ? view
       : { ...view, status: { ...view.status, context: { used, window: contextWindow } } }
   }
+  // Fold the replay without per-event renders: the intermediate states are
+  // not interactable, painting each one wastes time on large logs, and an
+  // early paint of the still-empty stream would flash the fresh-session
+  // welcome splash over a resumed session. The single initial render below
+  // publishes the fully replayed state at once.
   for (const event of agent.session.snapshotEvents()) {
     trackUsage(event)
-    adopt(foldEvent(state, event, deps).state, true)
+    state = foldEvent(state, event, deps).state
   }
+
   // Seed the team panel from the durable log so a resumed session with an
   // existing team shows its roster and task board immediately.
   refreshTeam()
