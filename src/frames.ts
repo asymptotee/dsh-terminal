@@ -286,6 +286,38 @@ function contentToThinking(content: readonly ContentBlock[]): string {
     .join('')
 }
 
+/** The settlement marker for calls abandoned by a turn boundary. */
+const ABANDONED_RESULT_TEXT = '(turn ended — no result)'
+
+/**
+ * Settle the pending tool/command registries at a turn boundary. A call the
+ * ended turn abandoned never receives its result; leaving the frame mutable
+ * forever would pin it — and every later frame — in the renderer's live region
+ * (they could never settle into the append-only scrollback). The marker text
+ * shows the abandoned state; a result arriving after the settlement is ignored
+ * as an orphan by the existing tool/result and command/done guards.
+ */
+function closeAbandonedPendings(
+  frames: readonly Frame[],
+  pendingTools: ReadonlyMap<string, number>,
+  pendingCommands: ReadonlyMap<string, number>,
+): readonly Frame[] {
+  let out = frames
+  for (const index of pendingTools.values()) {
+    const existing = out[index]
+    if (existing !== undefined && existing.kind === 'tool' && existing.result === undefined && existing.resultContent === undefined) {
+      out = replaceAt(out, index, { ...existing, resultContent: [{ type: 'text', text: ABANDONED_RESULT_TEXT }] })
+    }
+  }
+  for (const index of pendingCommands.values()) {
+    const existing = out[index]
+    if (existing !== undefined && existing.kind === 'command' && existing.done === undefined) {
+      out = replaceAt(out, index, { ...existing, done: { kind: 'success', text: ABANDONED_RESULT_TEXT } })
+    }
+  }
+  return out
+}
+
 /** Close every open assistant frame of a turn boundary, resolving thinking spans. */
 function closeOpenAssistant(state: FrameState, endTime: number): { frames: readonly Frame[]; openAssistant: ReadonlyMap<string, number> } {
   let frames = state.frames
@@ -555,12 +587,31 @@ export function foldEvent(state: FrameState, event: SessionEvent, deps: FoldDeps
     case 'turn/start': {
       // Turn-scoped plan lifetime: the standing list clears on the next turn.
       // turnStartedAt clocks the heartbeat across the whole turn; turnTokens
-      // resets so the per-turn output count starts fresh.
+      // resets so the per-turn output count starts fresh. Pendings abandoned
+      // by a turn that never logged its end (crash, replayed resume) settle
+      // here as the boundary insurance.
       const closed = closeOpenAssistant(state, event.time)
-      return { state: { ...state, ...closed, plan: undefined, turnStartedAt: event.time, turnTokens: 0 }, lines: [] }
+      const settled = closeAbandonedPendings(closed.frames, state.pendingTools, state.pendingCommands)
+      return {
+        state: {
+          ...state,
+          ...closed,
+          frames: settled,
+          pendingTools: new Map(),
+          pendingCommands: new Map(),
+          plan: undefined,
+          turnStartedAt: event.time,
+          turnTokens: 0,
+        },
+        lines: [],
+      }
     }
     case 'turn/end': {
       const closed = closeOpenAssistant(state, event.time)
+      // Calls the ended turn abandoned settle with a marker: their frames stop
+      // being mutable, so the renderer can move them (and everything after)
+      // into the append-only scrollback instead of pinning them live forever.
+      const settled = closeAbandonedPendings(closed.frames, state.pendingTools, state.pendingCommands)
       const reason = event.data.reason
       // Only a user-initiated cancel leaves a visible marker; disposal and
       // parent cancels happen while the surface is already tearing down.
@@ -574,10 +625,13 @@ export function foldEvent(state: FrameState, event: SessionEvent, deps: FoldDeps
         state: {
           ...state,
           ...closed,
+          frames: settled,
+          pendingTools: new Map(),
+          pendingCommands: new Map(),
           activeStep: undefined,
           turnStartedAt: undefined,
-          ...byUser ? { frames: [...closed.frames, { kind: 'interrupted' as const, seq: event.seq }] } : {},
-          ...errorFrame !== undefined ? { frames: [...closed.frames, errorFrame] } : {},
+          ...byUser ? { frames: [...settled, { kind: 'interrupted' as const, seq: event.seq }] } : {},
+          ...errorFrame !== undefined ? { frames: [...settled, errorFrame] } : {},
         },
         lines: byUser
           ? [renderInterruptedLine()]

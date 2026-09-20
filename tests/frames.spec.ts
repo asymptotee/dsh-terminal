@@ -860,3 +860,50 @@ describe('fold: main-agent turn failure', () => {
     expect(interrupted.state.frames.map(frame => frame.kind)).toEqual(['interrupted'])
   })
 })
+
+describe('fold: abandoned pendings settle at turn boundaries', () => {
+  it('settles a pending tool with a marker on turn/end so it can leave the live region', () => {
+    const call = ev('tool/call', { turn: 1, step: 1, callId: ToolCallId('c1'), name: 'bash', arguments: '{}' })
+    const { state } = replay([call])
+    expect(state.pendingTools.size).toBe(1)
+    const ended = foldEvent(state, ev('turn/end', { turn: 1, reason: { kind: 'aborted', reason: { kind: 'user' } } }), deps())
+    expect(ended.state.pendingTools.size).toBe(0)
+    // frames[0] is the settled tool; frames[1] is the interruption marker.
+    const frame = ended.state.frames[0] as Extract<Frame, { kind: 'tool' }>
+    expect(frame.result).toBeUndefined()
+    expect(frame.resultContent).toEqual([{ type: 'text', text: '(turn ended — no result)' }])
+  })
+
+  it('settles a pending command with a marker on turn/end', () => {
+    const run = ev('command/run', { commandId: CommandId('c1'), name: 'quit', args: '', source: { kind: 'user' } })
+    const { state } = replay([run])
+    expect(state.pendingCommands.size).toBe(1)
+    const ended = foldEvent(state, ev('turn/end', { turn: 1, reason: { kind: 'completed' } }), deps())
+    expect(ended.state.pendingCommands.size).toBe(0)
+    const frame = ended.state.frames[0] as Extract<Frame, { kind: 'command' }>
+    expect(frame.done).toEqual({ kind: 'success', text: '(turn ended — no result)' })
+  })
+
+  it('ignores a late tool result after the turn settled the pending call', () => {
+    const call = ev('tool/call', { turn: 1, step: 1, callId: ToolCallId('c1'), name: 'bash', arguments: '{}' })
+    const { state } = replay([call])
+    const ended = foldEvent(state, ev('turn/end', { turn: 1, reason: { kind: 'completed' } }), deps())
+    const late = ev('tool/result', {
+      turn: 1,
+      step: 1,
+      message: createToolResultMessage({ callId: ToolCallId('c1'), content: [{ type: 'text', text: 'late' }], isError: false }),
+    })
+    const after = foldEvent(ended.state, late, deps())
+    const frame = after.state.frames[0] as Extract<Frame, { kind: 'tool' }>
+    expect(frame.resultContent).toEqual([{ type: 'text', text: '(turn ended — no result)' }])
+  })
+
+  it('settles pendings at turn/start too, as replay insurance for a missing turn/end', () => {
+    const call = ev('tool/call', { turn: 1, step: 1, callId: ToolCallId('c1'), name: 'bash', arguments: '{}' })
+    const { state } = replay([call])
+    const started = foldEvent(state, ev('turn/start', { turn: 2 }), deps())
+    expect(started.state.pendingTools.size).toBe(0)
+    const frame = started.state.frames[0] as Extract<Frame, { kind: 'tool' }>
+    expect(frame.resultContent).toEqual([{ type: 'text', text: '(turn ended — no result)' }])
+  })
+})
