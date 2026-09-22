@@ -7,21 +7,14 @@
   "bin": {
     "dsh-terminal": "./bin/dsh-terminal.js"
   },
-  "main": "lib/index.js",
-  "types": "lib/index.d.ts",
+  "main": "dist/index.js",
   "exports": {
-    ".": {
-      "types": "./lib/index.d.ts",
-      "default": "./lib/index.js"
-    },
-    "./startup": {
-      "types": "./lib/startup.d.ts",
-      "default": "./lib/startup.js"
-    },
+    ".": "./dist/index.js",
+    "./startup": "./dist/startup.js",
     "./package.json": "./package.json"
   },
   "files": [
-    "lib/",
+    "dist/",
     "bin/",
     "cordis.patch.yml"
   ],
@@ -34,20 +27,20 @@
     }
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "node scripts/bundle.mjs && node scripts/verify-dist.mjs",
+    "build:release": "node scripts/bundle.mjs --release && node scripts/verify-dist.mjs",
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run",
     "verify:boundary": "node scripts/verify-boundary.mjs",
-    "verify:contract": "tsx scripts/verify-contract.ts"
+    "verify:contract": "tsx scripts/verify-contract.ts",
+    "verify:dist": "node scripts/verify-dist.mjs",
+    "verify": "pnpm run typecheck && pnpm test && pnpm run verify:boundary && pnpm run verify:contract",
+    "release:pack": "pnpm run build:release && pnpm run verify && pnpm pack",
+    "prepublishOnly": "pnpm run build:release && pnpm run verify"
   },
   "dependencies": {
     "@deepseek-ai/dsh-experimental-agent-team": "0.1.5-rc.2",
-    "@deepseek-ai/dsh-experimental-tool-agent-team": "0.1.5-rc.2",
-    "commander": "^15.0.0",
-    "ink": "^7.1.1",
-    "react": "^19.2.0",
-    "string-width": "^8.2.2",
-    "zod": "^4.4.3"
+    "@deepseek-ai/dsh-experimental-tool-agent-team": "0.1.5-rc.2"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.2",
@@ -84,7 +77,12 @@
     "@deepseek-ai/dsh-user-approval": "0.1.5-rc.2",
     "@types/node": "^22.15.0",
     "@types/react": "^19.2.18",
+    "commander": "^15.0.0",
+    "esbuild": "^0.28.2",
+    "ink": "^7.1.1",
     "ink-testing-library": "^4.0.0",
+    "react": "^19.2.0",
+    "string-width": "^8.2.2",
     "tsx": "^4.19.0",
     "typescript": "^5.9.0",
     "vitest": "^4.1.0",
