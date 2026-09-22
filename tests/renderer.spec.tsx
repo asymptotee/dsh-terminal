@@ -620,7 +620,7 @@ describe('TuiApp rendering', () => {
     expect(frame).toContain('● Read(/tmp/test.txt)')
     expect(frame).toContain('1: first line')
     expect(frame).toContain('2: second line')
-    expect(frame).toContain('(End of file)')
+    expect(frame).not.toContain('(End of file)')
     expect(frame).not.toContain('<path>')
   })
 
@@ -647,6 +647,8 @@ describe('TuiApp rendering', () => {
     const { lastFrame, stdin } = renderApp(<TuiApp state={state(frames)} handlers={noopHandlers()} />)
     let frame = lastFrame() ?? ''
     expect(frame).toContain('a.ts')
+    // The first result line carries the `⎿` connector like every other card.
+    expect(frame).toContain('⎿  a.ts')
     expect(frame).toContain('- old 1')
     expect(frame).not.toContain('new 4')
     expect(frame).toContain('more lines (ctrl+o to expand)')
@@ -673,7 +675,8 @@ describe('TuiApp rendering', () => {
     }]
     const { lastFrame, stdin } = renderApp(<TuiApp state={state(frames)} handlers={noopHandlers()} />)
     let frame = lastFrame() ?? ''
-    expect(frame).toContain('1: line 1')
+    // The first numbered line carries the `⎿` connector like every other card.
+    expect(frame).toContain('⎿  1: line 1')
     expect(frame).toContain('6: line 6')
     expect(frame).not.toContain('7: line 7')
     expect(frame).toContain('3 more lines (ctrl+o to expand)')
@@ -682,7 +685,6 @@ describe('TuiApp rendering', () => {
     frame = lastFrame() ?? ''
     expect(frame).toContain('7: line 7')
     expect(frame).toContain('9: line 9')
-    expect(frame).toContain('(End of file)')
     expect(frame).not.toContain('more lines')
   })
 

@@ -991,10 +991,18 @@ function ToolResultView({
       const visible = expandedOutput || hidden <= 0 ? rows : rows.slice(0, TRUNCATED_OUTPUT_LINES)
       return (
         <Box flexDirection="column">
-          {visible.map(row => row.sign === undefined
-            ? <Text key={row.key} dimColor>  {row.text}</Text>
-            : <Text key={row.key} color={row.sign === '+' ? 'green' : 'red'}>  {row.sign} {row.text}</Text>)}
-          {!expandedOutput && hidden > 0 ? <Text dimColor>  … {hidden} more lines (ctrl+o to expand)</Text> : null}
+          {visible.map((row, index) => {
+            const prefix = index === 0 ? '  ⎿  ' : '     '
+            return row.sign === undefined
+              ? <Text key={row.key} dimColor>{prefix}{row.text}</Text>
+              : (
+                <Text key={row.key}>
+                  <Text dimColor>{prefix}</Text>
+                  <Text color={row.sign === '+' ? 'green' : 'red'}>{row.sign} {row.text}</Text>
+                </Text>
+              )
+          })}
+          {!expandedOutput && hidden > 0 ? <Text dimColor>     … {hidden} more lines (ctrl+o to expand)</Text> : null}
         </Box>
       )
     }
@@ -1003,16 +1011,14 @@ function ToolResultView({
       return text === '' ? <></> : <IndentedBlock text={trimNewline(text)} expanded={expandedOutput} {...(frame.isError ? { error: true } : {})} />
     }
     case 'read': {
-      const endOfFile = result.lines.at(-1)?.number === result.totalLines
       const hidden = result.lines.length - TRUNCATED_OUTPUT_LINES
       const visible = expandedOutput || hidden <= 0 ? result.lines : result.lines.slice(0, TRUNCATED_OUTPUT_LINES)
       return (
         <Box flexDirection="column">
-          {visible.map(line => (
-            <Text key={line.number} dimColor>  {line.number}: {line.text}</Text>
+          {visible.map((line, index) => (
+            <Text key={line.number} dimColor>{index === 0 ? '  ⎿  ' : '     '}{line.number}: {line.text}</Text>
           ))}
-          {!expandedOutput && hidden > 0 ? <Text dimColor>  … {hidden} more lines (ctrl+o to expand)</Text> : null}
-          {endOfFile && (expandedOutput || hidden <= 0) ? <Text dimColor>  (End of file)</Text> : null}
+          {!expandedOutput && hidden > 0 ? <Text dimColor>     … {hidden} more lines (ctrl+o to expand)</Text> : null}
         </Box>
       )
     }
