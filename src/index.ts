@@ -508,6 +508,15 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
   // left the registry (its run settled) fades out after its delay, and the
   // thinking indicator's elapsed seconds advance.
   const panelTick = setInterval(() => {
+    // React's development reconciler logs every committed component render as
+    // a user-timing `performance.measure` entry, and Node's timeline never
+    // evicts them: with teammates pinned the panel re-renders the whole tree
+    // every second forever, which piled ~170 entries (~150KB) per render until
+    // the heap died overnight (observed: 4GB, OOM crash). Clearing each tick
+    // bounds the timeline to one tick's worth. Production React builds do not
+    // instrument renders, so there this is a cheap no-op.
+    performance.clearMarks()
+    performance.clearMeasures()
     if (children.size === 0 && state.turnStartedAt === undefined) return
     const now = Date.now()
     const teamMemberIds = new Set(teamBase?.members.map(member => member.id) ?? [])
