@@ -425,6 +425,17 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
       ? view
       : { ...view, status: { ...view.status, context: { used, window: contextWindow } } }
   }
+  // The footer's mode badge tracks the session's live sandbox override: a
+  // /permission switch appends a durable sandbox/mode event, and its payload
+  // is exactly the mode the policy resolves to from then on (the session's
+  // latest event outranks the deployment default). Without this the badge
+  // would stay frozen at the startup snapshot after a mid-session switch.
+  const trackSandboxMode = (event: SessionEvent): void => {
+    if ((event.type as string) !== 'sandbox/mode') return
+    const mode = (event.data as { mode?: unknown }).mode
+    if (typeof mode !== 'string' || view.status === undefined) return
+    view = { ...view, status: { ...view.status, mode } }
+  }
   // Fold the replay without per-event renders: the intermediate states are
   // not interactable, painting each one wastes time on large logs, and an
   // early paint of the still-empty stream would flash the fresh-session
@@ -459,6 +470,7 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
       return
     }
     trackUsage(event)
+    trackSandboxMode(event)
     // A team event moves the authoritative agentTeam projection, so re-read it
     // before the render below to keep the team panel current.
     if ((event.type as string).startsWith('team/')) refreshTeam()
