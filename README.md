@@ -28,6 +28,8 @@ node bin/dsh-terminal.js                # 或经本包 bin 直通（profile 未�
 
 会话统一持久化在 `$DSH_HOME/sessions`（默认 `~/.dsh/sessions`）。
 
+输入 `/` 弹出斜杠命令补全菜单（命令来自会话命令注册表，含 `/permission`、`/effort` 等）：继续输入按前缀过滤，`↑`/`↓` 选择，`Tab` 或 `Enter` 补全为 `/name `（补全后再按 `Enter` 才执行），`Esc` 只关菜单、不打断会话。
+
 ## 开发
 
 ```sh

@@ -481,6 +481,26 @@ describe('tui driver', () => {
     await test.ctx.fiber.dispose()
   })
 
+  it('exposes the registry descriptors on the view for the slash menu', async () => {
+    const test = await bench({
+      commands: {
+        execute: () => Promise.resolve(undefined),
+        list: () => [
+          { name: 'permission', description: 'Switch the permission preset', input: { hint: '<preset>' } },
+          { name: 'effort', description: 'Set the reasoning effort' },
+        ],
+      },
+      afterPrompt: () => {},
+    })
+    // The driver maps descriptors to the renderer's CommandInfo shape:
+    // description kept, input.hint flattened to hint, nothing else leaked.
+    expect(test.views.at(-1)?.commands).toEqual([
+      { name: 'permission', description: 'Switch the permission preset', hint: '<preset>' },
+      { name: 'effort', description: 'Set the reasoning effort' },
+    ])
+    await test.ctx.fiber.dispose()
+  })
+
   it('shows an unknown-command notice and never submits a model message', async () => {
     const followups: string[] = []
     const test = await bench({

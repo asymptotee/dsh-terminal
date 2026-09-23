@@ -14,5 +14,5 @@ export type { ToolCallView, ToolResult, ToolResultView } from '@deepseek-ai/dsh-
 export type { Agent, AgentSetup, AssistantStreamFrame, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 export type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval'
 export type { SubagentListEntry } from '@deepseek-ai/dsh-subagent'
-export type { default as CommandRuntime } from '@deepseek-ai/dsh-commands'
+export type { CommandDescriptor, default as CommandRuntime } from '@deepseek-ai/dsh-commands'
 export type { InvariantInstaller } from '@deepseek-ai/dsh-invariants'

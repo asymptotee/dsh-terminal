@@ -130,9 +130,21 @@ export interface TeamPanelInfo {
   tasks: readonly TeamTaskRow[]
 }
 
+/** One registered slash command for the input bar's completion menu. */
+export interface CommandInfo {
+  /** Command name without the leading slash. */
+  name: string
+  /** Human-readable summary for the discovery menu. */
+  description?: string
+  /** Free-form input hint (e.g. `<preset>`), shown after the name. */
+  hint?: string
+}
+
 export interface RenderView {
   overlay?: Overlay
   status?: StatusInfo
+  /** Registered slash commands; drives the `/` completion menu. */
+  commands?: readonly CommandInfo[]
   /** The unfinished direct subagents; absent or empty hides the panel. */
   subagents?: readonly SubagentRow[]
   /** The panel's selected row (0 = the main agent row); absent means the input bar holds focus. */
@@ -427,12 +439,11 @@ export function TuiApp({
           history={history}
           focusMode={focusMode}
           panelAvailable={subagents.length > 0 || (view?.team?.members.length ?? 0) > 0}
+          commands={view?.commands ?? []}
+          {...(view?.status === undefined ? {} : { status: view.status })}
         />
         {opened === undefined ? (
           <>
-            <StatusBar
-              status={view?.status}
-            />
             {subagents.length > 0
               ? <SubagentPanel rows={subagents} selected={view?.subagentSelected} />
               : null}
@@ -1233,6 +1244,8 @@ export function InputBar({
   history = [],
   focusMode = 'input',
   panelAvailable = false,
+  commands = [],
+  status,
 }: {
   handlers: InputHandlers
   approvalPending: boolean
@@ -1252,6 +1265,10 @@ export function InputBar({
   focusMode?: 'input' | 'panel' | 'child'
   /** Whether the subagent panel has rows, so `↓` from an empty editor can enter it. */
   panelAvailable?: boolean
+  /** The registered slash commands; a leading-`/` buffer opens the completion menu. */
+  commands?: readonly CommandInfo[]
+  /** The footer facts; while the completion menu is open it takes this slot. */
+  status?: StatusInfo
 }): React.JSX.Element {
   // A ref mirror keeps the key handler's reads fresh even when several keys
   // land inside one render cycle (ink throttles re-renders).
@@ -1270,13 +1287,34 @@ export function InputBar({
   const [historyIndex, setHistoryIndex] = useState(-1)
   // Two Ctrl+C presses within a second (with an empty buffer) quit.
   const lastInterruptRef = React.useRef(0)
+  // Slash-menu transient state: the arrow-selected row and the Esc dismissal.
+  // Ref mirrors keep key handlers fresh when several keys land inside one
+  // throttled render cycle, mirroring the buffer ref's rationale.
+  const [menuIndex, setMenuIndexState] = useState(0)
+  const menuIndexRef = React.useRef(0)
+  const [menuHidden, setMenuHiddenState] = useState(false)
+  const menuHiddenRef = React.useRef(false)
+  const setMenuIndex = (next: number): void => { menuIndexRef.current = next; setMenuIndexState(next) }
+  const setMenuHidden = (next: boolean): void => { menuHiddenRef.current = next; setMenuHiddenState(next) }
+  // The slash menu's candidates for a buffer value: the buffer must be typing
+  // a command name — a leading slash with no whitespace yet — and match at
+  // one prefix. Anything else (space starts the args, Esc dismissal handled
+  // by the caller) yields no menu.
+  const commandMatchesFor = (value: string): readonly CommandInfo[] =>
+    focusMode === 'input' && !approvalPending && value.startsWith('/') && !/\s/.test(value)
+      ? commands.filter(command => command.name.startsWith(value.slice(1)))
+      : []
 
   const setBuffer = (next: { value: string; cursor: number }): void => {
     const wasEmpty = bufferRef.current.value === ''
+    const changed = bufferRef.current.value !== next.value
     bufferRef.current = next
     setBufferState(next)
     // The welcome splash is dismissed by the first text entering the box.
     if (wasEmpty && next.value !== '') onFirstInput?.()
+    // Any edit re-derives the menu: selection falls back to the first match,
+    // and an Esc dismissal lifts so filtering can reopen the menu.
+    if (changed) { setMenuIndex(0); setMenuHidden(false) }
   }
 
   useInput((input, key) => {
@@ -1321,6 +1359,21 @@ export function InputBar({
       else if (key.return) handlers.onPanelEnter()
       else if (key.escape) handlers.onPanelBack()
       return
+    }
+    // The open slash menu owns the arrows, Tab/Enter (complete, never commit —
+    // executing takes a second Enter on the completed line), and Esc (dismiss
+    // the menu only; the buffer stays and the turn is not interrupted). Every
+    // other key falls through to normal editing, which re-derives the menu.
+    const matches = commandMatchesFor(bufferRef.current.value)
+    if (matches.length > 0 && !menuHiddenRef.current) {
+      if (key.escape) { setMenuHidden(true); return }
+      if (key.upArrow) { setMenuIndex(Math.max(0, menuIndexRef.current - 1)); return }
+      if (key.downArrow) { setMenuIndex(Math.min(matches.length - 1, menuIndexRef.current + 1)); return }
+      if (key.tab || key.return) {
+        const pick = matches[Math.min(menuIndexRef.current, matches.length - 1)]
+        if (pick !== undefined) setBuffer({ value: `/${pick.name} `, cursor: pick.name.length + 2 })
+        return
+      }
     }
     if (key.escape) {
       // Esc interrupts the running turn; it never quits.
@@ -1430,6 +1483,11 @@ export function InputBar({
   const cursorLine = beforeCursor.split('\n').length - 1
   const cursorColumn = beforeCursor.length - beforeCursor.lastIndexOf('\n') - 1
   const width = useTerminalWidth()
+  // The slash menu's live derivation off the rendered buffer; the selection is
+  // clamped so a shrinking filter never points past the last match.
+  const menuMatches = commandMatchesFor(value)
+  const menuOpen = menuMatches.length > 0 && !menuHidden
+  const menuSelected = Math.min(menuIndex, menuMatches.length - 1)
   // The child transcript view is read-only: the bar keeps routing Esc but
   // renders nothing, leaving the child transcript as the visible surface.
   if (focusMode === 'child') return <Box />
@@ -1453,6 +1511,78 @@ export function InputBar({
         )
       })}
       <Text dimColor>{'─'.repeat(width)}</Text>
+      {/* The completion menu and the status bar share one slot below the box:
+          they swap in a single render, so opening the menu never paints an
+          intermediate frame where both stack (the chrome band overshooting
+          made the input box visibly jump before settling). */}
+      {menuOpen
+        ? <CommandMenu items={menuMatches} selected={menuSelected} width={width} />
+        : <StatusBar status={status} />}
+    </Box>
+  )
+}
+
+/** Rows the slash completion menu shows before windowing around the selection. */
+const MENU_MAX_ROWS = 8
+
+/** Gap between the padded name column and the aligned descriptions. */
+const MENU_DESCRIPTION_GAP = 3
+
+/** The menu row's label segment: the slashed name plus its input hint. */
+function commandLabel(item: CommandInfo): string {
+  return `/${item.name}${item.hint === undefined ? '' : ` ${item.hint}`}`
+}
+
+/**
+ * The `/` completion menu below the input bar (between the box and the status
+ * bar): prefix-filtered commands with name, hint, and description, discovery-
+ * menu styling — no marker column; the arrow-selected row turns the shared
+ * highlight tint (#a5d8ff) in its entirety, every other row stays dim. Rows
+ * beyond the cap window around the selection. No closing rule: the status
+ * bar hides while the menu is up, so the rows simply end the chrome band.
+ */
+function CommandMenu({
+  items,
+  selected,
+  width,
+}: {
+  items: readonly CommandInfo[]
+  /** The arrow-selected index into `items`, already clamped by the caller. */
+  selected: number
+  width: number
+}): React.JSX.Element {
+  const start = items.length <= MENU_MAX_ROWS
+    ? 0
+    : Math.min(Math.max(0, selected - Math.floor(MENU_MAX_ROWS / 2)), items.length - MENU_MAX_ROWS)
+  const visible = items.slice(start, start + MENU_MAX_ROWS)
+  const hiddenBefore = start
+  const hiddenAfter = items.length - start - visible.length
+  // Descriptions align in one column: every label pads to the widest label in
+  // the full match list (not just the visible window, so scrolling never
+  // shifts the column), then the fixed gap follows.
+  const nameCol = items.reduce((max, item) => Math.max(max, stringWidth(commandLabel(item))), 0)
+  const descriptionBudget = Math.max(0, width - 2 - nameCol - MENU_DESCRIPTION_GAP)
+  // The status bar's marginBottom={1} is what keeps the chrome band off the
+  // very bottom row; the menu replaces the status bar while open, so it owns
+  // the same bottom gap.
+  return (
+    <Box flexDirection="column" marginBottom={1}>
+      {hiddenBefore > 0 ? <Text dimColor>  … {hiddenBefore} more</Text> : null}
+      {visible.map((item, index) => {
+        const isSelected = start + index === selected
+        const label = padToWidth(commandLabel(item), nameCol)
+        const description = item.description === undefined ? '' : truncateToWidth(item.description, descriptionBudget)
+        return isSelected ? (
+          <Text key={item.name} color="#a5d8ff">
+            <Text bold>  {label}</Text>{' '.repeat(MENU_DESCRIPTION_GAP)}{description}
+          </Text>
+        ) : (
+          <Text key={item.name} dimColor>
+            {'  '}{label}{' '.repeat(MENU_DESCRIPTION_GAP)}{description}
+          </Text>
+        )
+      })}
+      {hiddenAfter > 0 ? <Text dimColor>  … {hiddenAfter} more</Text> : null}
     </Box>
   )
 }

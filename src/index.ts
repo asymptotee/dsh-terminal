@@ -15,14 +15,14 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import type { AgentSetup, ApprovalOutcome, AssistantStreamFrame, CommandRuntime, Context, ModelSelectionRef, SessionEvent } from './dsh-adapter/types.ts'
+import type { AgentSetup, ApprovalOutcome, AssistantStreamFrame, CommandDescriptor, CommandRuntime, Context, ModelSelectionRef, SessionEvent } from './dsh-adapter/types.ts'
 import { createUserMessage, installModelSelection, SessionId, z } from './dsh-adapter/services.ts'
 import './dsh-adapter/effects.ts'
 import { createFrameState, foldAssistantStreamChunk, foldEvent, readableFailureMessage } from './frames.ts'
 import type { FoldDeps, FrameState } from './frames.ts'
 import { teamToolPresentation } from './team-present.ts'
 import { createInkRenderer } from './renderer.tsx'
-import type { Overlay, RenderView, SubagentRow, TeamPanelInfo, TeamTaskRow, TuiRenderer } from './renderer.tsx'
+import type { CommandInfo, Overlay, RenderView, SubagentRow, TeamPanelInfo, TeamTaskRow, TuiRenderer } from './renderer.tsx'
 
 // Re-exported so driver suites import the renderer contract without reaching
 // the ink view's .tsx module directly (the host aggregate compiles specs).
@@ -333,9 +333,27 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
     }
   }
 
+  // The input bar's slash menu: the registry's discovery descriptors mapped to
+  // the renderer's CommandInfo shape. Recomputed per render so commands
+  // registered after startup (late plugins) show up; list() is a small sorted
+  // snapshot, cheap even at the panel tick's per-second cadence.
+  const commandInfos = (): readonly CommandInfo[] => {
+    const registry: CommandRuntime | undefined = ctx.get('commands')
+    // Test harnesses may provide a partial commands fake (execute only).
+    if (registry === undefined || typeof registry.list !== 'function') return []
+    const descriptors: readonly CommandDescriptor[] | undefined = registry.list(agent)
+    if (descriptors === undefined) return []
+    return descriptors.map((descriptor): CommandInfo => ({
+      name: descriptor.name,
+      ...(descriptor.description === '' ? {} : { description: descriptor.description }),
+      ...(descriptor.input?.hint === undefined ? {} : { hint: descriptor.input.hint }),
+    }))
+  }
   /** The base view plus the panel slice computed from the live roster. */
   function withPanel(base: RenderView): RenderView {
     const next: RenderView = { ...base }
+    const infos = commandInfos()
+    if (infos.length > 0) next.commands = infos
     const rows = rosterRows()
     if (rows.length > 0) {
       next.subagents = rows
