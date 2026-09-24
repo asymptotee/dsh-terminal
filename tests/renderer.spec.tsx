@@ -785,21 +785,33 @@ describe('TuiApp rendering', () => {
     expect(frame.indexOf('❯ m1')).toBeLessThan(frame.indexOf('❯ m5'))
   })
 
-  it('renders an approval question with options, answered by y/n/Esc/arrows/Enter', async () => {
+  it('renders the approval panel at the screen bottom, hiding the input box and status bar', async () => {
     const onApproval = vi.fn()
     const { lastFrame, stdin } = renderApp(
       <TuiApp
-        state={state([])}
+        state={state([{ kind: 'user', seq: 1, text: 'hi' }])}
         handlers={{ ...noopHandlers(), onApproval }}
-        view={{ overlay: { kind: 'approval', toolName: 'bash', reason: 'run rm -rf' } }}
+        view={{
+          overlay: { kind: 'approval', toolName: 'bash', reason: 'run rm -rf', detail: 'rm -rf build' },
+          status: { model: 'test-model', cwd: '/workspace/repo' },
+        }}
       />,
     )
     let frame = lastFrame() ?? ''
-    expect(frame).toContain('Allow Bash? (y/esc)')
-    expect(frame).toContain('  ─ run rm -rf')
+    // The panel's rows: tinted title, the pending call's detail leading, the
+    // asker's reason hanging below it, question, options with the ❯ marker,
+    // and the Esc hint.
+    expect(frame).toContain('Bash command')
+    expect(frame).toContain('rm -rf build')
+    expect(frame).toContain('run rm -rf')
+    expect(frame.indexOf('rm -rf build')).toBeLessThan(frame.indexOf('run rm -rf'))
     expect(frame).toContain('Do you want to proceed?')
     expect(frame).toContain('❯ 1. Yes')
     expect(frame).toContain('2. No')
+    expect(frame).toContain('Esc to cancel')
+    // The question owns the bottom: no input caret, no status bar facts.
+    expect(frame).not.toContain('▏')
+    expect(frame).not.toContain('test-model')
     stdin.write('\x1b[B') // Down: select No
     await settled()
     frame = lastFrame() ?? ''
@@ -807,20 +819,18 @@ describe('TuiApp rendering', () => {
     expect(frame).toContain('1. Yes')
     stdin.write('\r') // Enter commits the selection
     await settled()
-    expect(onApproval).toHaveBeenCalledWith(false)
+    expect(onApproval).toHaveBeenCalledWith('reject')
     stdin.write('\x1b[A') // Up: back to Yes
     await settled()
     stdin.write('\r')
     await settled()
-    expect(onApproval).toHaveBeenCalledWith(true)
+    expect(onApproval).toHaveBeenCalledWith('allow')
     stdin.write('n')
     await settled()
-    expect(onApproval).toHaveBeenLastCalledWith(false)
-    stdin.write('\x1b') // Esc rejects too
+    expect(onApproval).toHaveBeenLastCalledWith('reject')
+    stdin.write('\x1b') // Esc cancels (withdrawn, not rejected)
     await settled()
-    expect(onApproval).toHaveBeenLastCalledWith(false)
-    // Typing while a question is pending answers the question, not the buffer.
-    expect(lastFrame()).toContain('❯ ▏')
+    expect(onApproval).toHaveBeenLastCalledWith('cancel')
   })
 })
 

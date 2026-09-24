@@ -394,7 +394,7 @@ describe('tui driver', () => {
     test.handlers.onExit()
     test.handlers.onCommit('late line')
     test.handlers.onInterrupt()
-    test.handlers.onApproval(true)
+    test.handlers.onApproval('allow')
     await test.exited
     expect(test.states.every(state => !state.frames.some(frame => frame.kind === 'user'))).toBe(true)
     await test.ctx.fiber.dispose()
@@ -558,8 +558,41 @@ describe('tui driver', () => {
       reason: 'run rm -rf',
     }, () => Promise.resolve('unavailable'))
     expect(test.views.at(-1)?.overlay).toEqual({ kind: 'approval', toolName: 'bash', reason: 'run rm -rf' })
-    test.handlers.onApproval(true)
+    test.handlers.onApproval('allow')
     expect(await outcome).toBe('allowed-once')
+    await test.ctx.fiber.dispose()
+  })
+
+  it('cancels on Esc and carries the pending call detail on the overlay', async () => {
+    const test = await bench({
+      // The bash presentation puts the command in the card title — the very
+      // string the approval panel shows as its detail line.
+      tools: { get: () => ({ presentCall: (args: { command?: string }) => ({ card: 'terminal', title: args?.command ?? '' }) }) },
+      seed: (session) => {
+        session.append('tool/call', {
+          turn: 1, step: 1, callId: ToolCallId('call-9'), name: 'bash',
+          arguments: '{"command":"mkdir -p demo"}',
+        })
+      },
+      afterPrompt: () => {},
+    })
+    const outcome = (test.ctx.waterfall as unknown as (
+      thisArg: unknown, name: string, req: unknown, next: () => Promise<unknown>,
+    ) => Promise<unknown>)(test.ctx, 'approval/request', {
+      agent: test.agent,
+      toolName: 'bash',
+      callId: ToolCallId('call-9'),
+      reason: 'writes outside the workspace',
+    }, () => Promise.resolve('unavailable'))
+    expect(test.views.at(-1)?.overlay).toEqual({
+      kind: 'approval',
+      toolName: 'bash',
+      reason: 'writes outside the workspace',
+      detail: 'mkdir -p demo',
+      callId: 'call-9',
+    })
+    test.handlers.onApproval('cancel')
+    expect(await outcome).toBe('cancelled')
     await test.ctx.fiber.dispose()
   })
 

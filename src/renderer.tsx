@@ -33,14 +33,17 @@ import {
 } from './terminal.ts'
 import type { ScrollAction } from './terminal.ts'
 
+/** The user's answer to a pending approval question. */
+export type ApprovalChoice = 'allow' | 'reject' | 'cancel'
+
 /** Callbacks the input bar hands to the driver. */
 export interface InputHandlers {
   /** Submit one user line (Enter on a non-empty buffer). */
   onCommit(text: string): void
   /** Clear the buffer (Ctrl+C with content), or interrupt the turn when empty. */
   onInterrupt(): void
-  /** Answer a pending approval request (y/n keys). */
-  onApproval(allow: boolean): void
+  /** Answer a pending approval request: y/Enter allow, n/Enter reject, Esc cancels. */
+  onApproval(choice: ApprovalChoice): void
   /** Request a clean exit (Ctrl+D or a second Ctrl+C). */
   onExit(): void
   /** Move keyboard focus from the input bar into the subagent panel (`↓`). */
@@ -53,10 +56,20 @@ export interface InputHandlers {
   onPanelBack(): void
 }
 
-/** A transient surface message or question shown above the input bar. */
+/** A transient surface message (above the input bar) or the bottom approval question. */
 export type Overlay =
   | { kind: 'notice'; text: string }
-  | { kind: 'approval'; toolName: string; reason?: string }
+  | {
+    kind: 'approval'
+    toolName: string
+    reason?: string
+    /** The invocation summary of the exact tool call being decided (the pending
+     *  frame's card title — the command itself for terminal cards). */
+    detail?: string
+    /** The decided call's id, when the asker had one: the transcript dims that
+     *  pending card's dot while the question waits. */
+    callId?: string
+  }
 
 /** The always-visible footer facts. */
 export interface StatusInfo {
@@ -303,6 +316,9 @@ export function TuiApp({
     .map(frame => frame.text)
   const subagents = view?.subagents ?? []
   const opened = view?.openSubagent
+  // The pending approval question, when one owns the screen bottom: the input
+  // bar, status bar, and side panels all yield to the ApprovalPanel below.
+  const approvalOverlay = view?.overlay?.kind === 'approval' ? view.overlay : undefined
   const focusMode: 'input' | 'panel' | 'child' = opened !== undefined
     ? 'child'
     : view?.subagentSelected !== undefined || view?.teamSelected !== undefined ? 'panel' : 'input'
@@ -368,7 +384,7 @@ export function TuiApp({
         {mainWindowed.hidden > 0 ? <Text dimColor>… {mainWindowed.hidden} earlier frames</Text> : null}
         {mainWindowed.visible.map(frame => (
           <Box key={frameKey(frame)} flexDirection="column" marginBottom={1}>
-            <FrameRow frame={frame} expandedOutput={expandedOutput} />
+            <FrameRow frame={frame} expandedOutput={expandedOutput} approvalCallId={approvalOverlay?.callId} />
           </Box>
         ))}
       </>
@@ -378,7 +394,7 @@ export function TuiApp({
       {(childWindowed?.hidden ?? 0) > 0 ? <Text dimColor>… {childWindowed?.hidden} earlier frames</Text> : null}
       {(childWindowed?.visible ?? []).map(frame => (
         <Box key={frameKey(frame)} flexDirection="column" marginBottom={1}>
-          <FrameRow frame={frame} expandedOutput={expandedOutput} />
+          <FrameRow frame={frame} expandedOutput={expandedOutput} approvalCallId={approvalOverlay?.callId} />
         </Box>
       ))}
     </>
@@ -412,8 +428,8 @@ export function TuiApp({
         {view?.pendingUser !== undefined && view.pendingUser.length > 0
           ? <PendingUserEchoes items={view.pendingUser} />
           : null}
-        {view?.overlay !== undefined
-          ? <OverlayLine key={overlayKey(view.overlay)} overlay={view.overlay} selected={view.overlay.kind === 'approval' ? approvalIndex : 0} />
+        {view?.overlay?.kind === 'notice'
+          ? <Text color="red" key="notice">{view.overlay.text}</Text>
           : null}
         {/* The standing plan stays pinned above the input bar in every view;
             it follows the active transcript (main session or opened child). */}
@@ -430,7 +446,7 @@ export function TuiApp({
             Esc back to the input focus. */}
         <InputBar
           handlers={handlers}
-          approvalPending={view?.overlay?.kind === 'approval'}
+          approvalPending={approvalOverlay !== undefined}
           approvalSelected={approvalIndex}
           onToggleExpand={() => { setExpandedOutput(current => !current) }}
           onApprovalSelect={onApprovalSelect}
@@ -442,7 +458,11 @@ export function TuiApp({
           commands={view?.commands ?? []}
           {...(view?.status === undefined ? {} : { status: view.status })}
         />
-        {opened === undefined ? (
+        {approvalOverlay !== undefined ? (
+          /* The question owns the screen bottom: the bar above rendered
+             nothing, and the side panels and child header wait it out. */
+          <ApprovalPanel key={approvalKey(approvalOverlay)} overlay={approvalOverlay} selected={approvalIndex} width={columns} />
+        ) : opened === undefined ? (
           <>
             {subagents.length > 0
               ? <SubagentPanel rows={subagents} selected={view?.subagentSelected} />
@@ -638,36 +658,58 @@ function WelcomeBlock({
   )
 }
 
-/** Remount the overlay per approval request so the selection resets. */
-function overlayKey(overlay: Overlay): string {
-  return overlay.kind === 'approval' ? `approval:${overlay.toolName}:${overlay.reason ?? ''}` : 'notice'
+/** Remount the panel per approval request so the selection resets. */
+function approvalKey(overlay: Extract<Overlay, { kind: 'approval' }>): string {
+  return `approval:${overlay.toolName}:${overlay.reason ?? ''}:${overlay.detail ?? ''}`
 }
 
-function OverlayLine({
+/**
+ * The approval question as the screen-bottom panel: while it waits it replaces
+ * the input box, the status bar, and the side panels (the bar stays mounted
+ * but renders nothing — it owns the single stdin listener and routes the
+ * question's keys). The leading rule and the `<Tool> command` title wear the
+ * shared highlight tint; the invocation leads and the asker's reason follows,
+ * hanging-indented to one column; the selected option sits behind a ❯ marker
+ * in the same tint, every other row dim. No closing rule at the screen
+ * bottom — a marginBottom row keeps the Esc hint off the last line.
+ */
+function ApprovalPanel({
   overlay,
   selected,
+  width,
 }: {
-  overlay: Overlay
-  /** The arrow-selected option index; only an approval question uses it. */
+  overlay: Extract<Overlay, { kind: 'approval' }>
+  /** The arrow-selected option: 0 = Yes, 1 = No. */
   selected: number
+  width: number
 }): React.JSX.Element {
-  switch (overlay.kind) {
-    case 'notice':
-      return <Text color="red">{overlay.text}</Text>
-    case 'approval':
-      return (
-        <Box flexDirection="column">
-          <Text>
-            <Text color="yellow">Allow </Text>
-            {toolLabel(overlay.toolName)}? (y/esc)
-          </Text>
-          {overlay.reason !== undefined ? <Text dimColor>  ─ {overlay.reason}</Text> : null}
-          <Text> Do you want to proceed?</Text>
-          <Text>{selected === 0 ? ' ❯ ' : '   '}{selected === 0 ? <Text color="#a5d8ff">1. Yes</Text> : '1. Yes'}</Text>
-          <Text>{selected === 1 ? ' ❯ ' : '   '}{selected === 1 ? <Text color="#a5d8ff">2. No</Text> : '2. No'}</Text>
-        </Box>
-      )
-  }
+  const options = ['1. Yes', '2. No']
+  // The invocation leads, the asker's reason follows — both hanging-indented
+  // to the same column, wrapped by display width so CJK reasons stay aligned.
+  const indent = '   '
+  const budget = Math.max(0, width - stringWidth(indent))
+  const detailLines = overlay.detail === undefined ? [] : wrapToWidth(overlay.detail, budget)
+  const reasonLines = overlay.reason === undefined ? [] : wrapToWidth(overlay.reason, budget)
+  // The bottom margin keeps the Esc hint off the very last screen row, the
+  // same one-row gap the status bar's marginBottom provides when it is up.
+  return (
+    <Box flexDirection="column" marginBottom={1}>
+      <Text color="#a5d8ff">{'─'.repeat(width)}</Text>
+      <Text color="#a5d8ff"> {toolLabel(overlay.toolName)} command</Text>
+      {/* Breathing room between the title and the invocation block, matching
+          the discovery-panel convention. */}
+      <Text> </Text>
+      {detailLines.map((line, index) => <Text key={`detail-${index}`}>{indent}{line}</Text>)}
+      {reasonLines.map((line, index) => <Text key={`reason-${index}`} dimColor>{indent}{line}</Text>)}
+      <Text> </Text>
+      <Text> Do you want to proceed?</Text>
+      {options.map((label, index) => index === selected
+        ? <Text key={label} color="#a5d8ff"> ❯ {label}</Text>
+        : <Text key={label} dimColor>   {label}</Text>)}
+      <Text> </Text>
+      <Text dimColor> Esc to cancel</Text>
+    </Box>
+  )
 }
 
 /** The fixed footer: model, session, working state, context usage, and scrollback hint. */
@@ -760,7 +802,7 @@ function frameKey(frame: Frame): string {
   }
 }
 
-function FrameRow({ frame, expandedOutput }: { frame: Frame; expandedOutput: boolean }): React.JSX.Element {
+function FrameRow({ frame, expandedOutput, approvalCallId }: { frame: Frame; expandedOutput: boolean; approvalCallId: string | undefined }): React.JSX.Element {
   // The user echo pads each line to the full terminal width so its background
   // spans the row; every other frame renders its natural width.
   const width = useTerminalWidth()
@@ -811,7 +853,7 @@ function FrameRow({ frame, expandedOutput }: { frame: Frame; expandedOutput: boo
       )
     }
     case 'tool':
-      return <ToolRow frame={frame} expandedOutput={expandedOutput} />
+      return <ToolRow frame={frame} expandedOutput={expandedOutput} awaitingApproval={frame.callId === approvalCallId} />
     case 'command':
       return <CommandRow frame={frame} />
     case 'interrupted':
@@ -939,18 +981,19 @@ function HeartbeatLine({ startedAt, tokens }: { startedAt: number; tokens: numbe
 }
 
 /** One tool call card: the pending call view, then the completed result view. */
-function ToolRow({ frame, expandedOutput }: { frame: Extract<Frame, { kind: 'tool' }>; expandedOutput: boolean }): React.JSX.Element {
+function ToolRow({ frame, expandedOutput, awaitingApproval }: { frame: Extract<Frame, { kind: 'tool' }>; expandedOutput: boolean; awaitingApproval: boolean }): React.JSX.Element {
   const completed = frame.result !== undefined || frame.resultContent !== undefined
   return (
     <Box flexDirection="column">
-      <ToolCallView frame={frame} expandedOutput={expandedOutput} />
+      <ToolCallView frame={frame} expandedOutput={expandedOutput} awaitingApproval={awaitingApproval} />
       {completed ? <ToolResultView frame={frame} expandedOutput={expandedOutput} /> : null}
     </Box>
   )
 }
 
-/** The Claude Code-style call line: a green dot, then the tool name in the default foreground. */
-function ToolCallView({ frame, expandedOutput }: { frame: Extract<Frame, { kind: 'tool' }>; expandedOutput: boolean }): React.JSX.Element {
+/** The Claude Code-style call line: a green dot (dim while the call waits on
+ *  an approval decision), then the tool name in the default foreground. */
+function ToolCallView({ frame, expandedOutput, awaitingApproval }: { frame: Extract<Frame, { kind: 'tool' }>; expandedOutput: boolean; awaitingApproval: boolean }): React.JSX.Element {
   const call = frame.call
   const label = toolLabel(frame.name)
   const full = call.card === 'diff'
@@ -965,7 +1008,7 @@ function ToolCallView({ frame, expandedOutput }: { frame: Extract<Frame, { kind:
   const invocation = expandedOutput ? full : truncateToWidth(full, budget)
   return (
     <Text>
-      <Text color="#51cf66">●</Text> {label}
+      {awaitingApproval ? <Text dimColor>●</Text> : <Text color="#51cf66">●</Text>} {label}
       ({invocation})
     </Text>
   )
@@ -1337,14 +1380,16 @@ export function InputBar({
     }
     const { value, cursor } = bufferRef.current
     if (approvalPending) {
-      // The pending question owns the keys: y allows, n and Esc reject, the
-      // arrows move the selection, Enter commits it; everything else waits.
-      if (input === 'y') handlers.onApproval(true)
-      if (input === 'n') handlers.onApproval(false)
-      if (key.escape) handlers.onApproval(false)
+      // The pending question owns the keys: y and Enter-on-Yes allow, n and
+      // Enter-on-No reject, Esc cancels (the request is withdrawn, distinct
+      // from an answered rejection), the arrows move the selection;
+      // everything else waits.
+      if (input === 'y') handlers.onApproval('allow')
+      if (input === 'n') handlers.onApproval('reject')
+      if (key.escape) handlers.onApproval('cancel')
       if (key.upArrow) onApprovalSelect(-1)
       if (key.downArrow) onApprovalSelect(1)
-      if (key.return) handlers.onApproval(approvalSelected === 0)
+      if (key.return) handlers.onApproval(approvalSelected === 0 ? 'allow' : 'reject')
       return
     }
     if (focusMode === 'child') {
@@ -1488,6 +1533,10 @@ export function InputBar({
   const menuMatches = commandMatchesFor(value)
   const menuOpen = menuMatches.length > 0 && !menuHidden
   const menuSelected = Math.min(menuIndex, menuMatches.length - 1)
+  // The approval panel owns the screen bottom: the bar renders nothing (the
+  // ApprovalPanel takes its rows in the chrome band) while still owning the
+  // question's keys through the handler above.
+  if (approvalPending) return <Box />
   // The child transcript view is read-only: the bar keeps routing Esc but
   // renders nothing, leaving the child transcript as the visible surface.
   if (focusMode === 'child') return <Box />
@@ -1634,6 +1683,36 @@ const PANEL_ACTIVITY_RATIO = 0.6
  * @param maxWidth - the maximum display width, including the ellipsis.
  * @returns the text, truncated to `maxWidth` columns with a trailing `…` if cut.
  */
+/**
+ * Wrap text into lines of at most `maxWidth` display columns, measured with
+ * string-width so CJK and emoji wrap at their true width. Existing newlines
+ * are honored; words are never hyphenated — a chunk longer than the budget
+ * breaks at the budget like truncateToWidth's ellipsis point.
+ * @param text - the text to wrap.
+ * @param maxWidth - the column budget per line.
+ * @returns the wrapped lines (at least one).
+ */
+export function wrapToWidth(text: string, maxWidth: number): string[] {
+  if (maxWidth <= 0) return [text]
+  const out: string[] = []
+  for (const paragraph of text.split('\n')) {
+    let line = ''
+    let width = 0
+    for (const char of paragraph) {
+      const charWidth = stringWidth(char)
+      if (width + charWidth > maxWidth && line !== '') {
+        out.push(line)
+        line = ''
+        width = 0
+      }
+      line += char
+      width += charWidth
+    }
+    out.push(line)
+  }
+  return out
+}
+
 export function truncateToWidth(text: string, maxWidth: number): string {
   if (maxWidth <= 0) return ''
   if (stringWidth(text) <= maxWidth) return text

@@ -19,10 +19,10 @@ import type { AgentSetup, ApprovalOutcome, AssistantStreamFrame, CommandDescript
 import { createUserMessage, installModelSelection, SessionId, z } from './dsh-adapter/services.ts'
 import './dsh-adapter/effects.ts'
 import { createFrameState, foldAssistantStreamChunk, foldEvent, readableFailureMessage } from './frames.ts'
-import type { FoldDeps, FrameState } from './frames.ts'
+import type { FoldDeps, Frame, FrameState } from './frames.ts'
 import { teamToolPresentation } from './team-present.ts'
 import { createInkRenderer } from './renderer.tsx'
-import type { CommandInfo, Overlay, RenderView, SubagentRow, TeamPanelInfo, TeamTaskRow, TuiRenderer } from './renderer.tsx'
+import type { ApprovalChoice, CommandInfo, Overlay, RenderView, SubagentRow, TeamPanelInfo, TeamTaskRow, TuiRenderer } from './renderer.tsx'
 
 // Re-exported so driver suites import the renderer contract without reaching
 // the ink view's .tsx module directly (the host aggregate compiles specs).
@@ -570,10 +570,19 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
   let pendingApproval: ((outcome: ApprovalOutcome) => void) | undefined
   ctx.on('approval/request', (req, next) => {
     if (req.agent.session.id !== agent.session.id) return next()
+    // The panel's detail line: the request references the exact tool call
+    // instead of duplicating its arguments; the pending frame for that call
+    // carries the invocation summary (a terminal card's title is the command).
+    const pending = req.callId === undefined ? undefined : state.frames.find(
+      (frame): frame is Extract<Frame, { kind: 'tool' }> =>
+        frame.kind === 'tool' && frame.callId === req.callId && frame.result === undefined,
+    )
     setOverlay({
       kind: 'approval',
       toolName: req.toolName,
       ...req.reason === undefined ? {} : { reason: req.reason },
+      ...pending === undefined || pending.call.title === '' ? {} : { detail: pending.call.title },
+      ...req.callId === undefined ? {} : { callId: req.callId },
     })
     return new Promise<ApprovalOutcome>((resolve) => {
       pendingApproval = resolve
@@ -628,9 +637,9 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
       if (exiting) return
       agent.cancel({ kind: 'user' })
     },
-    onApproval: (allow) => {
+    onApproval: (choice: ApprovalChoice) => {
       if (exiting) return
-      pendingApproval?.(allow ? 'allowed-once' : 'rejected')
+      pendingApproval?.(choice === 'allow' ? 'allowed-once' : choice === 'reject' ? 'rejected' : 'cancelled')
     },
     onPanelOpen: () => {
       if (exiting) return
