@@ -53,6 +53,7 @@ export const apply = ctx => globalThis.__tuiStartupApply(ctx)
     `  inject: [${TUI_STARTUP_SERVICE}]`,
     '  config:',
     '    resume: !!js ctx.tuiStartup.resume',
+    '    continueLatest: !!js ctx.tuiStartup.continueLatest === true',
     '- id: tui-startup',
     `  name: ${pathToFileURL(join(dir, 'startup.mjs')).href}`,
     '',
@@ -83,16 +84,31 @@ export const apply = ctx => globalThis.__tuiStartupApply(ctx)
 describe('tui command-line provider', () => {
   it('passes the resume option into the runner config', async () => {
     const { startup, observed } = await bootStartup(['--resume', 'abc'])
-    expect(startup).toEqual({ resume: 'abc' })
-    expect(observed.runnerConfig).toEqual({ resume: 'abc' })
+    expect(startup).toEqual({ resume: 'abc', continueLatest: false })
+    expect(observed.runnerConfig).toEqual({ resume: 'abc', continueLatest: false })
     expect(observed.exits).toEqual([])
   })
 
   it('provides an undefined resume when no option is given', async () => {
     const { startup, observed } = await bootStartup([])
-    expect(startup).toEqual({ resume: undefined })
-    expect(observed.runnerConfig).toEqual({ resume: undefined })
+    expect(startup).toEqual({ resume: undefined, continueLatest: false })
+    expect(observed.runnerConfig).toEqual({ resume: undefined, continueLatest: false })
     expect(observed.exits).toEqual([])
+  })
+
+  it('passes -c and --continue into the runner config as continueLatest', async () => {
+    for (const flag of ['-c', '--continue']) {
+      const { startup, observed } = await bootStartup([flag])
+      expect(startup).toEqual({ resume: undefined, continueLatest: true })
+      expect(observed.runnerConfig).toEqual({ resume: undefined, continueLatest: true })
+      expect(observed.exits).toEqual([])
+    }
+  })
+
+  it('publishes both resume and continueLatest when given together', async () => {
+    // The driver prefers the explicit id; startup only reports the flags.
+    const { startup } = await bootStartup(['--resume', 'abc', '-c'])
+    expect(startup).toEqual({ resume: 'abc', continueLatest: true })
   })
 
   it('prints its own help and leaves the runner pending', async () => {

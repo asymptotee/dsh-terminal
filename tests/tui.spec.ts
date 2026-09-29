@@ -22,6 +22,8 @@ import type { FrameState } from '../src/frames.ts'
 interface Script {
   /** When set, the driver must resume this persisted session id. */
   resumeId?: string
+  /** When set, the driver config carries continueLatest (`-c`). */
+  continueLatest?: boolean
   /** Registered before the driver reads the tools registry. */
   tools?: unknown
   /** Registered before the driver reads the commands registry. */
@@ -30,6 +32,8 @@ interface Script {
   llm?: unknown
   /** Registered before the driver reads the effective sandbox mode. */
   sandboxPolicy?: unknown
+  /** Registered before the driver resolves a --continue target. */
+  sessionPersistence?: unknown
   /** Append a pre-existing turn before the driver attaches its live fold. */
   seed?(session: Session): void
   /** Append one owned turn; `turn` increments per submitted line. */
@@ -132,6 +136,7 @@ async function bench(script: Script): Promise<BenchHandle> {
   if (script.commands !== undefined) ctx.provide('commands', script.commands as never)
   if (script.llm !== undefined) ctx.provide('llm', script.llm as never)
   if (script.sandboxPolicy !== undefined) ctx.provide('sandboxPolicy', script.sandboxPolicy as never)
+  if (script.sessionPersistence !== undefined) ctx.provide('sessionPersistence', script.sessionPersistence as never)
   const states: FrameState[] = []
   const views: (RenderView | undefined)[] = []
   const order: string[] = []
@@ -164,7 +169,10 @@ async function bench(script: Script): Promise<BenchHandle> {
       stderr: { write: () => true },
       exit: (code: number) => { order.push('exit'); resolve(code) },
     }
-    void run(ctx, script.resumeId === undefined ? {} : { resume: script.resumeId }, io, renderer)
+    const config: { resume?: string; continueLatest?: boolean } = {}
+    if (script.resumeId !== undefined) config.resume = script.resumeId
+    if (script.continueLatest !== undefined) config.continueLatest = script.continueLatest
+    void run(ctx, config, io, renderer)
   })
   await bound
   return { ctx, agent: agentRef!, handlers, states, views, exited, resumedId }
@@ -414,6 +422,40 @@ describe('tui driver', () => {
       { kind: 'user', text: 'again' },
       { kind: 'assistant', text: 'continued' },
     ])
+    await test.ctx.fiber.dispose()
+  })
+
+  it('resolves continueLatest to the latest top-level session of this directory', async () => {
+    const cwd = process.cwd()
+    const test = await bench({
+      continueLatest: true,
+      sessionPersistence: {
+        list: async () => [
+          { header: { id: 'older', createdAt: 1_000, cwd, isSeeded: false } },
+          { header: { id: 'newest', createdAt: 3_000, cwd, isSeeded: false } },
+          // A later session from another directory and a subagent child must
+          // both lose to this directory's most recent top-level session.
+          { header: { id: 'elsewhere', createdAt: 9_000, cwd: '/somewhere/else', isSeeded: false } },
+          { header: { id: 'child', createdAt: 9_500, cwd, origin: 'subagent', isSeeded: false } },
+        ],
+      },
+      afterPrompt: () => {},
+    })
+    expect(test.resumedId).toBe('newest')
+    await test.ctx.fiber.dispose()
+  })
+
+  it('starts fresh with a notice when continueLatest finds no stored session', async () => {
+    const test = await bench({
+      continueLatest: true,
+      sessionPersistence: { list: async () => [] },
+      afterPrompt: () => {},
+    })
+    expect(test.resumedId).toBeUndefined()
+    expect(test.views.at(-1)?.overlay).toEqual({
+      kind: 'notice',
+      text: 'no stored session for this directory; started a new one',
+    })
     await test.ctx.fiber.dispose()
   })
 

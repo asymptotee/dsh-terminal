@@ -22,7 +22,8 @@ pnpm pack
 dsh plugin --profile dsh-terminal add ./dsh-terminal-<版本>.tgz
 
 dsh --profile dsh-terminal              # 启动新会话
-dsh --profile dsh-terminal --resume <id>  # 恢复持久化会话
+dsh --profile dsh-terminal --resume <id>  # 恢复指定持久化会话
+dsh --profile dsh-terminal -c           # 恢复当前工作目录最近创建的会话（--continue 同义）
 node bin/dsh-terminal.js                # 或经本包 bin 直通（profile 未初始化时自动引导）
 ```
 

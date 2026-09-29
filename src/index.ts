@@ -38,11 +38,47 @@ export const inject = ['agentDefaultModel', 'agents', 'sessions', 'sessionProjec
 export interface Config {
   /** Persisted session id to resume; undefined starts a fresh session. */
   resume?: string
+  /** Resume this working directory's most recent session (`-c`/`--continue`). */
+  continueLatest?: boolean
 }
 
 export const Config: z<Config> = z.object({
   resume: z.string(),
+  continueLatest: z.boolean(),
 })
+
+/** The header facts `--continue` needs from one stored-session snapshot. The
+ *  persistence service sits outside the adapter contract, so it is read
+ *  structurally — the sandboxPolicy pattern, no upstream import. */
+interface StoredSessionSnapshot {
+  readonly header: {
+    readonly id: string
+    readonly createdAt: number
+    readonly cwd?: string
+    readonly origin?: string
+  }
+}
+
+/**
+ * This working directory's most recent top-level session id, or undefined
+ * when the store holds none. Subagent children are not user conversations,
+ * and other directories' sessions belong to their own workspaces.
+ * @param ctx - plugin context carrying the host's persistence service.
+ */
+async function latestWorkspaceSessionId(ctx: Context): Promise<string | undefined> {
+  const persistence = ctx.get('sessionPersistence') as
+    | { list(): Promise<readonly StoredSessionSnapshot[]> }
+    | undefined
+  if (persistence === undefined) return undefined
+  const cwd = process.cwd()
+  let latest: StoredSessionSnapshot | undefined
+  for (const snapshot of await persistence.list()) {
+    const header = snapshot.header
+    if (header.cwd !== cwd || header.origin === 'subagent') continue
+    if (latest === undefined || header.createdAt > latest.header.createdAt) latest = snapshot
+  }
+  return latest?.header.id
+}
 
 /** How long the exit flush may take before the driver exits without it. */
 export const EXIT_FLUSH_TIMEOUT_MS = 5_000
@@ -145,7 +181,14 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
     installModelSelection(agentCtx, selected)
   }
   const agentOptions = { provider: selection.provider, model: selection.model }
-  const handle = config.resume === undefined
+  // `-c` resolves this directory's most recent stored session; an explicit
+  // --resume id always wins. A --continue with nothing to resume falls back to
+  // a fresh session with a notice, rather than failing the launch.
+  const resumeId = config.resume ?? (config.continueLatest === true
+    ? await latestWorkspaceSessionId(ctx)
+    : undefined)
+  const continueMissed = config.resume === undefined && config.continueLatest === true && resumeId === undefined
+  const handle = resumeId === undefined
     ? await agents.create({
       sessionId: SessionId(`session-${randomUUID()}`),
       meta: { cwd: process.cwd() },
@@ -153,7 +196,7 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
       setup,
     })
     : await agents.resume({
-      resumeSessionId: SessionId(config.resume),
+      resumeSessionId: SessionId(resumeId),
       agentOptions,
       setup,
     })
@@ -204,6 +247,11 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
       ...sandboxMode === undefined ? {} : { mode: sandboxMode },
       ...selection.reasoningEffort === undefined ? {} : { effort: selection.reasoningEffort },
     },
+    // A --continue that found nothing to resume says so instead of silently
+    // opening a fresh session; the notice clears on the first submission.
+    ...(continueMissed
+      ? { overlay: { kind: 'notice' as const, text: 'no stored session for this directory; started a new one' } }
+      : {}),
   }
   // The footer's context ratio needs the model's window, and the effort badge
   // shows the effective reasoning strength (the selection when set, otherwise

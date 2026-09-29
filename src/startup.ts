@@ -22,6 +22,8 @@ export const TUI_STARTUP_SERVICE = 'tuiStartup'
 export interface TuiStartupValues {
   /** Persisted session id to resume; undefined starts a fresh session. */
   resume: string | undefined
+  /** Resume this working directory's most recent session (`-c`/`--continue`). */
+  continueLatest: boolean
 }
 
 /**
@@ -34,10 +36,12 @@ function tuiCommand(): Command {
     .description('Interactive terminal UI: chat with a coding agent in your terminal.')
     .helpOption('-h, --help', 'show this help')
     .option('--resume <id>', 'resume the persisted session with this id')
+    .option('-c, --continue', "resume this working directory's most recent session")
     .addHelpText('after', `
 Examples:
   dsh-terminal                  start a new session
   dsh-terminal --resume <id>    resume the session with the given id
+  dsh-terminal -c               resume this directory's most recent session
 `)
 }
 
@@ -49,8 +53,11 @@ Examples:
 export function apply(ctx: Context): void {
   const program = tuiCommand()
   program.action(() => {
-    const opts = program.opts<{ resume?: string }>()
-    ctx.provide(TUI_STARTUP_SERVICE, { resume: opts.resume } satisfies TuiStartupValues)
+    const opts = program.opts<{ resume?: string; continue?: boolean }>()
+    ctx.provide(TUI_STARTUP_SERVICE, {
+      resume: opts.resume,
+      continueLatest: opts.continue === true,
+    } satisfies TuiStartupValues)
   })
   parseCmdline(ctx, program)
 }
