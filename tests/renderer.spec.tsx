@@ -109,23 +109,35 @@ describe('TuiApp rendering', () => {
     expect(lastFrame()).toMatch(/❯ hello.*\n\n+● answer/)
   })
 
-  it('renders a multiline invocation as one clamped line, and aligned rows when expanded', async () => {
+  it('folds a multiline invocation into a one-line semicolon summary', () => {
     const frames: Frame[] = [{
       kind: 'tool', seq: 1, turn: 1, step: 1, callId: 'c1', name: 'bash',
       args: { command: 'set -x\ncd /work\nmkdir smoke' },
       call: { card: 'terminal', title: 'set -x\ncd /work\nmkdir smoke' },
     }]
+    const { lastFrame } = renderApp(<TuiApp state={state(frames)} handlers={noopHandlers()} />)
+    // Newlines fold to `; ` — shell one-liner reading, the same fold the
+    // panel activity uses — and the short fold renders complete, unclamped.
+    expect(lastFrame() ?? '').toContain('● Bash(set -x; cd /work; mkdir smoke)')
+  })
+
+  it('clamps a folded invocation to the width budget and expands it with ctrl+o', async () => {
+    const script = Array.from({ length: 8 }, (_, i) => `step number ${i + 1} runs`).join('\n')
+    const frames: Frame[] = [{
+      kind: 'tool', seq: 1, turn: 1, step: 1, callId: 'c1', name: 'bash',
+      args: { command: script },
+      call: { card: 'terminal', title: script },
+    }]
     const { lastFrame, stdin } = renderApp(<TuiApp state={state(frames)} handlers={noopHandlers()} />)
-    // Collapsed: the first line with an ellipsis only — continuation lines
-    // must not leak into column 0 of the transcript.
+    // Folded to `; ` then clamped at the budget with the bare ellipsis; the
+    // later steps stay hidden until ctrl+o reveals the full fold.
     let frame = lastFrame() ?? ''
-    expect(frame).toContain('● Bash(set -x …)')
-    expect(frame).not.toContain('cd /work')
-    // Expanded (ctrl+o): every line, continuations aligned right after `● Bash(`.
+    expect(frame).toContain('● Bash(step number 1 runs; step number 2 runs; step number…')
+    expect(frame).not.toContain('step number 3 runs')
     stdin.write('\x0f')
     await settled()
     frame = lastFrame() ?? ''
-    expect(frame).toContain('● Bash(set -x\n       cd /work\n       mkdir smoke)')
+    expect(frame).toContain('step number 8 runs)')
   })
 
   it('echoes a multi-line user message aligned under the prompt', () => {

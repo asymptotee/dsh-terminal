@@ -21,7 +21,7 @@ import './dsh-adapter/effects.ts'
 import { createFrameState, foldAssistantStreamChunk, foldEvent, readableFailureMessage } from './frames.ts'
 import type { FoldDeps, Frame, FrameState } from './frames.ts'
 import { teamToolPresentation } from './team-present.ts'
-import { createInkRenderer } from './renderer.tsx'
+import { createInkRenderer, foldInvocationLine } from './renderer.tsx'
 import type { ApprovalChoice, CommandInfo, Overlay, RenderView, SubagentRow, TeamPanelInfo, TeamTaskRow, TuiRenderer } from './renderer.tsx'
 
 // Re-exported so driver suites import the renderer contract without reaching
@@ -299,7 +299,12 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
   /** The child's latest visible activity: the most recent tool card's title. */
   function childActivity(childState: FrameState): string | undefined {
     const last = childState.frames.at(-1)
-    return last !== undefined && last.kind === 'tool' ? last.call.title : undefined
+    if (last === undefined || last.kind !== 'tool') return undefined
+    // A panel row is one physical line: the shared fold turns a multiline
+    // script's title into its `; ` one-liner, then the row's width clamp
+    // takes over.
+    const folded = foldInvocationLine(last.call.title)
+    return folded === '' ? undefined : folded
   }
 
   /**
@@ -620,16 +625,18 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
     if (req.agent.session.id !== agent.session.id) return next()
     // The panel's detail line: the request references the exact tool call
     // instead of duplicating its arguments; the pending frame for that call
-    // carries the invocation summary (a terminal card's title is the command).
+    // carries the invocation summary (a terminal card's title is the
+    // command), folded to one line like every other invocation surface.
     const pending = req.callId === undefined ? undefined : state.frames.find(
       (frame): frame is Extract<Frame, { kind: 'tool' }> =>
         frame.kind === 'tool' && frame.callId === req.callId && frame.result === undefined,
     )
+    const detail = pending === undefined ? '' : foldInvocationLine(pending.call.title)
     setOverlay({
       kind: 'approval',
       toolName: req.toolName,
       ...req.reason === undefined ? {} : { reason: req.reason },
-      ...pending === undefined || pending.call.title === '' ? {} : { detail: pending.call.title },
+      ...detail === '' ? {} : { detail },
       ...req.callId === undefined ? {} : { callId: req.callId },
     })
     return new Promise<ApprovalOutcome>((resolve) => {

@@ -607,13 +607,13 @@ describe('tui driver', () => {
 
   it('cancels on Esc and carries the pending call detail on the overlay', async () => {
     const test = await bench({
-      // The bash presentation puts the command in the card title — the very
-      // string the approval panel shows as its detail line.
+      // The bash presentation puts the command in the card title — a
+      // multiline script folds to its `; ` one-liner for the detail row.
       tools: { get: () => ({ presentCall: (args: { command?: string }) => ({ card: 'terminal', title: args?.command ?? '' }) }) },
       seed: (session) => {
         session.append('tool/call', {
           turn: 1, step: 1, callId: ToolCallId('call-9'), name: 'bash',
-          arguments: '{"command":"mkdir -p demo"}',
+          arguments: '{"command":"set -u\\nmkdir -p demo\\n"}',
         })
       },
       afterPrompt: () => {},
@@ -630,7 +630,7 @@ describe('tui driver', () => {
       kind: 'approval',
       toolName: 'bash',
       reason: 'writes outside the workspace',
-      detail: 'mkdir -p demo',
+      detail: 'set -u; mkdir -p demo',
       callId: 'call-9',
     })
     test.handlers.onApproval('cancel')
@@ -717,6 +717,26 @@ describe('subagent panel', () => {
       activity: 'grep',
       inputTokens: 150,
       fading: false,
+    })])
+    test.handlers.onExit()
+    await test.exited
+    await test.ctx.fiber.dispose()
+  })
+
+  it('folds a multiline command title into a one-line semicolon activity', async () => {
+    const test = await bench({
+      tools: { get: () => ({ presentCall: () => ({ card: 'terminal', title: 'set -u\ncd /work\n\nwc -l *.txt\n' }) }) },
+      afterPrompt: () => {},
+    })
+    const child = test.ctx.sessions.create(SessionId('child-1'), {
+      meta: { parentSession: test.agent.session.id, origin: 'subagent' },
+    })
+    child.append('tool/call', { turn: 1, step: 1, callId: ToolCallId('cc-1'), name: 'bash', arguments: '{}' })
+    await new Promise(resolve => setTimeout(resolve, 0))
+    // Newlines fold to `; `, the interior blank line drops, the trailing
+    // newline leaves no dangling separator — one physical panel row.
+    expect(test.views.at(-1)?.subagents).toEqual([expect.objectContaining({
+      activity: 'set -u; cd /work; wc -l *.txt',
     })])
     test.handlers.onExit()
     await test.exited
