@@ -8,7 +8,7 @@
  */
 
 /** The harness package version line all @deepseek-ai/dsh-* dependencies pin to. */
-export const DSH_VERSION_LINE = '0.1.5-rc.2'
+export const DSH_VERSION_LINE = '0.1.7-rc.1'
 
 /** One blessed upstream package and its pinned version. */
 export interface BlessedPackage {
@@ -25,9 +25,9 @@ export interface BlessedPackage {
  * built against.
  */
 export const BLESSED_PACKAGES: readonly BlessedPackage[] = [
-  { name: '@deepseek-ai/cordis', version: '4.0.2' },
-  { name: '@deepseek-ai/cordis-plugin-loader', version: '1.0.3' },
-  { name: '@deepseek-ai/schemastery', version: '3.18.2' },
+  { name: '@deepseek-ai/cordis', version: '4.0.4' },
+  { name: '@deepseek-ai/cordis-plugin-loader', version: '1.0.5' },
+  { name: '@deepseek-ai/schemastery', version: '3.18.4' },
   { name: '@deepseek-ai/dsh-agent', version: DSH_VERSION_LINE },
   { name: '@deepseek-ai/dsh-agent-default-model', version: DSH_VERSION_LINE },
   { name: '@deepseek-ai/dsh-cmdline', version: DSH_VERSION_LINE },

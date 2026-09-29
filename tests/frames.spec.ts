@@ -81,12 +81,12 @@ describe('fold: user echoes', () => {
     expect(folded.state.frames).toEqual([{ kind: 'user', seq: 1, text: 'hello' }])
   })
 
-  it('skips plugin-sourced messages', () => {
+  it('skips injected messages without a display form', () => {
     const folded = foldEvent(
       createFrameState(),
       ev('user/message', createUserMessage({
         content: [{ type: 'text', text: 'injected' }],
-        source: { kind: 'plugin', plugin: 'context' },
+        source: { kind: 'system-prompt' },
       })),
       deps(),
     )
@@ -118,7 +118,10 @@ describe('fold: notices', () => {
           { type: 'text', text: 'Its closing message:' },
           { type: 'text', text: 'all done.' },
         ],
-        source: { kind: 'plugin', plugin: 'tool-jobs', form: 'notice', summary: 'Background job subagent-1 finished.' },
+        // A merge-extensible notice producer without a sender id: the fold
+        // reads its form/summary structurally, and — unlike a subagent
+        // settlement — its body is part of the display.
+        source: { kind: 'job-finished', form: 'notice', summary: 'Background job subagent-1 finished.' } as unknown as MessageSource,
       })),
       deps(),
     )
@@ -143,7 +146,7 @@ describe('fold: notices', () => {
           { type: 'text', text: 'Background subagent child-1 reported:' },
           { type: 'text', text: 'found the bug.' },
         ],
-        source: { kind: 'plugin', plugin: 'relay-test', form: 'relay' },
+        source: { kind: 'agent-message', form: 'relay', senderSessionId: 'child-1' } as unknown as MessageSource,
       })),
       deps(),
     )
@@ -354,7 +357,9 @@ describe('fold: notices', () => {
           { type: 'reasoning', text: 'thinking' },
           { type: 'text', text: 'report arrived.' },
         ],
-        source: { kind: 'plugin', plugin: 'relay-test', form: 'notice', summary: 'report arrived.' },
+        // No sender id: the full text is the notice body even when it equals
+        // the summary (the settlement dedupe applies to sender ids only).
+        source: { kind: 'job-finished', form: 'notice', summary: 'report arrived.' } as unknown as MessageSource,
       })),
       deps(),
     )
@@ -371,7 +376,10 @@ describe('fold: notices', () => {
       createFrameState(),
       ev('user/message', createUserMessage({
         content: [{ type: 'text', text: 'Background job subagent-1 finished.' }],
-        source: { kind: 'plugin', plugin: 'tool-jobs', form: 'notice', summary: 'Background job subagent-1 finished.' },
+        source: {
+          kind: 'subagent-settled', form: 'notice',
+          summary: 'Background job subagent-1 finished.', senderSessionId: 'child-1',
+        } as unknown as MessageSource,
       })),
       deps(),
     )
@@ -384,7 +392,7 @@ describe('fold: notices', () => {
       createFrameState(),
       ev('user/message', createUserMessage({
         content: [{ type: 'text', text: 'assembled context' }],
-        source: { kind: 'plugin', plugin: 'context', form: 'snapshot', sections: [] },
+        source: { kind: 'system-prompt' },
       })),
       deps(),
     )
@@ -397,7 +405,7 @@ describe('fold: notices', () => {
       createFrameState(),
       ev('user/message', createUserMessage({
         content: [],
-        source: { kind: 'plugin', plugin: 'relay-test', form: 'relay' },
+        source: { kind: 'agent-message', form: 'relay', senderSessionId: 'child-1' } as unknown as MessageSource,
       })),
       deps(),
     )

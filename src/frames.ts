@@ -491,27 +491,30 @@ export function foldEvent(state: FrameState, event: SessionEvent, deps: FoldDeps
       }
     }
     case 'tool/result': {
-      const block = event.data.message.content[0]
-      const index = state.pendingTools.get(block.toolCallId)
+      // 0.1.7 moved the correlation and failure flag off the content block and
+      // onto the tool-role message itself; the content is the result body.
+      const { message, meta } = event.data
+      const index = state.pendingTools.get(message.toolCallId)
       const existing = index === undefined ? undefined : state.frames[index]
       // An orphan result (no matching pending call) is not displayable.
-      if (index === undefined || existing === undefined || existing.kind !== 'tool' || existing.callId !== block.toolCallId) {
+      if (index === undefined || existing === undefined || existing.kind !== 'tool' || existing.callId !== message.toolCallId) {
         return { state, lines: [] }
       }
-      const { meta } = event.data
       const result = deps.tools.get(existing.name)?.presentResult?.(existing.args, {
-        content: block.content,
-        isError: block.isError ?? false,
+        // ToolResult.content is declared mutable upstream; the message's
+        // blocks are readonly — a shallow copy bridges the two.
+        content: [...message.content],
+        isError: message.isError ?? false,
         ...meta === undefined ? {} : { meta },
       })
       const updated: Extract<Frame, { kind: 'tool' }> = {
         ...existing,
         ...result === undefined ? {} : { result },
-        resultContent: block.content,
-        ...block.isError ? { isError: true } : {},
+        resultContent: message.content,
+        ...message.isError ? { isError: true } : {},
       }
       const pendingTools = new Map(state.pendingTools)
-      pendingTools.delete(block.toolCallId)
+      pendingTools.delete(message.toolCallId)
       return {
         state: { ...state, frames: replaceAt(state.frames, index, updated), pendingTools },
         lines: renderToolResultLines(updated),
