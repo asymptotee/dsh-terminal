@@ -1012,17 +1012,26 @@ function ToolCallView({ frame, expandedOutput, awaitingApproval }: { frame: Extr
     // Generic titles often start with the tool name (`Read /tmp/test.txt`);
     // strip it so the label on the left is not repeated.
     : call.title.startsWith(`${label} `) ? call.title.slice(label.length + 1) : call.title
-  // Keep the call line on one row: clamp the invocation to CALL_WIDTH_RATIO of
-  // the terminal width, minus the `● Label(…)` overhead. ctrl+o (expandedOutput)
-  // reveals the full invocation, which then wraps normally.
+  // A multiline invocation (a shell script handed to bash) must not leak
+  // column-0 lines into the transcript: collapsed shows the first line only
+  // with an ellipsis, expanded indents every continuation to line up right
+  // after `● Label(`. Trailing whitespace would render phantom continuations.
+  const lines = full.replace(/\s+$/, '').split('\n')
+  // Keep the collapsed call line on one row: clamp the invocation to
+  // CALL_WIDTH_RATIO of the terminal width, minus the `● Label(…)` overhead.
+  // ctrl+o (expandedOutput) reveals the full invocation, which then wraps
+  // normally.
   const budget = Math.floor(useTerminalWidth() * CALL_WIDTH_RATIO) - (stringWidth(label) + 4)
-  const invocation = expandedOutput ? full : truncateToWidth(full, budget)
-  return (
-    <Text>
-      {awaitingApproval ? <Text dimColor>●</Text> : <Text color="#51cf66">●</Text>} {label}
-      ({invocation})
-    </Text>
-  )
+  const dot = awaitingApproval ? <Text dimColor>●</Text> : <Text color="#51cf66">●</Text>
+  if (!expandedOutput) {
+    const head = truncateToWidth(lines[0], budget)
+    const more = lines.length > 1 && !head.endsWith('…') ? ' …' : ''
+    return <Text>{dot} {label}({head}{more})</Text>
+  }
+  if (lines.length === 1) return <Text>{dot} {label}({lines[0]})</Text>
+  const indent = ' '.repeat(stringWidth(`● ${label}(`))
+  const rest = lines.slice(1).map(line => `${indent}${line}`).join('\n')
+  return <Text>{dot} {label}({lines[0]}{'\n'}{rest})</Text>
 }
 
 function ToolResultView({

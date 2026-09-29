@@ -109,6 +109,25 @@ describe('TuiApp rendering', () => {
     expect(lastFrame()).toMatch(/❯ hello.*\n\n+● answer/)
   })
 
+  it('renders a multiline invocation as one clamped line, and aligned rows when expanded', async () => {
+    const frames: Frame[] = [{
+      kind: 'tool', seq: 1, turn: 1, step: 1, callId: 'c1', name: 'bash',
+      args: { command: 'set -x\ncd /work\nmkdir smoke' },
+      call: { card: 'terminal', title: 'set -x\ncd /work\nmkdir smoke' },
+    }]
+    const { lastFrame, stdin } = renderApp(<TuiApp state={state(frames)} handlers={noopHandlers()} />)
+    // Collapsed: the first line with an ellipsis only — continuation lines
+    // must not leak into column 0 of the transcript.
+    let frame = lastFrame() ?? ''
+    expect(frame).toContain('● Bash(set -x …)')
+    expect(frame).not.toContain('cd /work')
+    // Expanded (ctrl+o): every line, continuations aligned right after `● Bash(`.
+    stdin.write('\x0f')
+    await settled()
+    frame = lastFrame() ?? ''
+    expect(frame).toContain('● Bash(set -x\n       cd /work\n       mkdir smoke)')
+  })
+
   it('echoes a multi-line user message aligned under the prompt', () => {
     const frames: Frame[] = [{ kind: 'user', seq: 1, text: 'line one\nline two' }]
     const { lastFrame } = renderApp(<TuiApp state={state(frames)} handlers={noopHandlers()} />)
