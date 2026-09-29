@@ -62,6 +62,43 @@ describe('TuiApp rendering', () => {
     expect(frame.indexOf('❯ hello')).toBeLessThan(frame.indexOf('● Hel'))
   })
 
+  it('keeps exactly one blank row around the thought box in both frame shapes', () => {
+    const thinking = { text: 'reasoning prose', startedAt: Date.now(), seconds: 9 }
+    // Thinking + text: one breathing row between the box border and the text.
+    const withText: Frame[] = [
+      { kind: 'assistant', seq: 1, turn: 1, step: 1, text: 'Here we go', streaming: false, thinking },
+    ]
+    const first = renderApp(<TuiApp state={state(withText)} handlers={noopHandlers()} />)
+    let lines = (first.lastFrame() ?? '').split('\n')
+    let border = lines.findIndex(line => line.includes('╯'))
+    let next = lines.findIndex(line => line.includes('● Here we go'))
+    expect(next - border).toBe(2)
+    // Thinking without text: the box ends the frame, and only the frame
+    // wrapper's margin separates it from the next call — not margin doubled.
+    const noText: Frame[] = [
+      { kind: 'assistant', seq: 1, turn: 1, step: 1, text: '', streaming: false, thinking },
+      { kind: 'tool', seq: 2, turn: 1, step: 1, callId: 'c1', name: 'bash', args: {}, call: { card: 'terminal', title: 'ls' } },
+    ]
+    const second = renderApp(<TuiApp state={state(noText)} handlers={noopHandlers()} />)
+    lines = (second.lastFrame() ?? '').split('\n')
+    border = lines.findIndex(line => line.includes('╯'))
+    next = lines.findIndex(line => line.includes('● Bash(ls)'))
+    expect(next - border).toBe(2)
+  })
+
+  it('collapses trailing newlines of assistant text to the single frame margin', () => {
+    const frames: Frame[] = [
+      { kind: 'assistant', seq: 1, turn: 1, step: 1, text: 'Hello there\n\n\n', streaming: false },
+      { kind: 'tool', seq: 2, turn: 1, step: 1, callId: 'c1', name: 'bash', args: {}, call: { card: 'terminal', title: 'ls' } },
+    ]
+    const { lastFrame } = renderApp(<TuiApp state={state(frames)} handlers={noopHandlers()} />)
+    const frame = lastFrame() ?? ''
+    // Exactly one blank line — the frame wrapper's margin — between the text
+    // and the next call; the model's trailing newlines render nothing.
+    expect(frame).toContain('● Hello there\n\n● Bash(ls)')
+    expect(frame).not.toContain('Hello there\n\n\n')
+  })
+
   it('separates frames with a blank line', () => {
     const frames: Frame[] = [
       { kind: 'user', seq: 1, text: 'hello' },

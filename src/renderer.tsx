@@ -845,10 +845,21 @@ function FrameRow({ frame, expandedOutput, approvalCallId }: { frame: Frame; exp
       // The marker sits on the first non-empty line; leading empty lines
       // (models often open a stream with a newline) render nothing at all.
       const first = lines.findIndex(line => line !== '')
+      // Trailing empties collapse the same way — models often close a stream
+      // with newlines before a tool call, and rendering them stacks blank
+      // lines on top of the frame wrapper's own one-line margin. Paragraph
+      // breaks inside the message are untouched.
+      let last = lines.length - 1
+      while (last >= 0 && lines[last] === '') last--
+      const hasText = first !== -1
       return (
         <Box flexDirection="column">
           {frame.thinking !== undefined ? <ThinkingBlock thinking={frame.thinking} /> : null}
-          {first === -1 ? null : assistantContent(lines.slice(first))}
+          {/* The breathing row belongs to the box-text pair: with no text in
+              the frame the box ends it, and the frame wrapper's own margin is
+              the single blank line to the next frame. */}
+          {frame.thinking !== undefined && hasText ? <Text> </Text> : null}
+          {hasText ? assistantContent(lines.slice(first, last + 1)) : null}
         </Box>
       )
     }
