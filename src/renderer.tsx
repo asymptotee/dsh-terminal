@@ -556,9 +556,36 @@ function SubagentPanel({
   )
 }
 
+/** How long the task board lingers after its last task completes, before the
+ *  whole section disappears at once — enough time to read the final state. */
+export const COMPLETED_BOARD_LINGER_MS = 5_000
+
 /** The Agent Teams roster and shared task board, read from the agentTeam projection. */
-function TeamPanel({ team, selected }: { team: TeamPanelInfo; selected: number | undefined }): React.JSX.Element {
+export function TeamPanel({
+  team,
+  selected,
+  completedLingerMs = COMPLETED_BOARD_LINGER_MS,
+}: {
+  team: TeamPanelInfo
+  selected: number | undefined
+  /** Override the all-done linger for tests; production keeps the constant. */
+  completedLingerMs?: number
+}): React.JSX.Element {
   const width = useTerminalWidth()
+  // While any task is open the board shows the full progress, completed ✔
+  // rows included. Once every task is done the board lingers briefly, then
+  // hides as a whole — rows never drop off one by one mid-run. A task
+  // reopened (or a new one added) cancels the hide immediately.
+  const allDone = team.tasks.length > 0 && team.tasks.every(task => task.status === 'completed')
+  const [boardHidden, setBoardHidden] = useState(false)
+  React.useEffect(() => {
+    if (!allDone) {
+      setBoardHidden(false)
+      return
+    }
+    const timer = setTimeout(() => setBoardHidden(true), completedLingerMs)
+    return () => clearTimeout(timer)
+  }, [allDone, completedLingerMs])
   // Members window around the selection (roster head when unselected); tasks
   // keep their reading order from the top. Both cap at PANEL_MAX_ROWS so the
   // chrome band stays bounded.
@@ -609,7 +636,7 @@ function TeamPanel({ team, selected }: { team: TeamPanelInfo; selected: number |
         )
       })}
       {hiddenMembers > 0 ? <Text dimColor>  … {hiddenMembers} more</Text> : null}
-      {team.tasks.length > 0 ? (
+      {team.tasks.length > 0 && !(allDone && boardHidden) ? (
         <>
           <Text>Tasks · {team.tasks.length}</Text>
           {visibleTasks.map((task, index) => {

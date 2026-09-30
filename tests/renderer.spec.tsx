@@ -4,8 +4,8 @@ import os from 'node:os'
 import { describe, expect, it, vi } from 'vitest'
 import { render } from 'ink-testing-library'
 import stringWidth from 'string-width'
-import { TuiApp, padToWidth, truncateToWidth } from '../src/renderer.tsx'
-import type { InputHandlers, RenderView } from '../src/renderer.tsx'
+import { TeamPanel, TuiApp, padToWidth, truncateToWidth } from '../src/renderer.tsx'
+import type { InputHandlers, RenderView, TeamPanelInfo } from '../src/renderer.tsx'
 import { createFrameState } from '../src/frames.ts'
 import type { Frame, FrameState } from '../src/frames.ts'
 
@@ -1131,6 +1131,47 @@ describe('subagent panel', () => {
     expect(frame).toContain('investigate')
     expect(frame).toContain('researcher · in_progress')
     expect(frame).toContain('unowned · pending')
+  })
+
+  it('shows completed rows while tasks remain open, then hides the all-done board after a linger', async () => {
+    const team = (tasks: readonly { subject: string; status: string; ownerName?: string; blocked: boolean }[]) => ({
+      members: [{ name: 'lead', description: 'lead', phase: 'active' }],
+      tasks,
+    })
+    // Mixed board: completed ✔ rows stay visible next to open tasks — rows
+    // never drop off one by one mid-run.
+    const mixed = renderApp(
+      <TuiApp
+        state={state([])}
+        handlers={noopHandlers()}
+        view={{
+          team: team([
+            { subject: 'done thing', status: 'completed', ownerName: 'lead', blocked: false },
+            { subject: 'open thing', status: 'in_progress', ownerName: 'lead', blocked: false },
+          ]),
+        }}
+      />,
+    )
+    const mixedFrame = mixed.lastFrame() ?? ''
+    expect(mixedFrame).toContain('Tasks · 2')
+    expect(mixedFrame).toContain('done thing')
+    expect(mixedFrame).toContain('open thing')
+  })
+
+  it('lingers the all-completed board, then hides it as a whole', async () => {
+    const team: TeamPanelInfo = {
+      members: [{ name: 'lead', description: 'lead', phase: 'active' }],
+      tasks: [{ subject: 'done thing', status: 'completed', ownerName: 'lead', blocked: false }],
+    }
+    const done = renderApp(<TeamPanel team={team} selected={undefined} completedLingerMs={40} />)
+    await settled(10)
+    expect(done.lastFrame() ?? '').toContain('Tasks · 1')
+    expect(done.lastFrame() ?? '').toContain('done thing')
+    await settled(80)
+    const frame = done.lastFrame() ?? ''
+    expect(frame).toContain('Teammates · 1')
+    expect(frame).not.toContain('Tasks ·')
+    expect(frame).not.toContain('done thing')
   })
 
   it('hides the team panel when there is no team', () => {
