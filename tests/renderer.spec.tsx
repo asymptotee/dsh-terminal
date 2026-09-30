@@ -4,7 +4,7 @@ import os from 'node:os'
 import { describe, expect, it, vi } from 'vitest'
 import { render } from 'ink-testing-library'
 import stringWidth from 'string-width'
-import { TeamPanel, TuiApp, padToWidth, truncateToWidth } from '../src/renderer.tsx'
+import { TuiApp, padToWidth, truncateToWidth } from '../src/renderer.tsx'
 import type { InputHandlers, RenderView, TeamPanelInfo } from '../src/renderer.tsx'
 import { createFrameState } from '../src/frames.ts'
 import type { Frame, FrameState } from '../src/frames.ts'
@@ -1158,17 +1158,37 @@ describe('subagent panel', () => {
     expect(mixedFrame).toContain('open thing')
   })
 
-  it('lingers the all-completed board, then hides it as a whole', async () => {
+  it('lingers the all-completed board, then keeps it hidden across a child-view round trip', async () => {
     const team: TeamPanelInfo = {
       members: [{ name: 'lead', description: 'lead', phase: 'active' }],
       tasks: [{ subject: 'done thing', status: 'completed', ownerName: 'lead', blocked: false }],
     }
-    const done = renderApp(<TeamPanel team={team} selected={undefined} completedLingerMs={40} />)
+    const app = renderApp(
+      <TuiApp state={state([])} handlers={noopHandlers()} completedLingerMs={40} view={{ team }} />,
+    )
     await settled(10)
-    expect(done.lastFrame() ?? '').toContain('Tasks · 1')
-    expect(done.lastFrame() ?? '').toContain('done thing')
+    expect(app.lastFrame() ?? '').toContain('Tasks · 1')
+    expect(app.lastFrame() ?? '').toContain('done thing')
     await settled(80)
-    const frame = done.lastFrame() ?? ''
+    let frame = app.lastFrame() ?? ''
+    expect(frame).toContain('Teammates · 1')
+    expect(frame).not.toContain('Tasks ·')
+    // Enter the child transcript and Esc back: TeamPanel unmounts while the
+    // child view is open, but the hide flag lives in TuiApp — the board must
+    // not come back on return.
+    const child = state([{ kind: 'user', seq: 1, text: 'child line' }])
+    app.rerender(
+      <TuiApp
+        state={state([])}
+        handlers={noopHandlers()}
+        completedLingerMs={40}
+        view={{ team, openSubagent: { childId: 'lead', label: 'lead', state: child } }}
+      />,
+    )
+    await settled()
+    app.rerender(<TuiApp state={state([])} handlers={noopHandlers()} completedLingerMs={40} view={{ team }} />)
+    await settled()
+    frame = app.lastFrame() ?? ''
     expect(frame).toContain('Teammates · 1')
     expect(frame).not.toContain('Tasks ·')
     expect(frame).not.toContain('done thing')

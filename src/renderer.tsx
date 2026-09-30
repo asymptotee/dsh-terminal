@@ -291,12 +291,15 @@ export function TuiApp({
   handlers,
   view,
   viewportRows,
+  completedLingerMs,
 }: {
   state: FrameState
   handlers: InputHandlers
   view?: RenderView
   /** Viewport height override for tests (ink-testing-library has no rows). */
   viewportRows?: number
+  /** All-completed task-board linger override for tests; production keeps the constant. */
+  completedLingerMs?: number
 }): React.JSX.Element {
   const [expandedOutput, setExpandedOutput] = useState(false)
   // One-way latch: the welcome splash disappears as soon as typing starts and
@@ -307,6 +310,22 @@ export function TuiApp({
   const onApprovalSelect = (delta: number): void => {
     setApprovalIndex(current => Math.min(1, Math.max(0, current + delta)))
   }
+  // The all-completed team board's hide flag lives here, not in TeamPanel:
+  // TeamPanel unmounts while a child transcript is open, and the hide must
+  // survive that round trip — the linger timer keeps running here, so the
+  // board stays hidden on return. A reopened or new task cancels the hide.
+  const teamTasks = view?.team?.tasks
+  const teamAllDone = teamTasks !== undefined && teamTasks.length > 0
+    && teamTasks.every(task => task.status === 'completed')
+  const [teamBoardHidden, setTeamBoardHidden] = useState(false)
+  React.useEffect(() => {
+    if (!teamAllDone) {
+      setTeamBoardHidden(false)
+      return
+    }
+    const timer = setTimeout(() => setTeamBoardHidden(true), completedLingerMs ?? COMPLETED_BOARD_LINGER_MS)
+    return () => clearTimeout(timer)
+  }, [teamAllDone, completedLingerMs])
   const { columns, rows: termRows } = useTerminalSize()
   const rows = viewportRows ?? termRows
   const frames = state.frames
@@ -475,7 +494,7 @@ export function TuiApp({
             {subagents.length > 0
               ? <SubagentPanel rows={subagents} selected={view?.subagentSelected} />
               : null}
-            {view?.team !== undefined ? <TeamPanel team={view.team} selected={view.teamSelected} /> : null}
+            {view?.team !== undefined ? <TeamPanel team={view.team} selected={view.teamSelected} tasksHidden={teamBoardHidden} /> : null}
           </>
         ) : (
           /* The child view's identity header pins at the very bottom: it is
@@ -561,31 +580,17 @@ function SubagentPanel({
 export const COMPLETED_BOARD_LINGER_MS = 5_000
 
 /** The Agent Teams roster and shared task board, read from the agentTeam projection. */
-export function TeamPanel({
+function TeamPanel({
   team,
   selected,
-  completedLingerMs = COMPLETED_BOARD_LINGER_MS,
+  tasksHidden,
 }: {
   team: TeamPanelInfo
   selected: number | undefined
-  /** Override the all-done linger for tests; production keeps the constant. */
-  completedLingerMs?: number
+  /** The all-done board's hide flag, owned by TuiApp so it survives view switches. */
+  tasksHidden: boolean
 }): React.JSX.Element {
   const width = useTerminalWidth()
-  // While any task is open the board shows the full progress, completed ✔
-  // rows included. Once every task is done the board lingers briefly, then
-  // hides as a whole — rows never drop off one by one mid-run. A task
-  // reopened (or a new one added) cancels the hide immediately.
-  const allDone = team.tasks.length > 0 && team.tasks.every(task => task.status === 'completed')
-  const [boardHidden, setBoardHidden] = useState(false)
-  React.useEffect(() => {
-    if (!allDone) {
-      setBoardHidden(false)
-      return
-    }
-    const timer = setTimeout(() => setBoardHidden(true), completedLingerMs)
-    return () => clearTimeout(timer)
-  }, [allDone, completedLingerMs])
   // Members window around the selection (roster head when unselected); tasks
   // keep their reading order from the top. Both cap at PANEL_MAX_ROWS so the
   // chrome band stays bounded.
@@ -636,7 +641,7 @@ export function TeamPanel({
         )
       })}
       {hiddenMembers > 0 ? <Text dimColor>  … {hiddenMembers} more</Text> : null}
-      {team.tasks.length > 0 && !(allDone && boardHidden) ? (
+      {team.tasks.length > 0 && !tasksHidden ? (
         <>
           <Text>Tasks · {team.tasks.length}</Text>
           {visibleTasks.map((task, index) => {
