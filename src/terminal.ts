@@ -148,6 +148,49 @@ export function scrollReducer(state: ScrollState, action: ScrollAction): ScrollS
 }
 
 /**
+ * Every transcript view's scroll state, keyed by view ('main' or a child id).
+ * Switching views activates that view's own entry, so a returning visit
+ * re-anchors at the live bottom with its remembered heights instead of
+ * parking unmeasured: the parked blank window is painted by ink's
+ * leading-edge throttle before the measure pass settles, which reads as the
+ * whole screen jumping on Enter/Esc round trips.
+ */
+export interface ScrollStates {
+  /** The view whose entry the per-view actions address. */
+  readonly active: string
+  /** Measurements per visited view; entries are created on first activation. */
+  readonly entries: Readonly<Record<string, ScrollState>>
+}
+
+export type ScrollStatesAction =
+  /** Activate a view: keep its remembered heights, re-anchor at the live bottom. */
+  | { type: 'switch'; key: string }
+  /** Any single-view transition, applied to the active entry. */
+  | ScrollAction
+
+export function createScrollStates(): ScrollStates {
+  return { active: 'main', entries: {} }
+}
+
+/**
+ * The keyed scroll transitions: `switch` activates a view (a remembered entry
+ * keeps its heights and loses its offset; an unseen view starts fresh), every
+ * other action folds into the active entry through {@link scrollReducer}.
+ * Identity-stable on no-ops so the measure loop terminates.
+ */
+export function scrollStatesReducer(states: ScrollStates, action: ScrollStatesAction): ScrollStates {
+  if (action.type === 'switch') {
+    if (action.key === states.active) return states
+    const remembered = states.entries[action.key]
+    const entry = remembered === undefined ? createScrollState() : { ...remembered, offset: 0 }
+    return { active: action.key, entries: { ...states.entries, [action.key]: entry } }
+  }
+  const entry = states.entries[states.active] ?? createScrollState()
+  const next = scrollReducer(entry, action)
+  return next === entry ? states : { ...states, entries: { ...states.entries, [states.active]: next } }
+}
+
+/**
  * The `marginTop` (rows, usually negative) that positions the transcript
  * content inside its window: bottom-anchored while the content fits or the
  * user is at the live bottom, scrolled `offset` rows up otherwise. Before the

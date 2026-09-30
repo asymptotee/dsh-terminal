@@ -4,9 +4,11 @@ import { describe, expect, it } from 'vitest'
 import {
   containsMouseReport,
   createScrollState,
+  createScrollStates,
   maxOffset,
   mouseEnabled,
   scrollReducer,
+  scrollStatesReducer,
   transcriptMarginTop,
   wheelDeltaFromInput,
   WHEEL_SCROLL_LINES,
@@ -148,5 +150,38 @@ describe('transcriptMarginTop', () => {
   it('moves the content down while scrolled up', () => {
     const state: ScrollState = { offset: 10, contentRows: 100, windowRows: 30 }
     expect(transcriptMarginTop(state)).toBe(-60)
+  })
+})
+
+describe('keyed scroll states', () => {
+  it('anchors a returning visit at the live bottom with remembered heights', () => {
+    let states = createScrollStates()
+    states = scrollStatesReducer(states, { type: 'measure', contentRows: 100, windowRows: 20 })
+    states = scrollStatesReducer(states, { type: 'wheel', delta: 30 })
+    expect(states.entries.main).toEqual({ offset: 30, contentRows: 100, windowRows: 20 })
+    // First visit to a child starts fresh (it will park and measure).
+    states = scrollStatesReducer(states, { type: 'switch', key: 'child-1' })
+    expect(states.active).toBe('child-1')
+    expect(states.entries['child-1']).toEqual(createScrollState())
+    states = scrollStatesReducer(states, { type: 'measure', contentRows: 10, windowRows: 25 })
+    // Returning to main: heights remembered (no park, no blank frame),
+    // offset re-anchored at the live bottom.
+    states = scrollStatesReducer(states, { type: 'switch', key: 'main' })
+    expect(states.active).toBe('main')
+    expect(states.entries.main).toEqual({ offset: 0, contentRows: 100, windowRows: 20 })
+    // The child's entry keeps its own measurements for the next visit.
+    expect(states.entries['child-1']).toEqual({ offset: 0, contentRows: 10, windowRows: 25 })
+  })
+
+  it('routes per-view actions to the active entry only', () => {
+    let states = scrollStatesReducer(createScrollStates(), { type: 'switch', key: 'child-1' })
+    states = scrollStatesReducer(states, { type: 'measure', contentRows: 8, windowRows: 25 })
+    expect(states.entries['child-1']).toEqual({ offset: 0, contentRows: 8, windowRows: 25 })
+    expect(states.entries.main).toBeUndefined()
+  })
+
+  it('is identity-stable when switching to the already-active view', () => {
+    const states = createScrollStates()
+    expect(scrollStatesReducer(states, { type: 'switch', key: 'main' })).toBe(states)
   })
 })

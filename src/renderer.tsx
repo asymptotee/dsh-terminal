@@ -19,6 +19,7 @@ import { contentToText, stripOuterCodeFence } from './render.ts'
 import {
   containsMouseReport,
   createScrollState,
+  createScrollStates,
   CURSOR_HIDE,
   CURSOR_SHOW,
   ENTER_FULLSCREEN,
@@ -27,7 +28,7 @@ import {
   MOUSE_ON,
   mouseEnabled,
   PRE_MEASURE_MARGIN,
-  scrollReducer,
+  scrollStatesReducer,
   transcriptMarginTop,
   wheelDeltaFromInput,
 } from './terminal.ts'
@@ -328,9 +329,27 @@ export function TuiApp({
   // window clips a bottom-anchored content column, and `marginTop` slides it
   // through the window. Heights come from measureElement after layout — no
   // width/wrapping estimation anywhere. offset 0 = sticky at the live bottom.
-  const [scroll, dispatch] = useReducer(scrollReducer, undefined, createScrollState)
+  // Each view (main, every opened child) keeps its own measured entry: a
+  // returning visit re-anchors at the live bottom with remembered heights
+  // instead of parking unmeasured, whose blank window ink's leading-edge
+  // throttle would paint as a screen jump.
+  const [scrollStates, dispatch] = useReducer(scrollStatesReducer, undefined, createScrollStates)
   const windowRef = useRef<any>(null)
   const contentRef = useRef<any>(null)
+
+  // The child view swaps the transcript source (header + the child's frames).
+  // The pinned plan in the chrome band follows the active view — the main
+  // session's plan, or the opened child's.
+  const mainWindowed = windowFrames(frames)
+  const childWindowed = opened === undefined ? undefined : windowFrames(opened.state.frames)
+  const activePlan = opened === undefined ? state.plan : opened.state.plan
+  const transcriptKey = opened === undefined ? 'main' : opened.childId
+  // The view switch activates during render — React re-runs the component
+  // before committing, so the first painted frame of the new view already
+  // carries its remembered measurements.
+  if (scrollStates.active !== transcriptKey) dispatch({ type: 'switch', key: transcriptKey })
+  const scroll = scrollStates.entries[scrollStates.active] ?? createScrollState()
+
   // Measure the laid-out window and content after every commit and adopt the
   // heights when they changed. A layout effect (not a passive one) so the
   // corrective render converges in the same tick instead of flashing a
@@ -346,17 +365,6 @@ export function TuiApp({
       dispatch({ type: 'measure', contentRows: measuredContent.height, windowRows: measuredWindow.height })
     }
   })
-
-  // The child view swaps the transcript source (header + the child's frames);
-  // scroll position resets on enter/exit. The pinned plan in the chrome band
-  // follows the active view — the main session's plan, or the opened child's.
-  const mainWindowed = windowFrames(frames)
-  const childWindowed = opened === undefined ? undefined : windowFrames(opened.state.frames)
-  const activePlan = opened === undefined ? state.plan : opened.state.plan
-  const transcriptKey = opened === undefined ? 'main' : opened.childId
-  useLayoutEffect(() => {
-    dispatch({ type: 'reset' })
-  }, [transcriptKey])
 
   // The welcome block is the opening splash of a fresh session: centered in
   // the window while the transcript is empty, dismissed for good the moment
