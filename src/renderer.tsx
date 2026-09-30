@@ -894,7 +894,11 @@ function FrameRow({ frame, expandedOutput, approvalCallId }: { frame: Frame; exp
       const hasText = first !== -1
       return (
         <Box flexDirection="column">
-          {frame.thinking !== undefined ? <ThinkingBlock thinking={frame.thinking} /> : null}
+          {/* The reasoning is live while the frame still streams and no visible
+              text has arrived — the first text delta ends the thinking span. */}
+          {frame.thinking !== undefined
+            ? <ThinkingBlock thinking={frame.thinking} live={frame.streaming && frame.text === ''} />
+            : null}
           {/* The breathing row belongs to the box-text pair: with no text in
               the frame the box ends it, and the frame wrapper's own margin is
               the single blank line to the next frame. */}
@@ -931,11 +935,16 @@ function wrapLine(line: string, width: number): readonly string[] {
   return rows
 }
 
-/** The fixed reasoning window: `● Thought for Ns`, then a bordered box with the latest rows, kept after thinking ends. */
+/** The fixed reasoning window: `● Thought for Ns` — the dot blinks dim while
+ *  the reasoning is still live — then a bordered box with the latest rows,
+ *  kept after thinking ends. */
 function ThinkingBlock({
   thinking,
+  live,
 }: {
   thinking: Extract<Frame, { kind: 'assistant' }>['thinking'] & object
+  /** The reasoning stream is still open: the header dot blinks until it ends. */
+  live: boolean
 }): React.JSX.Element {
   // Reasoning lines are long prose; each wraps into full-width physical rows
   // (never clipped), and the window scrolls over those rows so the border
@@ -946,7 +955,7 @@ function ThinkingBlock({
   const windowed = physical.slice(-THOUGHT_WINDOW_LINES)
   return (
     <Box flexDirection="column">
-      <Text>● Thought for {thinking.seconds}s</Text>
+      <Text>{live ? <BlinkingDot /> : '●'} Thought for {thinking.seconds}s</Text>
       <Box flexDirection="column" marginLeft={2} borderStyle="round" borderColor="gray" paddingX={1}>
         {windowed.map((line, index) => <Text key={index} dimColor>{line === '' ? ' ' : line}</Text>)}
       </Box>
@@ -1042,8 +1051,26 @@ function ToolRow({ frame, expandedOutput, awaitingApproval }: { frame: Extract<F
   )
 }
 
-/** The Claude Code-style call line: a green dot (dim while the call waits on
- *  an approval decision), then the tool name in the default foreground. */
+/** The in-flight dot's blink period: it toggles on/off every half second. */
+const BLINK_DOT_INTERVAL_MS = 500
+
+/** A dim ● that blinks twice per second, marking in-flight work — live
+ *  reasoning, a bash run, or a wait_agent block on the team. The blank frame
+ *  keeps the dot's one-cell width so the row never shifts while it pulses. */
+function BlinkingDot(): React.JSX.Element {
+  const [on, setOn] = useState(true)
+  React.useEffect(() => {
+    const timer = setInterval(() => setOn(current => !current), BLINK_DOT_INTERVAL_MS)
+    timer.unref()
+    return () => { clearInterval(timer) }
+  }, [])
+  return on ? <Text dimColor>●</Text> : <Text> </Text>
+}
+
+/** The Claude Code-style call line: a green dot (static dim while the call
+ *  waits on an approval decision, blinking dim while a long-running bash or
+ *  wait_agent call is still open), then the tool name in the default
+ *  foreground. */
 function ToolCallView({ frame, expandedOutput, awaitingApproval }: { frame: Extract<Frame, { kind: 'tool' }>; expandedOutput: boolean; awaitingApproval: boolean }): React.JSX.Element {
   const call = frame.call
   const label = toolLabel(frame.name)
@@ -1056,7 +1083,16 @@ function ToolCallView({ frame, expandedOutput, awaitingApproval }: { frame: Extr
   // folds its newlines into `; ` first — shell one-liner reading, the same
   // fold the panel activity uses — then the width clamp applies uniformly.
   const folded = foldInvocationLine(full)
-  const dot = awaitingApproval ? <Text dimColor>●</Text> : <Text color="#51cf66">●</Text>
+  // The long-running calls — a bash execution, or a wait_agent block on the
+  // team — blink their dot dim while still open, distinct from a settled
+  // call's green dot and an approval wait's static dim dot.
+  const waiting = frame.result === undefined && frame.resultContent === undefined
+    && (frame.name === 'wait_agent' || frame.name === 'bash')
+  const dot = awaitingApproval
+    ? <Text dimColor>●</Text>
+    : waiting
+      ? <BlinkingDot />
+      : <Text color="#51cf66">●</Text>
   // Keep the call line on one row: clamp the invocation to CALL_WIDTH_RATIO
   // of the terminal width, minus the `● Label(…)` overhead. ctrl+o
   // (expandedOutput) reveals the full folded invocation, which then wraps
