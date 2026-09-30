@@ -502,7 +502,7 @@ export function TuiApp({
              content — inside the window it would be clipped at the live bottom
              and covered by the scroll indicator at the top. */
           <>
-            <Text dimColor>{'─'.repeat(columns)}</Text>
+            <Text color="#a5d8ff">{'─'.repeat(columns)}</Text>
             <Box justifyContent="center">
               <Text>
                 subagent: <Text bold>{opened.label}</Text> <Text dimColor>(Esc 返回)</Text>
@@ -602,8 +602,7 @@ function TeamPanel({
   const visibleTasks = team.tasks.slice(0, PANEL_MAX_ROWS)
   const hiddenTasks = team.tasks.length - visibleTasks.length
   return (
-    <Box flexDirection="column">
-      <Text dimColor>{'─'.repeat(width)}</Text>
+    <Box flexDirection="column" marginBottom={1}>
       <Text>
         Teammates · {team.members.length}
         {selected !== undefined ? <Text dimColor>  (↑↓ 选择 · Enter 打开 · ↑/Esc 返回)</Text> : null}
@@ -642,7 +641,8 @@ function TeamPanel({
       })}
       {hiddenMembers > 0 ? <Text dimColor>  … {hiddenMembers} more</Text> : null}
       {team.tasks.length > 0 && !tasksHidden ? (
-        <>
+        // marginTop keeps a blank row between the roster and the task board.
+        <Box flexDirection="column" marginTop={1}>
           <Text>Tasks · {team.tasks.length}</Text>
           {visibleTasks.map((task, index) => {
             const mark = task.status === 'completed'
@@ -663,7 +663,7 @@ function TeamPanel({
             )
           })}
           {hiddenTasks > 0 ? <Text dimColor>  … {hiddenTasks} more</Text> : null}
-        </>
+        </Box>
       ) : null}
     </Box>
   )
