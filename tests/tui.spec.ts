@@ -34,6 +34,8 @@ interface Script {
   sandboxPolicy?: unknown
   /** Registered before the driver resolves a --continue target. */
   sessionPersistence?: unknown
+  /** Registered before the driver reads the permission preset service. */
+  permissionPresets?: unknown
   /** Append a pre-existing turn before the driver attaches its live fold. */
   seed?(session: Session): void
   /** Append one owned turn; `turn` increments per submitted line. */
@@ -137,6 +139,7 @@ async function bench(script: Script): Promise<BenchHandle> {
   if (script.llm !== undefined) ctx.provide('llm', script.llm as never)
   if (script.sandboxPolicy !== undefined) ctx.provide('sandboxPolicy', script.sandboxPolicy as never)
   if (script.sessionPersistence !== undefined) ctx.provide('sessionPersistence', script.sessionPersistence as never)
+  if (script.permissionPresets !== undefined) ctx.provide('permissionPresets', script.permissionPresets as never)
   const states: FrameState[] = []
   const views: (RenderView | undefined)[] = []
   const order: string[] = []
@@ -587,6 +590,29 @@ describe('tui driver', () => {
   it('reports the working directory in the status bar', async () => {
     const test = await bench({ afterPrompt: () => {} })
     expect(test.views.at(-1)?.status).toMatchObject({ model: 'test-model', cwd: process.cwd() })
+    await test.ctx.fiber.dispose()
+  })
+
+  it('badges the permission preset selection over the raw sandbox mode', async () => {
+    // The Auto preset resolves its sandbox knob to danger-full-access; the
+    // badge must show the service-derived selection instead of that knob.
+    let current = 'auto'
+    const test = await bench({
+      sandboxPolicy: { resolve: () => ({ mode: 'danger-full-access', workspaceRoot: process.cwd() }) },
+      permissionPresets: { current: () => current },
+      afterPrompt: () => {},
+    })
+    expect(test.views.at(-1)?.status).toMatchObject({ mode: 'auto' })
+    // A live knob event re-reads the service, tracking a mid-session switch.
+    // The knob event types belong to packages this suite does not import, so
+    // the append goes through a structural cast.
+    current = 'workspace-write'
+    const append = test.agent.session.append as unknown as (type: string, data: unknown) => void
+    append.call(test.agent.session, 'sandbox/mode', { mode: 'workspace-write' })
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(test.views.at(-1)?.status).toMatchObject({ mode: 'workspace-write' })
+    test.handlers.onExit()
+    await test.exited
     await test.ctx.fiber.dispose()
   })
 

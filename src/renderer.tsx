@@ -78,7 +78,7 @@ export interface StatusInfo {
   model: string
   /** The working directory, shown home-shortened. */
   cwd: string
-  /** The sandbox permission mode (`read-only`/`workspace-write`/...), on its own row. */
+  /** The permission preset selection (`read-only`/`workspace-write`/`auto`/...), on its own row. */
   mode?: string
   /** Current context usage from the latest step's token report. */
   context?: { used: number; window: number }

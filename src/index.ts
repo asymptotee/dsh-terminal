@@ -240,6 +240,14 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
     | { resolve(request: { session: unknown }): { mode: string; workspaceRoot: string } }
     | undefined
   const sandboxMode = policy?.resolve({ session: agent.session }).mode
+  // The badge prefers the permission preset selection: the service derives it
+  // from the logged knob overrides (a preset key, `auto`, or `custom`), while
+  // the raw sandbox knob would badge the Auto preset as danger-full-access,
+  // hiding the reviewer that guards its open sandbox. Structural read, the
+  // same pattern as sandboxPolicy — no upstream import.
+  const permissionPresets = ctx.get('permissionPresets') as
+    | { current(session: unknown): string }
+    | undefined
   let view: RenderView = {
     status: {
       model: selection.model,
@@ -496,16 +504,24 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
       ? view
       : { ...view, status: { ...view.status, context: { used, window: contextWindow } } }
   }
-  // The footer's mode badge tracks the session's live sandbox override: a
-  // /permission switch appends a durable sandbox/mode event, and its payload
-  // is exactly the mode the policy resolves to from then on (the session's
-  // latest event outranks the deployment default). Without this the badge
-  // would stay frozen at the startup snapshot after a mid-session switch.
-  const trackSandboxMode = (event: SessionEvent): void => {
-    if ((event.type as string) !== 'sandbox/mode') return
-    const mode = (event.data as { mode?: unknown }).mode
-    if (typeof mode !== 'string' || view.status === undefined) return
-    view = { ...view, status: { ...view.status, mode } }
+  // The footer's badge shows the session's permission preset selection: the
+  // permission service folds the three knob events (permission/preset,
+  // sandbox/mode, approval/policy) into one derived name — a preset key,
+  // `auto`, or `custom` — so each of them re-reads it. Without a permission
+  // service composed the badge falls back to the raw sandbox/mode payload,
+  // the pre-preset behavior.
+  const PERMISSION_KNOB_EVENTS: ReadonlySet<string> = new Set(['permission/preset', 'sandbox/mode', 'approval/policy'])
+  const refreshPermissionBadge = (event?: SessionEvent): void => {
+    if (view.status === undefined) return
+    const current = permissionPresets?.current(agent.session)
+    if (current !== undefined) {
+      view = { ...view, status: { ...view.status, mode: current } }
+      return
+    }
+    if (event !== undefined && (event.type as string) === 'sandbox/mode') {
+      const mode = (event.data as { mode?: unknown }).mode
+      if (typeof mode === 'string') view = { ...view, status: { ...view.status, mode } }
+    }
   }
   // Fold the replay without per-event renders: the intermediate states are
   // not interactable, painting each one wastes time on large logs, and an
@@ -520,6 +536,9 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
   // Seed the team panel from the durable log so a resumed session with an
   // existing team shows its roster and task board immediately.
   refreshTeam()
+  // Seed the permission badge from the folded projection before the first
+  // render: a resumed session's last /permission switch lives in the log.
+  refreshPermissionBadge()
   ctx.on('session/event', (session, event: SessionEvent) => {
     if (session.header.id !== agent.session.id) {
       // Descriptors are seeded at session creation, not live-appended, so they
@@ -541,7 +560,7 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
       return
     }
     trackUsage(event)
-    trackSandboxMode(event)
+    if (PERMISSION_KNOB_EVENTS.has(event.type as string)) refreshPermissionBadge(event)
     // A team event moves the authoritative agentTeam projection, so re-read it
     // before the render below to keep the team panel current.
     if ((event.type as string).startsWith('team/')) refreshTeam()
