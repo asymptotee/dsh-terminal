@@ -605,6 +605,49 @@ describe('tui driver', () => {
     await test.ctx.fiber.dispose()
   })
 
+  it('prefers the zh displayReason over the audit reason on the overlay', async () => {
+    const test = await bench({ afterPrompt: () => {} })
+    const outcome = (test.ctx.waterfall as unknown as (
+      thisArg: unknown, name: string, req: unknown, next: () => Promise<unknown>,
+    ) => Promise<unknown>)(test.ctx, 'approval/request', {
+      agent: test.agent,
+      toolName: 'bash',
+      reason: 'escalate sandbox to danger-full-access: needs network',
+      displayReason: {
+        en: 'Allow this operation with danger-full-access permissions: needs network',
+        zh: '允许本次操作使用 danger-full-access 权限：需要联网',
+      },
+    }, () => Promise.resolve('unavailable'))
+    expect(test.views.at(-1)?.overlay).toEqual({
+      kind: 'approval',
+      toolName: 'bash',
+      reason: '允许本次操作使用 danger-full-access 权限：需要联网',
+    })
+    test.handlers.onApproval('allow')
+    expect(await outcome).toBe('allowed-once')
+    await test.ctx.fiber.dispose()
+  })
+
+  it('falls back to the en displayReason when no zh copy is supplied', async () => {
+    const test = await bench({ afterPrompt: () => {} })
+    const outcome = (test.ctx.waterfall as unknown as (
+      thisArg: unknown, name: string, req: unknown, next: () => Promise<unknown>,
+    ) => Promise<unknown>)(test.ctx, 'approval/request', {
+      agent: test.agent,
+      toolName: 'bash',
+      reason: 'audit copy',
+      displayReason: { en: 'Allow this operation' },
+    }, () => Promise.resolve('unavailable'))
+    expect(test.views.at(-1)?.overlay).toEqual({
+      kind: 'approval',
+      toolName: 'bash',
+      reason: 'Allow this operation',
+    })
+    test.handlers.onApproval('allow')
+    expect(await outcome).toBe('allowed-once')
+    await test.ctx.fiber.dispose()
+  })
+
   it('cancels on Esc and carries the pending call detail on the overlay', async () => {
     const test = await bench({
       // The bash presentation puts the command in the card title — a

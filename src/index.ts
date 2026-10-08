@@ -632,10 +632,15 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
         frame.kind === 'tool' && frame.callId === req.callId && frame.result === undefined,
     )
     const detail = pending === undefined ? '' : foldInvocationLine(pending.call.title)
+    // Localized presentation (upstream #4793): displayReason carries per-locale
+    // display copy while the audit reason stays whatever the asker logged. The
+    // terminal's own copy is Chinese, so resolve zh first, then the English
+    // fallback the type guarantees, then the plain audit reason.
+    const reason = req.displayReason?.zh ?? req.displayReason?.en ?? req.reason
     setOverlay({
       kind: 'approval',
       toolName: req.toolName,
-      ...req.reason === undefined ? {} : { reason: req.reason },
+      ...reason === undefined ? {} : { reason },
       ...detail === '' ? {} : { detail },
       ...req.callId === undefined ? {} : { callId: req.callId },
     })
