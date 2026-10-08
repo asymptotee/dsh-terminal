@@ -29,6 +29,13 @@
     - id: tool-agent-team
       name: '@deepseek-ai/dsh-experimental-tool-agent-team'
 
+    # Experimental per-call Auto review: the current agent's model screens each
+    # tool call before it runs with Full access. Mirrors the package's own
+    # single-row patch; the layer mounts but stays off until a session selects
+    # the Auto permission mode (/permission auto).
+    - id: auto-review
+      name: '@deepseek-ai/dsh-experimental-auto-review'
+
     # Bare package names: the dsh plugin mechanism installs this package into
     # the profile's node_modules, where the Loader resolves its exports.
     - id: tui-startup

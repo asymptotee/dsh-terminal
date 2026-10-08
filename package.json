@@ -40,7 +40,8 @@
   },
   "dependencies": {
     "@deepseek-ai/dsh-experimental-agent-team": "0.2.0-rc.2",
-    "@deepseek-ai/dsh-experimental-tool-agent-team": "0.2.0-rc.2"
+    "@deepseek-ai/dsh-experimental-tool-agent-team": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-experimental-auto-review": "0.2.0-rc.2"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.4",
