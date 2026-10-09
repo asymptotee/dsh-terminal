@@ -36,6 +36,10 @@ interface Script {
   sessionPersistence?: unknown
   /** Registered before the driver reads the permission preset service. */
   permissionPresets?: unknown
+  /** Registered before the driver reads the subagent continuation seam. */
+  subagents?: unknown
+  /** Registered before the driver reads session projections (agentTeam). */
+  sessionProjections?: unknown
   /** Append a pre-existing turn before the driver attaches its live fold. */
   seed?(session: Session): void
   /** Append one owned turn; `turn` increments per submitted line. */
@@ -114,7 +118,10 @@ async function bench(script: Script): Promise<BenchHandle> {
         agent.inbox.append('next-turn', message)
         idle = Promise.resolve().then(() => script.afterPrompt(ctx, session, message, ++turn))
       },
-      steer: () => {},
+      steer: (message: UserMessage) => {
+        agent.inbox.append('next-step', message)
+        idle = Promise.resolve().then(() => script.afterPrompt(ctx, session, message, ++turn))
+      },
       inject: () => {},
       whenIdle: () => idle,
     } satisfies Partial<Agent>)
@@ -140,6 +147,8 @@ async function bench(script: Script): Promise<BenchHandle> {
   if (script.sandboxPolicy !== undefined) ctx.provide('sandboxPolicy', script.sandboxPolicy as never)
   if (script.sessionPersistence !== undefined) ctx.provide('sessionPersistence', script.sessionPersistence as never)
   if (script.permissionPresets !== undefined) ctx.provide('permissionPresets', script.permissionPresets as never)
+  if (script.subagents !== undefined) ctx.provide('subagents', script.subagents as never)
+  if (script.sessionProjections !== undefined) ctx.provide('sessionProjections', script.sessionProjections as never)
   const states: FrameState[] = []
   const views: (RenderView | undefined)[] = []
   const order: string[] = []
@@ -152,6 +161,7 @@ async function bench(script: Script): Promise<BenchHandle> {
     onPanelMove: () => {},
     onPanelEnter: () => {},
     onPanelBack: () => {},
+    onChildPrompt: () => {},
   }
   let resolveBound: () => void = () => {}
   const bound = new Promise<void>((resolve) => { resolveBound = resolve })
@@ -202,19 +212,19 @@ describe('tui driver', () => {
     await test.ctx.fiber.dispose()
   })
 
-  it('echoes a mid-turn follow-up as queued, then drops it when the durable event lands', async () => {
+  it('echoes a mid-turn submission as steering, then drops it when the durable event lands', async () => {
     const test = await bench({
       afterPrompt(_ctx, session, message, turn) { appendTurn(session, turn, message, 'done') },
     })
     // Put the main agent mid-turn (a turn/start with no matching end) so the
-    // follow-up queues behind the running turn instead of starting its own.
+    // steered message waits for the running turn's next step boundary.
     test.agent.session.append('turn/start', { turn: 99 })
     test.handlers.onCommit('wake pro-jsonl')
-    // The commit renders a queued echo immediately, before the turn can start.
+    // The commit renders a steering echo immediately, before the step claims it.
     expect(test.views.at(-1)?.pendingUser).toMatchObject([{ text: 'wake pro-jsonl' }])
-    // The follow-up turn runs; its durable user/message carries the same id.
+    // The turn runs the message; its durable user/message carries the same id.
     await test.agent.whenIdle()
-    // The queued echo is dropped once the real frame folds in, leaving exactly
+    // The echo is dropped once the real frame folds in, leaving exactly
     // one user frame for the message (no duplicate).
     expect(test.views.at(-1)?.pendingUser ?? []).toEqual([])
     const users = test.states.at(-1)!.frames.filter(frame => frame.kind === 'user' && frame.text === 'wake pro-jsonl')
@@ -547,14 +557,14 @@ describe('tui driver', () => {
   })
 
   it('shows an unknown-command notice and never submits a model message', async () => {
-    const followups: string[] = []
+    const steered: string[] = []
     const test = await bench({
       commands: { execute: () => Promise.resolve(undefined) },
       afterPrompt: () => {},
     })
-    const original = test.agent.followup.bind(test.agent)
-    test.agent.followup = (message: UserMessage) => {
-      followups.push(message.content
+    const original = test.agent.steer.bind(test.agent)
+    test.agent.steer = (message: UserMessage) => {
+      steered.push(message.content
         .filter((block): block is Extract<typeof block, { type: 'text' }> => block.type === 'text')
         .map(block => block.text)
         .join(''))
@@ -562,7 +572,7 @@ describe('tui driver', () => {
     }
     test.handlers.onCommit('/bogus')
     await new Promise(resolve => setTimeout(resolve, 0))
-    expect(followups).toEqual([])
+    expect(steered).toEqual([])
     expect(test.views.at(-1)?.overlay).toEqual({ kind: 'notice', text: 'unknown command: /bogus' })
     await test.ctx.fiber.dispose()
   })
@@ -872,10 +882,13 @@ describe('subagent panel', () => {
     await new Promise(resolve => setTimeout(resolve, 0))
     test.handlers.onPanelOpen()
     expect(test.views.at(-1)?.subagentSelected).toBe(0)
-    // Enter on the main row returns focus to the input bar.
+    // Enter on the main row returns to the main view but keeps the cursor
+    // until Esc dismisses it.
     test.handlers.onPanelEnter()
-    expect(test.views.at(-1)?.subagentSelected).toBeUndefined()
+    expect(test.views.at(-1)?.subagentSelected).toBe(0)
     expect(test.views.at(-1)?.openSubagent).toBeUndefined()
+    test.handlers.onPanelBack()
+    expect(test.views.at(-1)?.subagentSelected).toBeUndefined()
     test.handlers.onPanelOpen()
     test.handlers.onPanelMove(1)
     test.handlers.onPanelMove(1)
@@ -886,9 +899,218 @@ describe('subagent panel', () => {
     expect(opened?.childId).toBe('child-3')
     expect(opened?.label).toBe('调研包结构')
     expect(opened?.state.frames).toMatchObject([{ kind: 'tool', name: 'grep' }])
+    // A one-shot child never offers continuation prompts.
+    expect(opened?.continuable).toBeUndefined()
+    // Enter keeps the navigation position: the panel still owns the keys and
+    // the opened child's row stays highlighted.
+    expect(test.views.at(-1)?.subagentSelected).toBe(1)
+    expect(test.views.at(-1)?.panelNav).toBe(true)
+    // Esc ladder: the first press leaves navigation into the opened child —
+    // the browsing session ends, so the ❯ goes with it — and the second
+    // returns to the input bar.
+    test.handlers.onPanelBack()
+    expect(test.views.at(-1)?.openSubagent?.childId).toBe('child-3')
+    expect(test.views.at(-1)?.panelNav).toBeUndefined()
     expect(test.views.at(-1)?.subagentSelected).toBeUndefined()
     test.handlers.onPanelBack()
     expect(test.views.at(-1)?.openSubagent).toBeUndefined()
+    test.handlers.onExit()
+    await test.exited
+    await test.ctx.fiber.dispose()
+  })
+
+  it('switches to another child from the child view through panel navigation', async () => {
+    const test = await bench({ afterPrompt: () => {} })
+    const childA = test.ctx.sessions.create(SessionId('child-a'), {
+      meta: { parentSession: test.agent.session.id, origin: 'subagent' },
+    })
+    childA.append('subagent/descriptor', { version: 2, mode: 'continuable', provider: 'spawn', label: 'A' })
+    const childB = test.ctx.sessions.create(SessionId('child-b'), {
+      meta: { parentSession: test.agent.session.id, origin: 'subagent' },
+    })
+    childB.append('subagent/descriptor', { version: 2, mode: 'continuable', provider: 'spawn', label: 'B' })
+    await new Promise(resolve => setTimeout(resolve, 0))
+    // Open A's transcript from the roster panel; Enter keeps the navigation
+    // position, so the panel still owns the keys on A's highlighted row.
+    test.handlers.onPanelOpen()
+    test.handlers.onPanelMove(1)
+    test.handlers.onPanelEnter()
+    expect(test.views.at(-1)?.openSubagent?.childId).toBe('child-a')
+    expect(test.views.at(-1)?.subagentSelected).toBe(1)
+    expect(test.views.at(-1)?.panelNav).toBe(true)
+    // Re-entering navigation (↓ from the child editor) keeps the current row;
+    // moving down and Enter switches the open transcript to B.
+    test.handlers.onPanelOpen()
+    expect(test.views.at(-1)?.panelNav).toBe(true)
+    expect(test.views.at(-1)?.subagentSelected).toBe(1)
+    test.handlers.onPanelMove(1)
+    expect(test.views.at(-1)?.subagentSelected).toBe(2)
+    test.handlers.onPanelEnter()
+    expect(test.views.at(-1)?.openSubagent?.childId).toBe('child-b')
+    // The switch keeps the navigation position: the panel still owns the keys,
+    // so ↑↓/Enter keeps walking the roster.
+    expect(test.views.at(-1)?.panelNav).toBe(true)
+    expect(test.views.at(-1)?.subagentSelected).toBe(2)
+    // The Esc ladder: navigation → the opened child's editor (the browsing
+    // session ends, the ❯ goes with it) → the input bar.
+    test.handlers.onPanelBack()
+    expect(test.views.at(-1)?.openSubagent?.childId).toBe('child-b')
+    expect(test.views.at(-1)?.panelNav).toBeUndefined()
+    expect(test.views.at(-1)?.subagentSelected).toBeUndefined()
+    test.handlers.onPanelBack()
+    expect(test.views.at(-1)?.openSubagent).toBeUndefined()
+    // Re-entering starts on the main row; Enter there returns to the main
+    // view but keeps the cursor until Esc dismisses it.
+    test.handlers.onPanelOpen()
+    expect(test.views.at(-1)?.subagentSelected).toBe(0)
+    test.handlers.onPanelEnter()
+    expect(test.views.at(-1)?.openSubagent).toBeUndefined()
+    expect(test.views.at(-1)?.subagentSelected).toBe(0)
+    test.handlers.onPanelBack()
+    expect(test.views.at(-1)?.subagentSelected).toBeUndefined()
+    test.handlers.onExit()
+    await test.exited
+    await test.ctx.fiber.dispose()
+  })
+
+  it('keeps the panel engaged when entering a child from the retained-cursor state', async () => {
+    const test = await bench({ afterPrompt: () => {} })
+    const child = test.ctx.sessions.create(SessionId('child-r'), {
+      meta: { parentSession: test.agent.session.id, origin: 'subagent' },
+    })
+    child.append('subagent/descriptor', { version: 2, mode: 'continuable', provider: 'spawn', label: 'R' })
+    await new Promise(resolve => setTimeout(resolve, 0))
+    // ↓ then Enter on the main row: home view, the cursor retained on main.
+    test.handlers.onPanelOpen()
+    test.handlers.onPanelEnter()
+    expect(test.views.at(-1)?.subagentSelected).toBe(0)
+    expect(test.views.at(-1)?.openSubagent).toBeUndefined()
+    // Move onto the child and Enter: the panel must keep the keys, so the ❯
+    // and the focused surface stay together instead of the caret jumping into
+    // the child editor.
+    test.handlers.onPanelMove(1)
+    test.handlers.onPanelEnter()
+    expect(test.views.at(-1)?.openSubagent?.childId).toBe('child-r')
+    expect(test.views.at(-1)?.panelNav).toBe(true)
+    expect(test.views.at(-1)?.subagentSelected).toBe(1)
+    test.handlers.onExit()
+    await test.exited
+    await test.ctx.fiber.dispose()
+  })
+
+  it('labels an opened teammate with its roster name, not the spawn description', async () => {
+    const test = await bench({
+      sessionProjections: {
+        stateOf: (_session: unknown, key: string) => key === 'agentTeam'
+          ? {
+            members: [{ id: 'm-1', name: 'product-manager', description: 'PM：定义需求与验收', phase: 'active' }],
+            tasks: [],
+          }
+          : undefined,
+      },
+      afterPrompt: () => {},
+    })
+    const child = test.ctx.sessions.create(SessionId('m-1'), {
+      meta: { parentSession: test.agent.session.id, origin: 'subagent' },
+    })
+    child.append('subagent/descriptor', { version: 2, mode: 'continuable', provider: 'spawn', label: 'PM：定义需求与验收' })
+    await new Promise(resolve => setTimeout(resolve, 0))
+    // The team panel leads navigation; open the member from its row.
+    test.handlers.onPanelOpen()
+    expect(test.views.at(-1)?.teamSelected).toBe(0)
+    test.handlers.onPanelMove(1)
+    test.handlers.onPanelEnter()
+    const opened = test.views.at(-1)?.openSubagent
+    expect(opened?.childId).toBe('m-1')
+    expect(opened?.label).toBe('product-manager')
+    test.handlers.onExit()
+    await test.exited
+    await test.ctx.fiber.dispose()
+  })
+
+  it('flags a continuable child and reconciles its prompt echo by rpcId', async () => {
+    const prompts: { requestId: string; parentSessionId: string; childSessionId: string; mode: string; delivery: string; content: readonly unknown[] }[] = []
+    const test = await bench({
+      subagents: {
+        prompt: (request: typeof prompts[number]) => {
+          prompts.push(request)
+          return Promise.resolve({ messageId: 'msg-1' })
+        },
+      },
+      afterPrompt: () => {},
+    })
+    const child = test.ctx.sessions.create(SessionId('child-p'), {
+      meta: { parentSession: test.agent.session.id, origin: 'subagent' },
+    })
+    child.append('subagent/descriptor', { version: 2, mode: 'continuable', provider: 'spawn', label: '长期助手' })
+    await new Promise(resolve => setTimeout(resolve, 0))
+    test.handlers.onPanelOpen()
+    test.handlers.onPanelMove(1)
+    test.handlers.onPanelEnter()
+    const opened = test.views.at(-1)?.openSubagent
+    expect(opened?.childId).toBe('child-p')
+    expect(opened?.continuable).toBe(true)
+    // The optimistic echo renders before any durable event, and the request
+    // carries the seam's literal contract — the terminal's single send
+    // gesture always steers.
+    test.handlers.onChildPrompt('换个思路')
+    expect(test.views.at(-1)?.openSubagent?.pending).toEqual([expect.objectContaining({ text: '换个思路' })])
+    expect(prompts).toHaveLength(1)
+    const [request] = prompts
+    expect(request).toMatchObject({
+      parentSessionId: test.agent.session.id,
+      childSessionId: 'child-p',
+      mode: 'continuable',
+      delivery: 'steer',
+      content: [{ type: 'text', text: '换个思路' }],
+    })
+    expect(typeof request.requestId).toBe('string')
+    expect(request.requestId).not.toBe('')
+    // The child's durable user/message carries the requestId as its source
+    // rpcId; the local echo drops and the committed frame takes its place.
+    const message = createUserMessage({ content: [{ type: 'text', text: '换个思路' }], source: { kind: 'user' } })
+    child.append('user/message', { ...message, source: { kind: 'user', rpcId: request.requestId } as typeof message.source }, { surfaceOp: 'append' })
+    await new Promise(resolve => setTimeout(resolve, 0))
+    const settled = test.views.at(-1)?.openSubagent
+    expect(settled?.pending).toBeUndefined()
+    expect(settled?.state.frames).toMatchObject([{ kind: 'user', text: '换个思路' }])
+    test.handlers.onExit()
+    await test.exited
+    await test.ctx.fiber.dispose()
+  })
+
+  it('steers every child prompt and withdraws the echo of a rejected one', async () => {
+    const deliveries: string[] = []
+    let failing = false
+    const test = await bench({
+      subagents: {
+        prompt: (request: { delivery: string }) => {
+          deliveries.push(request.delivery)
+          return failing
+            ? Promise.reject({ code: 'subagent/not-resumable', message: 'subagent cannot be resumed' })
+            : Promise.resolve({ messageId: 'msg-2' })
+        },
+      },
+      afterPrompt: () => {},
+    })
+    const child = test.ctx.sessions.create(SessionId('child-q'), {
+      meta: { parentSession: test.agent.session.id, origin: 'subagent' },
+    })
+    child.append('subagent/descriptor', { version: 2, mode: 'continuable', provider: 'spawn', label: 'q' })
+    await new Promise(resolve => setTimeout(resolve, 0))
+    test.handlers.onPanelOpen()
+    test.handlers.onPanelMove(1)
+    test.handlers.onPanelEnter()
+    test.handlers.onChildPrompt('插一句')
+    expect(deliveries).toEqual(['steer'])
+    // A rejected prompt withdraws its own echo and raises the localized notice;
+    // the earlier accepted echo stays.
+    failing = true
+    test.handlers.onChildPrompt('再来一句')
+    await new Promise(resolve => setTimeout(resolve, 0))
+    const view = test.views.at(-1)
+    expect(view?.overlay).toEqual({ kind: 'notice', text: '发送失败：该子代理不支持续聊（one-shot）' })
+    expect(view?.openSubagent?.pending).toEqual([expect.objectContaining({ text: '插一句' })])
     test.handlers.onExit()
     await test.exited
     await test.ctx.fiber.dispose()
@@ -908,6 +1130,10 @@ describe('subagent panel', () => {
       test.handlers.onPanelEnter()
       await vi.advanceTimersByTimeAsync(1_000 + SUBAGENT_FADE_MS)
       // The viewed child stays in the roster, so the open view survives the fade.
+      expect(test.views.at(-1)?.openSubagent?.childId).toBe('child-4')
+      // The first Esc only leaves navigation — the child is still open and
+      // still protected; the second closes it and the fade can take it.
+      test.handlers.onPanelBack()
       expect(test.views.at(-1)?.openSubagent?.childId).toBe('child-4')
       test.handlers.onPanelBack()
       await vi.advanceTimersByTimeAsync(1_000)

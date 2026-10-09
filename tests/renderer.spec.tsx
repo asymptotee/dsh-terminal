@@ -1,7 +1,7 @@
 /** The ink view: frame rendering and input-bar key handling through ink-testing-library. */
 
 import os from 'node:os'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { render } from 'ink-testing-library'
 import stringWidth from 'string-width'
 import { TuiApp, padToWidth, truncateToWidth } from '../src/renderer.tsx'
@@ -28,6 +28,7 @@ function noopHandlers(): InputHandlers {
     onPanelMove: () => {},
     onPanelEnter: () => {},
     onPanelBack: () => {},
+    onChildPrompt: () => {},
   }
 }
 
@@ -36,8 +37,16 @@ function noopHandlers(): InputHandlers {
  * codes whenever the ambient environment forces colors (FORCE_COLOR, CI), so
  * text assertions must not depend on the color state of the runner.
  */
+// Every rendered ink instance unmounts when its test ends: the blinking
+// dot/heartbeat intervals of abandoned instances would otherwise keep
+// rendering dead apps throughout the file and congest the suite's timing.
+const liveApps: { unmount(): void }[] = []
+afterEach(() => {
+  while (liveApps.length > 0) liveApps.pop()?.unmount()
+})
 function renderApp(ui: React.JSX.Element) {
   const result = render(ui)
+  liveApps.push(result)
   return {
     ...result,
     lastFrame: (): string => (result.lastFrame() ?? '').replace(/\[[0-9;]*[a-zA-Z]/g, ''),
@@ -47,7 +56,7 @@ function renderApp(ui: React.JSX.Element) {
 describe('TuiApp rendering', () => {
   it('renders the empty stream with the input marker', () => {
     const { lastFrame } = renderApp(<TuiApp state={state([])} handlers={noopHandlers()} />)
-    expect(lastFrame()).toContain('❯ ▏')
+    expect(lastFrame()).toContain('❯ █')
   })
 
   it('renders user echoes, assistant text, and streaming frames in order', () => {
@@ -185,15 +194,15 @@ describe('TuiApp rendering', () => {
     expect(lastFrame()).not.toContain('…')
   })
 
-  it('renders a follow-up committed mid-step as a queued echo', () => {
+  it('renders a message committed mid-step as a steering echo', () => {
     const view: RenderView = { pendingUser: [{ id: 'm1', text: 'wake pro-jsonl' }] }
     const { lastFrame } = renderApp(<TuiApp state={state([])} handlers={noopHandlers()} view={view} />)
     const frame = lastFrame() ?? ''
     expect(frame).toContain('❯ wake pro-jsonl')
-    expect(frame).toContain('queued')
+    expect(frame).toContain('steering')
   })
 
-  it('aligns a multi-line queued echo under the prompt', () => {
+  it('aligns a multi-line steering echo under the prompt', () => {
     const view: RenderView = { pendingUser: [{ id: 'm2', text: 'line one\nline two' }] }
     const { lastFrame } = renderApp(<TuiApp state={state([])} handlers={noopHandlers()} view={view} />)
     const rows = (lastFrame() ?? '').split('\n')
@@ -524,7 +533,7 @@ describe('TuiApp rendering', () => {
     const { lastFrame, stdin } = renderApp(<TuiApp state={state([])} handlers={noopHandlers()} />)
     stdin.write('l')
     await settled()
-    expect(lastFrame()).toContain('❯ l▏')
+    expect(lastFrame()).toContain('❯ l█')
   })
 
   it('inserts a bracketed multi-line paste as distinct lines', async () => {
@@ -543,7 +552,7 @@ describe('TuiApp rendering', () => {
     // The prompt marker leads the first pasted line; the caret sits on the last
     // (the buffer end), and the text stays in the editor (not committed).
     expect(rows[one]).toContain('❯ line one')
-    expect(rows[two]).toContain('line two▏')
+    expect(rows[two]).toContain('line two█')
   })
 
   it('normalizes CR line endings from a non-bracketed paste', async () => {
@@ -789,7 +798,7 @@ describe('TuiApp rendering', () => {
       <TuiApp state={state([])} handlers={noopHandlers()} view={{ overlay: { kind: 'notice', text: 'unknown command: /x' } }} />,
     )
     const frame = lastFrame() ?? ''
-    expect(frame.indexOf('unknown command: /x')).toBeLessThan(frame.indexOf('❯ ▏'))
+    expect(frame.indexOf('unknown command: /x')).toBeLessThan(frame.indexOf('❯ █'))
   })
 
   it('renders the status bar with model, cwd, and mode', () => {
@@ -878,7 +887,7 @@ describe('TuiApp rendering', () => {
     expect(frame).toContain('2. No')
     expect(frame).toContain('Esc to cancel')
     // The question owns the bottom: no input caret, no status bar facts.
-    expect(frame).not.toContain('▏')
+    expect(frame).not.toContain('█')
     expect(frame).not.toContain('test-model')
     stdin.write('\x1b[B') // Down: select No
     await settled()
@@ -908,11 +917,11 @@ describe('InputBar key handling', () => {
     const { lastFrame, stdin } = renderApp(<TuiApp state={state([])} handlers={{ ...noopHandlers(), onCommit }} />)
     stdin.write('hello')
     await settled()
-    expect(lastFrame()).toContain('❯ hello▏')
+    expect(lastFrame()).toContain('❯ hello█')
     stdin.write('\r')
     await settled()
     expect(onCommit).toHaveBeenCalledWith('hello')
-    expect(lastFrame()).toContain('❯ ▏')
+    expect(lastFrame()).toContain('❯ █')
   })
 
   it('inserts a newline on Ctrl+J and submits the multiline buffer', async () => {
@@ -936,7 +945,7 @@ describe('InputBar key handling', () => {
     await settled()
     stdin.write('\x03')
     await settled()
-    expect(lastFrame()).toContain('❯ ▏')
+    expect(lastFrame()).toContain('❯ █')
     expect(onInterrupt).not.toHaveBeenCalled()
     stdin.write('\x03')
     await settled()
@@ -969,7 +978,7 @@ describe('InputBar key handling', () => {
     await settled()
     stdin.write('\x1b[A')
     await settled()
-    expect(lastFrame()).toContain('❯ past line▏')
+    expect(lastFrame()).toContain('❯ past line█')
   })
 
   it('restores the session log lines into the arrow history', async () => {
@@ -980,10 +989,10 @@ describe('InputBar key handling', () => {
     const { lastFrame, stdin } = renderApp(<TuiApp state={state(frames)} handlers={noopHandlers()} />)
     stdin.write('\x1b[A')
     await settled()
-    expect(lastFrame()).toContain('❯ second▏')
+    expect(lastFrame()).toContain('❯ second█')
     stdin.write('\x1b[A')
     await settled()
-    expect(lastFrame()).toContain('❯ first▏')
+    expect(lastFrame()).toContain('❯ first█')
     // New submissions still append after the restored history.
     stdin.write('\x1b[B') // first → second...
     await settled()
@@ -994,7 +1003,7 @@ describe('InputBar key handling', () => {
     await settled()
     stdin.write('\x1b[A')
     await settled()
-    expect(lastFrame()).toContain('❯ third▏')
+    expect(lastFrame()).toContain('❯ third█')
   })
 
   it('recalls submitted lines through the history arrows', async () => {
@@ -1007,13 +1016,13 @@ describe('InputBar key handling', () => {
     await settled()
     stdin.write('\x1b[A')
     await settled()
-    expect(lastFrame()).toContain('❯ second▏')
+    expect(lastFrame()).toContain('❯ second█')
     stdin.write('\x1b[A')
     await settled()
-    expect(lastFrame()).toContain('❯ first▏')
+    expect(lastFrame()).toContain('❯ first█')
     stdin.write('\x1b[B')
     await settled()
-    expect(lastFrame()).toContain('❯ second▏')
+    expect(lastFrame()).toContain('❯ second█')
   })
 
   it('moves the cursor and edits mid-buffer', async () => {
@@ -1024,7 +1033,7 @@ describe('InputBar key handling', () => {
     stdin.write('b')
     await settled()
     // The cursor sits just after the inserted character.
-    expect(lastFrame()).toContain('❯ ab▏c')
+    expect(lastFrame()).toContain('❯ ab█c')
     stdin.write('\r')
     await settled()
     expect(onCommit).toHaveBeenCalledWith('abc')
@@ -1072,7 +1081,8 @@ describe('subagent panel', () => {
   it('renders the main row and child rows below the status bar', () => {
     const { lastFrame } = renderApp(<TuiApp state={state([])} handlers={noopHandlers()} view={panelView()} />)
     const frame = lastFrame() ?? ''
-    expect(frame).toContain('◯ main')
+    // No child open: the main view is the current one, so main wears the ●.
+    expect(frame).toContain('● main')
     expect(frame).toContain('◯ 调研包结构')
     expect(frame).toContain('grep(pattern)')
     expect(frame).toContain('1m 26s')
@@ -1081,7 +1091,7 @@ describe('subagent panel', () => {
 
   it('hides the panel when there are no unfinished subagents', () => {
     const { lastFrame } = renderApp(<TuiApp state={state([])} handlers={noopHandlers()} />)
-    expect(lastFrame()).not.toContain('◯ main')
+    expect(lastFrame()).not.toContain('● main')
   })
 
   it('truncates a long activity so the row stays on one line', () => {
@@ -1223,6 +1233,30 @@ describe('subagent panel', () => {
     expect(frame).toContain('writer')
   })
 
+  it('shows the lead row above the team roster and selects it at index zero', () => {
+    const { lastFrame } = renderApp(
+      <TuiApp
+        state={state([])}
+        handlers={noopHandlers()}
+        view={{
+          team: {
+            members: [
+              { name: 'researcher', description: '调研', phase: 'active' },
+              { name: 'writer', description: '写文档', phase: 'active' },
+            ],
+            tasks: [],
+          },
+          teamSelected: 0,
+        }}
+      />,
+    )
+    const frame = lastFrame() ?? ''
+    // The lead row leads the panel, ahead of every member row.
+    expect(frame.indexOf('lead')).toBeGreaterThanOrEqual(0)
+    expect(frame.indexOf('lead')).toBeLessThan(frame.indexOf('researcher'))
+    expect(frame.indexOf('researcher')).toBeLessThan(frame.indexOf('writer'))
+  })
+
   it('omits navigation hints when the team panel is not focused', () => {
     const { lastFrame } = renderApp(
       <TuiApp
@@ -1246,7 +1280,7 @@ describe('subagent panel', () => {
       />,
     )
     // The caret only renders while the input bar holds focus.
-    expect(lastFrame() ?? '').not.toContain('▏')
+    expect(lastFrame() ?? '').not.toContain('█')
   })
 
   it('renders a member enriched with live runtime (activity, elapsed, tokens)', () => {
@@ -1277,11 +1311,51 @@ describe('subagent panel', () => {
     expect(frame).toContain('↓ 12.3k tokens')
   })
 
-  it('marks the selected panel row', () => {
+  it('moves the ❯ cursor with the selection while ● stays on the open view', () => {
     const { lastFrame } = renderApp(<TuiApp state={state([])} handlers={noopHandlers()} view={panelView({ subagentSelected: 1 })} />)
     const frame = lastFrame() ?? ''
+    // The cursor sits on the child row; the ● stays on main — the view that
+    // is actually open. Enter is what moves the ●.
+    expect(frame).toContain('❯ ◯ 调研包结构')
+    expect(frame).toContain('● main')
+  })
+
+  it('pins the panel ● to the open child while the cursor sits elsewhere', () => {
+    const childState = state([{ kind: 'user', seq: 1, text: 'x' }])
+    const { lastFrame } = renderApp(<TuiApp
+      state={state([])}
+      handlers={noopHandlers()}
+      view={panelView({
+        subagentSelected: 0,
+        openSubagent: { childId: 'child-1', label: '调研包结构', state: childState },
+      })}
+    />)
+    const frame = lastFrame() ?? ''
+    expect(frame).toContain('❯ ◯ main')
     expect(frame).toContain('● 调研包结构')
-    expect(frame).toContain('◯ main')
+  })
+
+  it('pins the team panel ● to the open member row', () => {
+    const childState = state([{ kind: 'user', seq: 1, text: 'x' }])
+    const { lastFrame } = renderApp(<TuiApp
+      state={state([])}
+      handlers={noopHandlers()}
+      view={{
+        team: {
+          members: [
+            { id: 'm-1', name: 'researcher', description: '调研', phase: 'active' },
+            { id: 'm-2', name: 'writer', description: '写文档', phase: 'active' },
+          ],
+          tasks: [],
+        },
+        teamSelected: 0,
+        openSubagent: { childId: 'm-2', label: 'writer', state: childState },
+      }}
+    />)
+    const frame = lastFrame() ?? ''
+    expect(frame).toContain('❯ ◯ lead')
+    expect(frame).toContain('● writer')
+    expect(frame).toContain('◯ researcher')
   })
 
   it('enters the panel with ↓ from an empty editor', async () => {
@@ -1330,7 +1404,7 @@ describe('subagent panel', () => {
     expect(frame).toContain('subagent: 调研包结构')
     expect(frame).toContain('❯ 看看仓库结构')
     expect(frame).toContain('Esc 返回')
-    expect(frame).not.toContain('❯ ▏')
+    expect(frame).not.toContain('❯ █')
   })
 
   it('folds the main session live frames away while the child view is open', () => {
@@ -1360,6 +1434,132 @@ describe('subagent panel', () => {
     stdin.write('\x1b')
     await settled()
     expect(onPanelBack).toHaveBeenCalledTimes(1)
+  })
+
+  it('lends the editor to a continuable child: Enter steers, Esc returns', async () => {
+    const onChildPrompt = vi.fn()
+    const onPanelBack = vi.fn()
+    const childState = state([{ kind: 'user', seq: 1, text: 'x' }])
+    const { stdin, lastFrame } = renderApp(<TuiApp
+      state={state([])}
+      handlers={{ ...noopHandlers(), onChildPrompt, onPanelBack }}
+      view={panelView({ openSubagent: { childId: 'child-1', label: '调研包结构', state: childState, continuable: true } })}
+    />)
+    // The empty editor shows the steady block caret followed by the dim
+    // identity-and-keys placeholder; the pinned header row is gone for a
+    // continuable child.
+    const chrome = lastFrame() ?? ''
+    expect(chrome).toContain('❯ █subagent: 调研包结构 (Enter 发送 · Esc 返回)')
+    stdin.write('换个思路')
+    await settled()
+    // Typing replaces the placeholder with the buffer and the caret.
+    expect(lastFrame() ?? '').toContain('❯ 换个思路█')
+    expect(lastFrame() ?? '').not.toContain('(Enter 发送')
+    stdin.write('\r')
+    await settled()
+    expect(onChildPrompt).toHaveBeenCalledWith('换个思路')
+    // The buffer cleared after the send, so the placeholder returns.
+    expect(lastFrame() ?? '').toContain('❯ █subagent: 调研包结构')
+    stdin.write('\x1b')
+    await settled()
+    expect(onPanelBack).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps a read-only child without an editor', () => {
+    const childState = state([{ kind: 'user', seq: 1, text: 'x' }])
+    const { lastFrame } = renderApp(<TuiApp
+      state={state([])}
+      handlers={noopHandlers()}
+      view={panelView({ openSubagent: { childId: 'child-1', label: '调研包结构', state: childState } })}
+    />)
+    const frame = lastFrame() ?? ''
+    expect(frame).not.toContain('❯ █')
+    expect(frame).toContain('(Esc 返回)')
+  })
+
+  it('keeps the roster, team panel, and the child heartbeat up in the child view', () => {
+    const childState: FrameState = {
+      ...state([{ kind: 'user', seq: 1, text: 'child line' }]),
+      turnStartedAt: Date.now() - 5_000,
+    }
+    const team: TeamPanelInfo = { members: [{ name: 'lead', description: 'lead', phase: 'active' }], tasks: [] }
+    const { lastFrame } = renderApp(<TuiApp
+      state={state([])}
+      handlers={noopHandlers()}
+      view={panelView({ team, openSubagent: { childId: 'child-1', label: '调研包结构', state: childState } })}
+    />)
+    const frame = lastFrame() ?? ''
+    // The roster row, the team panel, and the child's own turn heartbeat all
+    // stay visible while its transcript is open.
+    expect(frame).toContain('grep(pattern)')
+    expect(frame).toContain('Teammates · 1')
+    expect(frame).toContain('Running…')
+    // The read-only child keeps its pinned identity header below the panels.
+    expect(frame).toContain('subagent: 调研包结构')
+  })
+
+  it('gives the panels the keys over an open child while panelNav is set', async () => {
+    const onPanelMove = vi.fn()
+    const onPanelEnter = vi.fn()
+    const onPanelBack = vi.fn()
+    const childState = state([{ kind: 'user', seq: 1, text: 'child line' }])
+    const { stdin, lastFrame } = renderApp(<TuiApp
+      state={state([])}
+      handlers={{ ...noopHandlers(), onPanelMove, onPanelEnter, onPanelBack }}
+      view={panelView({
+        panelNav: true,
+        subagentSelected: 1,
+        openSubagent: { childId: 'child-1', label: '调研包结构', state: childState, continuable: true },
+      })}
+    />)
+    // The child editor stays visible but drops its caret; the panel owns the
+    // arrows, Enter, and Esc while navigation is active.
+    expect(lastFrame() ?? '').not.toContain('█')
+    stdin.write('\x1b[B') // Down
+    await settled()
+    expect(onPanelMove).toHaveBeenCalledWith(1)
+    stdin.write('\r')
+    await settled()
+    expect(onPanelEnter).toHaveBeenCalledTimes(1)
+    stdin.write('\x1b')
+    await settled()
+    expect(onPanelBack).toHaveBeenCalledTimes(1)
+  })
+
+  it('drops into panel navigation with ↓ from an open child editor', async () => {
+    const onPanelOpen = vi.fn()
+    const childState = state([{ kind: 'user', seq: 1, text: 'child line' }])
+    const { stdin } = renderApp(<TuiApp
+      state={state([])}
+      handlers={{ ...noopHandlers(), onPanelOpen }}
+      view={panelView({ openSubagent: { childId: 'child-1', label: '调研包结构', state: childState, continuable: true } })}
+    />)
+    stdin.write('\x1b[B')
+    await settled()
+    expect(onPanelOpen).toHaveBeenCalledTimes(1)
+  })
+
+  it('echoes pending continuation prompts above the child editor', () => {
+    const childState = state([{ kind: 'user', seq: 1, text: 'x' }])
+    const { lastFrame } = renderApp(<TuiApp
+      state={state([])}
+      handlers={noopHandlers()}
+      view={panelView({ openSubagent: {
+        childId: 'child-1',
+        label: '调研包结构',
+        state: childState,
+        continuable: true,
+        pending: [
+          { id: 'req-1', text: '第一条消息' },
+          { id: 'req-2', text: '第二条消息' },
+        ],
+      } })}
+    />)
+    const frame = lastFrame() ?? ''
+    expect(frame).toContain('第一条消息')
+    expect(frame).toContain('第二条消息')
+    // Every echo carries the steering hint.
+    expect(frame).toContain('(steering — runs at the next step boundary)')
   })
 })
 
@@ -1444,7 +1644,7 @@ describe('fullscreen transcript window', () => {
     stdin.write('c')
     await settled()
     const frame = lastFrame() ?? ''
-    expect(frame).toContain('abc▏')
+    expect(frame).toContain('abc█')
     expect(frame).not.toContain('[<64')
   })
 
@@ -1571,6 +1771,7 @@ describe('slash command completion menu', () => {
     return {
       onCommit: vi.fn(), onInterrupt: vi.fn(), onApproval: vi.fn(), onExit: vi.fn(),
       onPanelOpen: vi.fn(), onPanelMove: vi.fn(), onPanelEnter: vi.fn(), onPanelBack: vi.fn(),
+      onChildPrompt: vi.fn(),
     }
   }
 
@@ -1606,7 +1807,7 @@ describe('slash command completion menu', () => {
     await settled()
     stdin.write('\t')
     await settled()
-    expect(lastFrame() ?? '').toContain('❯ /permission ▏')
+    expect(lastFrame() ?? '').toContain('❯ /permission █')
   })
 
   it('moves the selection back up', async () => {
@@ -1619,7 +1820,7 @@ describe('slash command completion menu', () => {
     await settled()
     stdin.write('\t')
     await settled()
-    expect(lastFrame() ?? '').toContain('❯ /effort ▏')
+    expect(lastFrame() ?? '').toContain('❯ /effort █')
   })
 
   it('completes to the command name plus a space on Tab and closes the menu', async () => {
@@ -1631,7 +1832,7 @@ describe('slash command completion menu', () => {
     const frame = lastFrame() ?? ''
     // The completed buffer carries the caret at the end; the space closed the
     // menu — descriptions exist only in menu rows.
-    expect(frame).toContain('❯ /permission ▏')
+    expect(frame).toContain('❯ /permission █')
     expect(frame).not.toContain('Switch the permission preset')
   })
 
@@ -1643,7 +1844,7 @@ describe('slash command completion menu', () => {
     stdin.write('\r')
     await settled()
     expect(handlers.onCommit).not.toHaveBeenCalled()
-    expect(lastFrame() ?? '').toContain('❯ /permission ▏')
+    expect(lastFrame() ?? '').toContain('❯ /permission █')
   })
 
   it('dismisses on Esc without interrupting, keeps the buffer, and reopens on the next edit', async () => {
@@ -1656,7 +1857,7 @@ describe('slash command completion menu', () => {
     let frame = lastFrame() ?? ''
     expect(handlers.onInterrupt).not.toHaveBeenCalled()
     expect(frame).not.toContain('Switch the permission preset')
-    expect(frame).toContain('❯ /per▏')
+    expect(frame).toContain('❯ /per█')
     // Typing again re-derives the menu.
     stdin.write('m')
     await settled()
@@ -1669,7 +1870,7 @@ describe('slash command completion menu', () => {
     await settled()
     const frame = lastFrame() ?? ''
     expect(frame).not.toContain('Switch the permission preset')
-    expect(frame).toContain('❯ /permission ▏')
+    expect(frame).toContain('❯ /permission █')
   })
 
   it('stays closed for a view without commands', async () => {

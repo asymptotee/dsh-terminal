@@ -47,14 +47,20 @@ export interface InputHandlers {
   onApproval(choice: ApprovalChoice): void
   /** Request a clean exit (Ctrl+D or a second Ctrl+C). */
   onExit(): void
-  /** Move keyboard focus from the input bar into the subagent panel (`↓`). */
+  /** Move keyboard focus into the subagent/team panels (`↓`) — from the input
+   *  bar, or from an opened child view to switch to another transcript. */
   onPanelOpen(): void
   /** Move the panel selection by `delta` rows. */
   onPanelMove(delta: number): void
   /** Enter the selected panel row's view (the main row returns to the input bar). */
   onPanelEnter(): void
-  /** Return keyboard focus one level up: the child view to the input bar, the panel to the input bar. */
+  /** Return keyboard focus one level up: panel navigation to the opened
+   *  child, the opened child to the retained panel row. Entering the main
+   *  view is the panel's main row (Enter), never this. */
   onPanelBack(): void
+  /** Send one human prompt to the opened continuable child; it steers into
+   *  the child's nearest step boundary. */
+  onChildPrompt(text: string): void
 }
 
 /** A transient surface message (above the input bar) or the bottom approval question. */
@@ -110,11 +116,17 @@ export interface OpenSubagent {
   label: string
   /** The child's folded frames, rebuilt through the same fold as the main stream. */
   state: FrameState
+  /** The child accepts human continuation prompts; absent keeps the view read-only. */
+  continuable?: boolean
+  /** Prompts sent while the child's inbox has not claimed them yet; echoed as steering. */
+  pending?: readonly PendingUserEcho[]
 }
 
 /** Everything the driver renders besides the frame state. */
 /** One Agent Teams member row for the team panel roster. */
 export interface TeamMemberRow {
+  /** The member's child session id; the ● marker follows the open transcript. */
+  id?: string
   name: string
   description: string
   /** The durable membership phase: provisioning, active, or failed. */
@@ -163,17 +175,20 @@ export interface RenderView {
   subagents?: readonly SubagentRow[]
   /** The panel's selected row (0 = the main agent row); absent means the input bar holds focus. */
   subagentSelected?: number
+  /** The panels own the keys while a child transcript is open (`↓` dropped into navigation from the child view). */
+  panelNav?: boolean
   /** The child transcript opened from the panel; replaces the input region while set. */
   openSubagent?: OpenSubagent
   /** The Agent Teams roster and task board; absent hides the team panel. */
   team?: TeamPanelInfo
   /** The selected team-member row; absent means the team panel is not focused. */
   teamSelected?: number
-  /** Follow-ups submitted while a step was in flight; shown immediately as queued until their durable echo lands. */
+  /** Messages submitted while a step was in flight; shown immediately as steering until their durable echo lands. */
   pendingUser?: readonly PendingUserEcho[]
 }
 
-/** One follow-up submitted while the agent was busy: echoed at once, marked queued. */
+/** One message submitted while the agent was busy: echoed at once, steered
+ *  into the running turn's next step boundary. */
 export interface PendingUserEcho {
   /** The message id, used to drop the echo when its durable user/message event lands. */
   id: string
@@ -241,6 +256,7 @@ export function createInkRenderer(): TuiRenderer {
     onPanelMove: () => {},
     onPanelEnter: () => {},
     onPanelBack: () => {},
+    onChildPrompt: () => {},
   }
   const props = (): { state: FrameState; handlers: InputHandlers; view?: RenderView } => ({
     state,
@@ -311,9 +327,10 @@ export function TuiApp({
     setApprovalIndex(current => Math.min(1, Math.max(0, current + delta)))
   }
   // The all-completed team board's hide flag lives here, not in TeamPanel:
-  // TeamPanel unmounts while a child transcript is open, and the hide must
-  // survive that round trip — the linger timer keeps running here, so the
-  // board stays hidden on return. A reopened or new task cancels the hide.
+  // TeamPanel unmounts while an approval question owns the screen bottom, and
+  // the hide must survive that round trip — the linger timer keeps running
+  // here, so the board stays hidden afterwards. A reopened or new task
+  // cancels the hide.
   const teamTasks = view?.team?.tasks
   const teamAllDone = teamTasks !== undefined && teamTasks.length > 0
     && teamTasks.every(task => task.status === 'completed')
@@ -339,9 +356,15 @@ export function TuiApp({
   // The pending approval question, when one owns the screen bottom: the input
   // bar, status bar, and side panels all yield to the ApprovalPanel below.
   const approvalOverlay = view?.overlay?.kind === 'approval' ? view.overlay : undefined
-  const focusMode: 'input' | 'panel' | 'child' = opened !== undefined
-    ? 'child'
-    : view?.subagentSelected !== undefined || view?.teamSelected !== undefined ? 'panel' : 'input'
+  // Panel navigation outranks an open child only while the panel actually owns
+  // the keys (panelNav); otherwise a retained selection is just the row
+  // highlight and the child transcript keeps the keyboard.
+  const selectionActive = view?.subagentSelected !== undefined || view?.teamSelected !== undefined
+  const focusMode: 'input' | 'panel' | 'child' = selectionActive && (opened === undefined || view?.panelNav === true)
+    ? 'panel'
+    : opened !== undefined
+      ? 'child'
+      : 'input'
 
   // ---- Transcript scroll state ---------------------------------------
   // The transcript is the app's own data (no terminal scrollback): the
@@ -362,6 +385,9 @@ export function TuiApp({
   const mainWindowed = windowFrames(frames)
   const childWindowed = opened === undefined ? undefined : windowFrames(opened.state.frames)
   const activePlan = opened === undefined ? state.plan : opened.state.plan
+  // The heartbeat follows the active transcript too: while a child transcript
+  // is on screen, the child's own turn clocks its Running… line.
+  const activeTurn = opened === undefined ? state : opened.state
   const transcriptKey = opened === undefined ? 'main' : opened.childId
   // The view switch activates during render — React re-runs the component
   // before committing, so the first painted frame of the new view already
@@ -449,11 +475,18 @@ export function TuiApp({
       </Box>
       {/* The fixed chrome band below the transcript. */}
       <Box flexDirection="column" flexShrink={0}>
-        {/* Follow-ups queued behind a running step echo immediately (dimmed, no
-            committed background) so the submission is never silently swallowed;
-            each is dropped once its durable user/message frame lands above. */}
+        {/* Messages submitted while a step is in flight echo immediately
+            (dimmed, no committed background) so the submission is never
+            silently swallowed; each is dropped once its durable user/message
+            frame lands above. */}
         {view?.pendingUser !== undefined && view.pendingUser.length > 0
           ? <PendingUserEchoes items={view.pendingUser} />
+          : null}
+        {/* Continuation prompts sent to the opened child echo the same way until
+            its inbox claims them and the durable user/message frame lands in
+            the child transcript. */}
+        {opened?.pending !== undefined && opened.pending.length > 0
+          ? <PendingUserEchoes items={opened.pending} />
           : null}
         {view?.overlay?.kind === 'notice'
           ? <Text color="red" key="notice">{view.overlay.text}</Text>
@@ -462,15 +495,14 @@ export function TuiApp({
             it follows the active transcript (main session or opened child). */}
         {activePlan !== undefined ? <PlanPanel todos={activePlan} /> : null}
         {/* The step heartbeat sits below the plan and above the input bar:
-            shown throughout a step — its tool executions included — while an
-            approval overlay waits on the user. */}
-        {opened === undefined && view?.overlay === undefined
-          && state.turnStartedAt !== undefined
-          ? <HeartbeatLine startedAt={state.turnStartedAt} tokens={state.turnTokens} />
+            shown throughout a step — its tool executions included — while no
+            overlay waits on the user; it tracks the active transcript's turn. */}
+        {view?.overlay === undefined && activeTurn.turnStartedAt !== undefined
+          ? <HeartbeatLine startedAt={activeTurn.turnStartedAt} tokens={activeTurn.turnTokens} />
           : null}
         {/* The input bar stays mounted in every focus mode — it owns the single
-            stdin listener; in the child view it renders nothing and only routes
-            Esc back to the input focus. */}
+            stdin listener; a read-only child view routes only Esc back, while a
+            continuable child borrows the editor for its own prompts. */}
         <InputBar
           handlers={handlers}
           approvalPending={approvalOverlay !== undefined}
@@ -481,6 +513,10 @@ export function TuiApp({
           onFirstInput={() => { setWelcomeDismissed(true) }}
           history={history}
           focusMode={focusMode}
+          childPromptable={opened?.continuable === true}
+          {...(opened?.continuable === true
+            ? { childPlaceholder: `subagent: ${opened.label} (Enter 发送 · Esc 返回)` }
+            : {})}
           panelAvailable={subagents.length > 0 || (view?.team?.members.length ?? 0) > 0}
           commands={view?.commands ?? []}
           {...(view?.status === undefined ? {} : { status: view.status })}
@@ -489,25 +525,44 @@ export function TuiApp({
           /* The question owns the screen bottom: the bar above rendered
              nothing, and the side panels and child header wait it out. */
           <ApprovalPanel key={approvalKey(approvalOverlay)} overlay={approvalOverlay} selected={approvalIndex} width={columns} />
-        ) : opened === undefined ? (
-          <>
-            {subagents.length > 0
-              ? <SubagentPanel rows={subagents} selected={view?.subagentSelected} />
-              : null}
-            {view?.team !== undefined ? <TeamPanel team={view.team} selected={view.teamSelected} tasksHidden={teamBoardHidden} /> : null}
-          </>
         ) : (
-          /* The child view's identity header pins at the very bottom: it is
-             standing context (which subagent, how to return), not transcript
-             content — inside the window it would be clipped at the live bottom
-             and covered by the scroll indicator at the top. */
           <>
-            <Text color="#a5d8ff">{'─'.repeat(columns)}</Text>
-            <Box justifyContent="center">
-              <Text>
-                subagent: <Text bold>{opened.label}</Text> <Text dimColor>(Esc 返回)</Text>
-              </Text>
-            </Box>
+            {/* The roster and team panels stay up in the child view too: the
+                main agent's world keeps moving while a transcript is open. */}
+            {subagents.length > 0
+              ? (
+                <SubagentPanel
+                  rows={subagents}
+                  selected={view?.subagentSelected}
+                  {...(opened === undefined ? {} : { openChildId: opened.childId })}
+                />
+              )
+              : null}
+            {view?.team !== undefined
+              ? (
+                <TeamPanel
+                  team={view.team}
+                  selected={view.teamSelected}
+                  tasksHidden={teamBoardHidden}
+                  {...(opened === undefined ? {} : { openChildId: opened.childId })}
+                />
+              )
+              : null}
+            {opened !== undefined && opened.continuable !== true ? (
+              /* The read-only child view's identity header pins at the very
+                 bottom: it is standing context (which subagent, how to
+                 return), not transcript content — inside the window it would
+                 be clipped at the live bottom and covered by the scroll
+                 indicator at the top. */
+              <>
+                <Text color="#a5d8ff">{'─'.repeat(columns)}</Text>
+                <Box justifyContent="center">
+                  <Text>
+                    subagent: <Text bold>{opened.label}</Text> <Text dimColor>(Esc 返回)</Text>
+                  </Text>
+                </Box>
+              </>
+            ) : null}
           </>
         )}
       </Box>
@@ -523,10 +578,13 @@ const PANEL_MAX_ROWS = 8
 function SubagentPanel({
   rows,
   selected,
+  openChildId,
 }: {
   rows: readonly SubagentRow[]
-  /** The selected row index over [main, ...rows]; undefined keeps the input bar focused. */
+  /** The ❯ cursor's row index over [main, ...rows]; undefined keeps the input bar focused. */
   selected: number | undefined
+  /** The child transcript currently open; its row wears the ● (main's when undefined). */
+  openChildId?: string
 }): React.JSX.Element {
   const width = useTerminalWidth()
   // The main row always shows; the subagent rows window around the selection
@@ -544,29 +602,40 @@ function SubagentPanel({
       <Text dimColor>{'─'.repeat(width)}</Text>
       {start > 0 ? <Text dimColor>  … {start} more</Text> : null}
       {[undefined, ...visible].map((row, index) => {
-        const isSelected = row === undefined ? selected === 0 : selected === start + index
-        const marker = isSelected ? '●' : '◯'
+        const isMain = row === undefined
+        // The ❯ cursor follows the arrows; the ● stays on the row whose
+        // transcript is actually open — Enter is what moves it.
+        const isCursor = isMain ? selected === 0 : selected === start + index
+        const isOpen = isMain ? openChildId === undefined : openChildId === row.childId
+        // Rows that are neither the cursor's nor the open view's dim entirely;
+        // the two meaningful rows keep their full brightness.
+        const emphasized = isCursor || isOpen
+        const marker = isOpen ? '●' : '◯'
         // Clamp the label so a long delegation description cannot wrap the
         // row past one physical line and eat the transcript window's height.
-        const label = truncateToWidth(row === undefined ? 'main' : row.label, Math.max(4, Math.floor(width * 0.4)))
-        const elapsed = row === undefined
+        const label = truncateToWidth(isMain ? 'main' : row.label, Math.max(4, Math.floor(width * 0.4)))
+        const elapsed = isMain
           ? ''
           : `${formatElapsed(Date.now() - row.startedAt)} · ↓ ${formatTokenCount(row.inputTokens)} tokens`
         // Clamp the activity so the row stays on one line with a clear gap
         // before the right-aligned elapsed/tokens: the smaller of (terminal
         // width minus label/elapsed/spacing) and PANEL_ACTIVITY_RATIO of width.
-        const budget = Math.min(width - stringWidth(label) - stringWidth(elapsed) - 5, Math.floor(width * PANEL_ACTIVITY_RATIO))
+        const budget = Math.min(width - stringWidth(label) - stringWidth(elapsed) - 7, Math.floor(width * PANEL_ACTIVITY_RATIO))
         const activity = row !== undefined && row.activity !== undefined
           ? truncateToWidth(row.activity, Math.max(0, budget))
           : undefined
         return (
-          <Box key={row === undefined ? 'main' : row.childId}>
-            <Text>{isSelected ? <Text color="#51cf66">{marker}</Text> : <Text dimColor>{marker}</Text>}</Text>
+          <Box key={isMain ? 'main' : row.childId}>
+            <Text>{isCursor ? <Text>❯</Text> : ' '}</Text>
             <Text> </Text>
-            <Text bold={isSelected}>{label}</Text>
-            {activity !== undefined && activity !== '' ? <Text dimColor>  {activity}</Text> : null}
+            <Text>{emphasized ? <Text>{marker}</Text> : <Text dimColor>{marker}</Text>}</Text>
+            <Text> </Text>
+            {emphasized ? <Text bold={isCursor}>{label}</Text> : <Text dimColor>{label}</Text>}
+            {activity !== undefined && activity !== ''
+              ? emphasized ? <Text>  {activity}</Text> : <Text dimColor>  {activity}</Text>
+              : null}
             <Box flexGrow={1} />
-            {row === undefined ? null : <Text dimColor>{elapsed}</Text>}
+            {isMain ? null : emphasized ? <Text>{elapsed}</Text> : <Text dimColor>{elapsed}</Text>}
           </Box>
         )
       })}
@@ -584,19 +653,25 @@ function TeamPanel({
   team,
   selected,
   tasksHidden,
+  openChildId,
 }: {
   team: TeamPanelInfo
+  /** The ❯ cursor's row index over [main, ...members]; undefined keeps focus elsewhere. */
   selected: number | undefined
   /** The all-done board's hide flag, owned by TuiApp so it survives view switches. */
   tasksHidden: boolean
+  /** The child transcript currently open; its row wears the ● (main's when undefined). */
+  openChildId?: string
 }): React.JSX.Element {
   const width = useTerminalWidth()
-  // Members window around the selection (roster head when unselected); tasks
-  // keep their reading order from the top. Both cap at PANEL_MAX_ROWS so the
-  // chrome band stays bounded.
-  const start = team.members.length <= PANEL_MAX_ROWS || selected === undefined
+  // Index 0 is the main row; member rows start at 1 and window around the
+  // member selection (roster head when unselected); tasks keep their reading
+  // order from the top. Both cap at PANEL_MAX_ROWS so the chrome band stays
+  // bounded.
+  const memberSelected = selected === undefined || selected === 0 ? undefined : selected - 1
+  const start = team.members.length <= PANEL_MAX_ROWS || memberSelected === undefined
     ? 0
-    : Math.min(Math.max(0, selected - Math.floor(PANEL_MAX_ROWS / 2)), team.members.length - PANEL_MAX_ROWS)
+    : Math.min(Math.max(0, memberSelected - Math.floor(PANEL_MAX_ROWS / 2)), team.members.length - PANEL_MAX_ROWS)
   const visibleMembers = team.members.slice(start, start + PANEL_MAX_ROWS)
   const hiddenMembers = team.members.length - visibleMembers.length
   const visibleTasks = team.tasks.slice(0, PANEL_MAX_ROWS)
@@ -605,11 +680,31 @@ function TeamPanel({
     <Box flexDirection="column" marginBottom={1}>
       <Text>
         Teammates · {team.members.length}
-        {selected !== undefined ? <Text dimColor>  (↑↓ 选择 · Enter 打开 · ↑/Esc 返回)</Text> : null}
+        {selected !== undefined ? <Text dimColor>  (↑↓ 选择 · Enter 打开 · ↑ 返回)</Text> : null}
       </Text>
+      {/* The lead row is the way home: Enter on it closes to the main view.
+          The ● shows which transcript is open — the lead's own when no
+          member is. (The subagent panel's counterpart keeps the 'main' name.) */}
+      <Box key="lead">
+        <Text>{selected === 0 ? <Text>❯</Text> : ' '}</Text>
+        <Text> </Text>
+        {selected === 0 || openChildId === undefined
+          ? <Text>{openChildId === undefined ? '●' : '◯'}</Text>
+          : <Text dimColor>◯</Text>}
+        <Text> </Text>
+        {selected === 0 || openChildId === undefined
+          ? <Text bold={selected === 0}>lead</Text>
+          : <Text dimColor>lead</Text>}
+      </Box>
       {visibleMembers.map((member, index) => {
-        const isSelected = selected === start + index
-        const marker = isSelected ? '●' : '◯'
+        // The ❯ cursor follows the arrows; the ● stays on the member whose
+        // transcript is actually open — Enter is what moves it.
+        const isCursor = selected === start + index + 1
+        const isOpen = member.id !== undefined && member.id === openChildId
+        // Rows that are neither the cursor's nor the open member's dim
+        // entirely; the two meaningful rows keep their full brightness.
+        const emphasized = isCursor || isOpen
+        const marker = isOpen ? '●' : '◯'
         // Clamp the name so a long member name cannot wrap the row past one line.
         const name = truncateToWidth(member.name, Math.max(4, Math.floor(width * 0.3)))
         const elapsed = member.startedAt !== undefined
@@ -624,18 +719,26 @@ function TeamPanel({
           : undefined
         return (
           <Box key={member.name}>
-            {/* Two-space indent aligns the member marker under the task marker. */}
-            <Text>  </Text>
-            <Text>{isSelected ? <Text color="#51cf66">{marker}</Text> : <Text dimColor>{marker}</Text>}</Text>
+            {/* The cursor column keeps the member marker aligned under the
+                task marker, exactly like the old two-space indent did. */}
+            <Text>{isCursor ? <Text>❯</Text> : ' '}</Text>
             <Text> </Text>
-            {member.phase === 'failed'
-              ? <Text bold={isSelected} color="red">{name}</Text>
-              : member.phase === 'provisioning'
-                ? <Text bold={isSelected} color="yellow">{name}</Text>
-                : <Text bold={isSelected}>{name}</Text>}
-            {activity !== undefined && activity !== '' ? <Text dimColor>  {activity}</Text> : null}
+            <Text>{emphasized ? <Text>{marker}</Text> : <Text dimColor>{marker}</Text>}</Text>
+            <Text> </Text>
+            {!emphasized
+              ? <Text dimColor>{name}</Text>
+              : member.phase === 'failed'
+                ? <Text bold={isCursor} color="red">{name}</Text>
+                : member.phase === 'provisioning'
+                  ? <Text bold={isCursor} color="yellow">{name}</Text>
+                  : <Text bold={isCursor}>{name}</Text>}
+            {activity !== undefined && activity !== ''
+              ? emphasized ? <Text>  {activity}</Text> : <Text dimColor>  {activity}</Text>
+              : null}
             <Box flexGrow={1} />
-            {elapsed !== '' ? <Text dimColor>{elapsed}</Text> : null}
+            {elapsed !== ''
+              ? emphasized ? <Text>{elapsed}</Text> : <Text dimColor>{elapsed}</Text>
+              : null}
           </Box>
         )
       })}
@@ -800,11 +903,11 @@ function formatContext(context: { used: number; window: number }): string {
 const ECHO_MAX_LINES = 3
 
 /**
- * The optimistic echoes of follow-ups submitted while a step was in flight.
- * Rendered dimmed and without the committed user background so a queued message
- * reads as pending; each is removed once its durable user/message frame lands
- * in the transcript above. Echoes cap at ECHO_MAX_LINES so a pasted follow-up
- * cannot squeeze the transcript window.
+ * The optimistic echoes of messages submitted while a step was in flight.
+ * Rendered dimmed and without the committed user background so a steered
+ * message reads as pending; each is removed once its durable user/message
+ * frame lands in the transcript above. Echoes cap at ECHO_MAX_LINES so a
+ * pasted message cannot squeeze the transcript window.
  */
 function PendingUserEchoes({ items }: { items: readonly PendingUserEcho[] }): React.JSX.Element {
   return (
@@ -819,7 +922,7 @@ function PendingUserEchoes({ items }: { items: readonly PendingUserEcho[] }): Re
               <Text key={index} dimColor>{index === 0 ? '❯ ' : '  '}{line}</Text>
             ))}
             {hidden > 0 ? <Text dimColor>  … {hidden} more lines</Text> : null}
-            <Text dimColor>  (queued — runs when the current turn ends)</Text>
+            <Text dimColor>  (steering — runs at the next step boundary)</Text>
           </Box>
         )
       })}
@@ -1374,6 +1477,8 @@ export function InputBar({
   onFirstInput,
   history = [],
   focusMode = 'input',
+  childPromptable = false,
+  childPlaceholder,
   panelAvailable = false,
   commands = [],
   status,
@@ -1394,6 +1499,11 @@ export function InputBar({
   history?: readonly string[]
   /** Which surface owns the keys; the panel and child view borrow them from the editor. */
   focusMode?: 'input' | 'panel' | 'child'
+  /** The opened child is continuable: the child view borrows the editor to
+   *  send continuation prompts (Enter steers, Esc returns). */
+  childPromptable?: boolean
+  /** Identity-and-keys placeholder shown dim inside the empty child editor. */
+  childPlaceholder?: string
   /** Whether the subagent panel has rows, so `↓` from an empty editor can enter it. */
   panelAvailable?: boolean
   /** The registered slash commands; a leading-`/` buffer opens the completion menu. */
@@ -1481,9 +1591,34 @@ export function InputBar({
       return
     }
     if (focusMode === 'child') {
-      // The child transcript is read-only: Esc returns to the input bar.
-      if (key.escape) handlers.onPanelBack()
-      return
+      // Esc always returns one level up.
+      if (key.escape) { handlers.onPanelBack(); return }
+      // ↓ hands the keys to the panels — starting on the open child's own row
+      // — so Enter switches to another transcript without leaving the child
+      // view; the continuable editor asks for an empty buffer first, the
+      // read-only view has nothing to protect.
+      if (key.downArrow && panelAvailable && (!childPromptable || value === '')) {
+        handlers.onPanelOpen()
+        return
+      }
+      if (!childPromptable) return
+      if (key.return) {
+        const text = value.trim()
+        if (text === '') return
+        setBuffer({ value: '', cursor: 0 })
+        handlers.onChildPrompt(text)
+        return
+      }
+      if (key.ctrl && input === 'c') {
+        // The child's turn belongs to its own agent: Ctrl+C only clears the
+        // buffer here — interrupt and quit stay owned by the main view.
+        setBuffer({ value: '', cursor: 0 })
+        return
+      }
+      // The main history's arrows do not apply; every other key falls through
+      // to the shared editing tail (cursor motion, deletion, Ctrl+J newline,
+      // Ctrl+D exit, typed input).
+      if (key.upArrow || key.downArrow) return
     }
     if (focusMode === 'panel') {
       // The panel owns the arrows, Enter (open the selected row), and Esc.
@@ -1604,7 +1739,8 @@ export function InputBar({
   // on a channel separate from useInput, so multi-line paste never trips the
   // Enter-to-commit path. Normalize CR/CRLF to LF for the LF-splitting renderer.
   usePaste((text) => {
-    if (approvalPending || focusMode !== 'input') return
+    const editable = focusMode === 'input' || (focusMode === 'child' && childPromptable)
+    if (approvalPending || !editable) return
     const { value, cursor } = bufferRef.current
     const normalized = text.replace(/\r\n|\r/g, '\n')
     setBuffer({ value: value.slice(0, cursor) + normalized + value.slice(cursor), cursor: cursor + normalized.length })
@@ -1625,29 +1761,52 @@ export function InputBar({
   // ApprovalPanel takes its rows in the chrome band) while still owning the
   // question's keys through the handler above.
   if (approvalPending) return <Box />
-  // The child transcript view is read-only: the bar keeps routing Esc but
-  // renders nothing, leaving the child transcript as the visible surface.
-  if (focusMode === 'child') return <Box />
+  // A read-only child (one-shot, or no descriptor mode known) keeps the bar
+  // invisible; a continuable child renders the ordinary editor below.
+  if (focusMode === 'child' && !childPromptable) return <Box />
 
+  // The continuable child's editor wears the light-blue tint of the child
+  // view's chrome; the main input keeps the dim rules.
+  const rule = childPromptable
+    ? <Text color="#a5d8ff">{'─'.repeat(width)}</Text>
+    : <Text dimColor>{'─'.repeat(width)}</Text>
+  // An empty child editor shows the identity-and-keys placeholder in dim gray
+  // behind the caret; the first typed character replaces the placeholder.
+  const showPlaceholder = childPromptable && value === '' && childPlaceholder !== undefined
+  // The wide block caret, steady (no blink). A focused panel (subagent or
+  // team — including one entered from the child view) hides it so the
+  // selection highlight stays unambiguous.
+  const caretVisible = focusMode === 'input' || (focusMode === 'child' && childPromptable)
+  const caretCell = <Text>█</Text>
   return (
     <Box flexDirection="column">
-      <Text dimColor>{'─'.repeat(width)}</Text>
-      {lines.map((line, index) => {
-        // The caret only shows while the input bar holds focus; a focused panel
-        // (subagent or team) hides it so the selection highlight is unambiguous.
-        const marked = focusMode === 'input' && index === cursorLine
-          ? `${line.slice(0, cursorColumn)}▏${line.slice(cursorColumn)}`
-          : line
-        return (
-          <Text key={index}>
-            {/* The prompt marker leads the first line in the body color; later
-                lines indent two columns so every line's text aligns. */}
-            {index === 0 ? <Text>❯ </Text> : '  '}
-            {marked}
+      {rule}
+      {showPlaceholder
+        ? (
+          <Text>
+            ❯ {caretVisible ? caretCell : null}<Text dimColor>{truncateToWidth(childPlaceholder ?? '', Math.max(0, width - 2))}</Text>
           </Text>
         )
-      })}
-      <Text dimColor>{'─'.repeat(width)}</Text>
+        : lines.map((line, index) => {
+          const marked = caretVisible && index === cursorLine
+            ? (
+              <>
+                {line.slice(0, cursorColumn)}
+                {caretCell}
+                {line.slice(cursorColumn)}
+              </>
+            )
+            : line
+          return (
+            <Text key={index}>
+              {/* The prompt marker leads the first line in the body color; later
+                  lines indent two columns so every line's text aligns. */}
+              {index === 0 ? <Text>❯ </Text> : '  '}
+              {marked}
+            </Text>
+          )
+        })}
+      {rule}
       {/* The completion menu and the status bar share one slot below the box:
           they swap in a single render, so opening the menu never paints an
           intermediate frame where both stack (the chrome band overshooting

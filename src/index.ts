@@ -3,10 +3,10 @@
  * rides over dsh-base without Host, HTTP, or browser plugins; this plugin
  * creates (or resumes) one Agent through the core registry, folds the durable
  * session event stream into display frames, and renders them through the ink
- * terminal UI (the frame stream plus the multiline input bar). Input submits
- * through the Agent's durable inbox without waiting for the owned turn, so
- * further lines queue while the agent works; Ctrl+D flushes the Session and
- * exits.
+ * terminal UI (the frame stream plus the multiline input bar). Input steers
+ * through the Agent's durable inbox without waiting for the owned turn, so a
+ * submitted line lands at the running turn's next step boundary; Ctrl+D
+ * flushes the Session and exits.
  *
  * A resumed session rebuilds its display by replaying the persisted log
  * through the same fold before live events attach.
@@ -125,6 +125,9 @@ export async function flushWithTimeout(
 interface ChildEntry {
   /** The child's display label: its delegation description once the descriptor arrives. */
   label: string
+  /** The child accepts human continuation prompts (its descriptor mode is
+   *  `continuable`); one-shot and unknown children stay read-only. */
+  continuable: boolean
   /** When the child's first observed event landed. */
   startedAt: number
   /** Accumulated input and cache-read tokens reported by the child. */
@@ -215,6 +218,10 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
   // event on the global bus, so relay/settlement notice text can rename the
   // raw session id it embeds to match the roster.
   const childLabels = new Map<string, string>()
+  // Child session id → its descriptor's mode (`one-shot`/`continuable`),
+  // captured at the same point as the label; it decides whether the child's
+  // transcript view offers an input box (continuation prompts).
+  const childModes = new Map<string, string>()
   // Child session id → the error detail of its last failed turn, so the child's
   // settlement notice can show the concrete cause instead of just "failed".
   // Cleared by any later non-error turn, so a child that recovered shows none.
@@ -224,6 +231,11 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
   // per such submission now (keyed by message id) and drop it the moment the
   // real event lands, so input is never silently swallowed while the agent is busy.
   const pendingUser: { id: string; text: string }[] = []
+  // Continuation prompts sent to a child are only claimed by its inbox at the
+  // next step/turn boundary, so their durable user/message echo is delayed the
+  // same way; the echo is keyed by the prompt's requestId (persisted as the
+  // landed message's source.rpcId) and dropped when that event lands.
+  const childPending = new Map<string, { id: string; text: string }[]>()
   // The official Agent Teams tools register without presentation, so a local
   // table renders their calls; every other tool reads the presentation its own
   // registration carries (absent tools fall back to the generic card).
@@ -248,6 +260,25 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
   const permissionPresets = ctx.get('permissionPresets') as
     | { current(session: unknown): string }
     | undefined
+  // The continuation seam for opened child transcripts: one human message
+  // addressed to a continuable direct child. Structural read, the same
+  // pattern as sandboxPolicy — no upstream import. The requestId is minted by
+  // us and persisted as the landed message's source.rpcId, the key the local
+  // echo reconciles against; success resolves once the child inbox admits the
+  // message, its execution is independent of the call.
+  const subagents = ctx.get('subagents') as
+    | {
+      prompt(request: {
+        requestId: string
+        parentSessionId: string
+        childSessionId: string
+        mode: 'continuable'
+        delivery: 'queue' | 'steer'
+        content: readonly { type: 'text'; text: string }[]
+      }, signal: AbortSignal): Promise<{ messageId: string }>
+    }
+    | undefined
+  const childPromptSignal = new AbortController().signal
   let view: RenderView = {
     status: {
       model: selection.model,
@@ -303,6 +334,10 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
   /** The selected team-member row in the team panel; undefined keeps focus elsewhere. */
   let teamSelected: number | undefined
   let openChild: string | undefined
+  // The panels own the keys while a child transcript is open (↓ dropped into
+  // navigation from the child view); without it a retained selection is only
+  // the row highlight and the child keeps the keyboard.
+  let panelNav = false
 
   /** The child's latest visible activity: the most recent tool card's title. */
   function childActivity(childState: FrameState): string | undefined {
@@ -383,6 +418,7 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
         const entry = agents?.get(SessionId(member.id)) === undefined ? undefined : children.get(member.id)
         const activity = entry === undefined ? undefined : childActivity(entry.state)
         return {
+          id: member.id,
           name: member.name,
           description: member.description,
           phase: member.phase,
@@ -423,13 +459,29 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
     const team = teamPanel()
     if (team !== undefined) {
       next.team = team
-      if (teamSelected !== undefined) next.teamSelected = Math.min(teamSelected, Math.max(0, team.members.length - 1))
+      // Rows are [main, ...members]: the selection clamps to the member count.
+      if (teamSelected !== undefined) next.teamSelected = Math.min(teamSelected, Math.max(0, team.members.length))
     }
     if (openChild !== undefined) {
       const opened = children.get(openChild)
-      if (opened !== undefined) next.openSubagent = { childId: openChild, label: opened.label, state: opened.state }
+      if (opened !== undefined) {
+        const pending = childPending.get(openChild)
+        // A teammate is identified by its roster name — unique within the
+        // team and the same identity the panel row and send_message use —
+        // instead of the model-worded spawn description; other children keep
+        // their descriptor label.
+        const member = teamBase?.members.find(candidate => candidate.id === openChild)
+        next.openSubagent = {
+          childId: openChild,
+          label: member === undefined ? opened.label : member.name,
+          state: opened.state,
+          ...(opened.continuable ? { continuable: true } : {}),
+          ...(pending === undefined || pending.length === 0 ? {} : { pending: [...pending] }),
+        }
+      }
     }
     if (pendingUser.length > 0) next.pendingUser = [...pendingUser]
+    if (panelNav) next.panelNav = true
     return next
   }
 
@@ -466,6 +518,9 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
         // the session/event handler before this fold runs; fall back to a
         // shortened id when no descriptor label is available.
         label: childLabels.get(childId) ?? `subagent ${childId.slice(0, 8)}`,
+        // Captured from the same descriptor; a missing or unknown mode keeps
+        // the child read-only rather than offering a prompt it cannot take.
+        continuable: childModes.get(childId) === 'continuable',
         startedAt: event.time,
         inputTokens: 0,
         state: createFrameState(),
@@ -542,18 +597,33 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
   ctx.on('session/event', (session, event: SessionEvent) => {
     if (session.header.id !== agent.session.id) {
       // Descriptors are seeded at session creation, not live-appended, so they
-      // never fire on this bus; read the child's friendly label from its own
-      // event log the first time any of its events reaches us.
+      // never fire on this bus; read the child's friendly label and its
+      // continuation mode from its own event log the first time any of its
+      // events reaches us.
       if (!childLabels.has(session.header.id)) {
         const descriptor = session.snapshotEvents().find((e) => (e as { type: string }).type === 'subagent/descriptor')
         const label = descriptor === undefined ? undefined : (descriptor.data as { label?: unknown }).label
         if (typeof label === 'string' && label !== '') childLabels.set(session.header.id, label)
+        const mode = descriptor === undefined ? undefined : (descriptor.data as { mode?: unknown }).mode
+        if (typeof mode === 'string') childModes.set(session.header.id, mode)
       }
       // Direct children feed the panel below the status bar; deeper
       // descendants stay in their own sessions. Error capture here runs for
       // every direct-child turn end, so the later settlement notice can show
       // the concrete cause.
       if (session.header.parentSession === agent.session.id) {
+        // A continuation prompt's optimistic echo lands as the child's durable
+        // user/message carrying our minted requestId as its source.rpcId; drop
+        // the local copy so the message does not render twice.
+        if (event.type === 'user/message') {
+          const rpcId = (event.data.source as { rpcId?: unknown }).rpcId
+          const pending = typeof rpcId === 'string' ? childPending.get(session.header.id) : undefined
+          const echoed = pending?.findIndex(echo => echo.id === rpcId) ?? -1
+          if (pending !== undefined && echoed !== -1) {
+            pending.splice(echoed, 1)
+            if (pending.length === 0) childPending.delete(session.header.id)
+          }
+        }
         trackChildError(session.header.id, event)
         foldChildEvent(session.header.id, event)
       }
@@ -564,12 +634,12 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
     // A team event moves the authoritative agentTeam projection, so re-read it
     // before the render below to keep the team panel current.
     if ((event.type as string).startsWith('team/')) refreshTeam()
-    // A follow-up committed while a step was in flight rendered a local queued
+    // A message committed while a step was in flight rendered a local steering
     // echo; now that its durable user/message frame folds in below, drop the
     // local copy so the message does not appear twice.
     if (event.type === 'user/message' && event.data.source.kind === 'user') {
-      const queued = pendingUser.findIndex(pending => pending.id === (event.data.id as string))
-      if (queued !== -1) pendingUser.splice(queued, 1)
+      const echoed = pendingUser.findIndex(pending => pending.id === (event.data.id as string))
+      if (echoed !== -1) pendingUser.splice(echoed, 1)
     }
     // Streaming no longer rides durable session events (the harness publishes it
     // on the agent-scoped assistant-stream bus instead), so every remaining
@@ -692,15 +762,15 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
           content: [{ type: 'text', text }],
           source: { kind: 'user' },
         })
-        // While a turn is in flight the follow-up turn cannot start, so its
-        // durable echo is delayed; render a local queued echo now so the
-        // submission is visible instead of silently swallowed. The session/event
-        // handler drops it once the real user/message frame lands.
+        // While a turn is in flight the steered message waits for its next
+        // step boundary, so its durable echo is delayed; render a local echo
+        // now so the submission is visible instead of silently swallowed. The
+        // session/event handler drops it once the real user/message frame lands.
         if (state.turnStartedAt !== undefined) {
           pendingUser.push({ id: message.id as string, text })
           scheduleRender(true)
         }
-        agent.followup(message)
+        agent.steer(message)
         return
       }
       const commands: CommandRuntime | undefined = ctx.get('commands')
@@ -710,6 +780,54 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
       }
       void commands.execute(agent, text, [], commandSignal).then((execution) => {
         if (execution === undefined) setOverlay({ kind: 'notice', text: `unknown command: ${text}` })
+      })
+    },
+    onChildPrompt: (text) => {
+      if (exiting || openChild === undefined) return
+      const opened = children.get(openChild)
+      if (opened === undefined || !opened.continuable) return
+      setOverlay(undefined)
+      if (subagents === undefined) {
+        setOverlay({ kind: 'notice', text: 'no subagent service: the prompt was not sent' })
+        return
+      }
+      const childId = openChild
+      // The requestId is minted here and persisted as the landed message's
+      // source.rpcId, so the session/event handler reconciles the optimistic
+      // echo against it; the inbox admits the message before its execution.
+      const requestId = randomUUID()
+      const echoes = childPending.get(childId) ?? []
+      echoes.push({ id: requestId, text })
+      childPending.set(childId, echoes)
+      scheduleRender(true)
+      void subagents.prompt({
+        requestId,
+        parentSessionId: agent.session.id,
+        childSessionId: childId,
+        mode: 'continuable',
+        // The terminal's single send gesture steers, matching the main input:
+        // the message lands at the child's nearest step boundary.
+        delivery: 'steer',
+        content: [{ type: 'text', text }],
+      }, childPromptSignal).catch((error: unknown) => {
+        // Withdraw the optimistic echo and surface the cause; upstream rejects
+        // with a stable `code` (discriminated by code, never by instanceof).
+        const pending = childPending.get(childId)
+        const echoed = pending?.findIndex(echo => echo.id === requestId) ?? -1
+        if (pending !== undefined && echoed !== -1) {
+          pending.splice(echoed, 1)
+          if (pending.length === 0) childPending.delete(childId)
+        }
+        const code = (error as { code?: unknown }).code
+        const message = (error as { message?: unknown }).message
+        const reason = code === 'subagent/not-resumable' ? '该子代理不支持续聊（one-shot）'
+          : code === 'subagent/parent-unavailable' ? '父会话不可用，无法投递'
+          : code === 'subagent/unauthorized' ? '该子代理不属于当前会话'
+          : code === 'subagent/delivery-unavailable' ? '子代理收件箱暂不可用'
+          : typeof message === 'string' && message !== '' ? message
+          : `发送失败（${String(code ?? 'unknown')}）`
+        setOverlay({ kind: 'notice', text: `发送失败：${reason}` })
+        scheduleRender(true)
       })
     },
     onInterrupt: () => {
@@ -725,63 +843,112 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
       // The team panel owns navigation while a team exists (its members are the
       // interesting rows); otherwise the subagent panel takes over for any
       // non-team children. Enter from either opens the selected transcript.
+      // An existing selection is kept, so dropping into navigation from an
+      // open child starts on that child's own row.
       if (teamBase !== undefined && teamBase.members.length > 0) {
-        teamSelected = 0
+        if (teamSelected === undefined) teamSelected = 0
         panelSelected = undefined
       } else if (rosterRows().length > 0) {
-        panelSelected = 0
+        if (panelSelected === undefined) panelSelected = 0
         teamSelected = undefined
       } else {
         return
       }
+      panelNav = true
       scheduleRender(true)
     },
     onPanelMove: (delta) => {
       if (exiting) return
       if (teamSelected !== undefined) {
-        // ↑ at the first teammate leaves the team panel back to the input bar
-        // (mirrors how ↓ entered it), so no separate Esc is needed to exit.
+        // ↑ at the main row leaves the panel back to where ↓ found it (the
+        // input bar or the open child's editor), mirroring the entry gesture.
         if (delta < 0 && teamSelected === 0) {
           teamSelected = undefined
+          panelNav = false
           scheduleRender(true)
           return
         }
         const count = teamBase?.members.length ?? 0
         if (count === 0) return
-        teamSelected = Math.min(count - 1, Math.max(0, teamSelected + delta))
+        // Rows are [main, ...members]: the selection spans 0..count.
+        teamSelected = Math.min(count, Math.max(0, teamSelected + delta))
         scheduleRender(true)
         return
       }
       if (panelSelected === undefined) return
+      // ↑ at the main row leaves the panel, mirroring the team panel and the
+      // ↓ gesture that entered it.
+      if (delta < 0 && panelSelected === 0) {
+        panelSelected = undefined
+        panelNav = false
+        scheduleRender(true)
+        return
+      }
       panelSelected = Math.min(rosterRows().length, Math.max(0, panelSelected + delta))
       scheduleRender(true)
     },
     onPanelEnter: () => {
       if (exiting) return
       if (teamSelected !== undefined) {
-        // Keep teamSelected while the transcript is open, so Esc back returns
-        // to the team panel with the same member still selected.
-        const member = teamBase?.members[teamSelected]
+        if (teamSelected === 0) {
+          // The lead row is the way home: close any open child and return to
+          // the main view — but keep the cursor on the lead row until Esc
+          // dismisses it, so the arrows can re-engage the panel at once.
+          panelNav = false
+          openChild = undefined
+          scheduleRender(true)
+          return
+        }
+        // Opening a member keeps navigation active: the panel keeps the keys,
+        // so ↑↓ walks the roster and Enter switches transcripts without ever
+        // leaving it; one Esc drops into the opened member's editor. Setting
+        // the flag unconditionally also covers entering a member from the
+        // retained-cursor state left by Enter on the lead row — without it the
+        // ❯ would stay on the row while the caret jumped into the editor.
+        const member = teamBase?.members[teamSelected - 1]
         if (member !== undefined) openChild = member.id
+        panelNav = true
         scheduleRender(true)
         return
       }
       if (panelSelected === undefined) return
       if (panelSelected === 0) {
-        panelSelected = undefined
+        // The main row is the way home: close any open child and return to
+        // the main view — but keep the cursor on the main row until Esc
+        // dismisses it, so the arrows can re-engage the panel at once.
+        panelNav = false
+        openChild = undefined
         scheduleRender(true)
         return
       }
       const row = rosterRows()[panelSelected - 1]
-      panelSelected = undefined
+      // Keep the selection and the navigation: the same walk-the-roster
+      // semantics as the team panel, re-engaged unconditionally so entering a
+      // child from the retained-cursor state cannot split the ❯ and the caret.
       if (row !== undefined) openChild = row.childId
+      panelNav = true
       scheduleRender(true)
     },
     onPanelBack: () => {
       if (exiting) return
-      if (openChild !== undefined) openChild = undefined
-      else if (teamSelected !== undefined) teamSelected = undefined
-      else panelSelected = undefined
+      // One level per press: panel navigation → the opened child's editor →
+      // the input bar. Dropping into the editor ends the browsing session and
+      // takes the ❯ with it; the next Esc closes the child. A lone Esc on a
+      // retained cursor (e.g. after Enter on the main row) simply dismisses it.
+      if (openChild !== undefined && panelNav) {
+        panelNav = false
+        panelSelected = undefined
+        teamSelected = undefined
+      } else if (openChild !== undefined) {
+        openChild = undefined
+        panelSelected = undefined
+        teamSelected = undefined
+        panelNav = false
+      } else {
+        panelSelected = undefined
+        teamSelected = undefined
+        panelNav = false
+      }
       scheduleRender(true)
     },
     onExit: () => {
