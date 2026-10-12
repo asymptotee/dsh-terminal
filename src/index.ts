@@ -22,7 +22,7 @@ import { createFrameState, foldAssistantStreamChunk, foldEvent, readableFailureM
 import type { FoldDeps, Frame, FrameState } from './frames.ts'
 import { teamToolPresentation } from './team-present.ts'
 import { createInkRenderer, foldInvocationLine } from './renderer.tsx'
-import type { ApprovalChoice, CommandInfo, Overlay, RenderView, SubagentRow, TeamPanelInfo, TeamTaskRow, TuiRenderer } from './renderer.tsx'
+import type { ApprovalChoice, CommandInfo, Overlay, RenderView, SubagentRow, TeamPanelInfo, TeamTaskRow, TuiRenderer, WorkflowMemberRow, WorkflowMemberStatus, WorkflowPanelInfo, WorkflowPhaseGroup, WorkflowRunRow, WorkflowRunStatus } from './renderer.tsx'
 
 // Re-exported so driver suites import the renderer contract without reaching
 // the ink view's .tsx module directly (the host aggregate compiles specs).
@@ -119,6 +119,33 @@ export async function flushWithTimeout(
   } finally {
     clearTimeout(timeout)
   }
+}
+
+/** One workflow member folded from a `tool-workflow/agent-start` event plus
+ *  the outcome its paired `agent-end` carries. */
+interface WorkflowMemberState {
+  /** The agent()'s 1-based sequence within the run; a failed start consumes
+   *  the number without emitting events, so gaps are normal. */
+  seq: number
+  label: string
+  /** The exact phase string; undefined when the agent() call declared none. */
+  phase: string | undefined
+  childId: string
+  outcome: 'completed' | 'failed' | 'cancelled' | undefined
+}
+
+/** One durable workflow run folded from the four `tool-workflow/*` events. */
+interface WorkflowRunState {
+  /** The branded WorkflowRunId keys the map fine as a plain string. */
+  id: string
+  name: string
+  stopReason: 'completed' | 'cancelled' | 'error' | undefined
+  /** True once any event for this run crossed the live bus (post-replay); a
+   *  replayed run without a run-end is 'interrupted' unless live events prove
+   *  it is still running. */
+  liveSeen: boolean
+  /** Insertion order = seq order; keyed by seq for O(1) agent-end pairing. */
+  members: Map<number, WorkflowMemberState>
 }
 
 /** One unfinished direct subagent tracked for the panel below the status bar. */
@@ -222,6 +249,14 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
   // captured at the same point as the label; it decides whether the child's
   // transcript view offers an input box (continuation prompts).
   const childModes = new Map<string, string>()
+  // Durable workflow runs folded from the four `tool-workflow/*` session
+  // events (the recorder writes them into this session for top-level runs),
+  // rebuilt by the replay on resume and advanced live on the session bus.
+  const workflowRuns = new Map<string, WorkflowRunState>()
+  /** Every workflow member child id ever seen; add-only, so the roster and
+   *  the panelTick reap never touch them — the panel's Enter must keep
+   *  working for a member transcript. */
+  const workflowChildIds = new Set<string>()
   // Child session id → the error detail of its last failed turn, so the child's
   // settlement notice can show the concrete cause instead of just "failed".
   // Cleared by any later non-error turn, so a child that recovered shows none.
@@ -333,6 +368,8 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
   let panelSelected: number | undefined
   /** The selected team-member row in the team panel; undefined keeps focus elsewhere. */
   let teamSelected: number | undefined
+  /** The selected workflow row (0 = main); undefined keeps focus elsewhere. */
+  let workflowSelected: number | undefined
   let openChild: string | undefined
   // The panels own the keys while a child transcript is open (↓ dropped into
   // navigation from the child view); without it a retained selection is only
@@ -358,7 +395,9 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
   function rosterRows(): SubagentRow[] {
     const teamMemberIds = new Set(teamBase?.members.map(member => member.id) ?? [])
     return [...children.entries()]
-      .filter(([childId]) => !teamMemberIds.has(childId))
+      // Teammates render (and navigate) in the team panel and workflow members
+      // in the workflow panel; listing either here too would duplicate rows.
+      .filter(([childId]) => !teamMemberIds.has(childId) && !workflowChildIds.has(childId))
       .map(([childId, entry]) => {
         const activity = childActivity(entry.state)
         return {
@@ -370,6 +409,63 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
           fading: entry.fading,
         }
       })
+  }
+
+  /**
+   * Fold one durable `tool-workflow/*` event into the run map — the same model
+   * as the web client's workflow-run definition: members pair by seq, orphan
+   * agent-ends (a failed start consumed the seq without emitting events) and
+   * events for unknown runs are ignored, and a run without a run-end derives
+   * 'interrupted' unless a live event proves it is still running. `live`
+   * distinguishes the replay loop from the session bus.
+   */
+  const trackWorkflow = (event: SessionEvent, live: boolean): void => {
+    switch (event.type) {
+      case 'tool-workflow/run-start': {
+        const run: WorkflowRunState = {
+          id: event.data.runId,
+          name: event.data.name,
+          stopReason: undefined,
+          liveSeen: live,
+          members: new Map(),
+        }
+        workflowRuns.set(run.id, run)
+        return
+      }
+      case 'tool-workflow/agent-start': {
+        const run = workflowRuns.get(event.data.runId)
+        if (run === undefined) return
+        if (live) run.liveSeen = true
+        const { seq, label, phase, childId } = event.data
+        run.members.set(seq, { seq, label, phase, childId, outcome: undefined })
+        workflowChildIds.add(childId)
+        // Label backfill: a workflow child's descriptor carries no label, so
+        // the agent-start label is the child's display identity — for the
+        // fold's notices, a later foldChildEvent entry, and an entry that
+        // already exists (either arrival order works).
+        childLabels.set(childId, label)
+        const entry = children.get(childId)
+        if (entry !== undefined) entry.label = label
+        return
+      }
+      case 'tool-workflow/agent-end': {
+        const run = workflowRuns.get(event.data.runId)
+        if (run === undefined) return
+        if (live) run.liveSeen = true
+        const member = run.members.get(event.data.seq)
+        if (member === undefined) return
+        member.outcome = event.data.outcome
+        return
+      }
+      case 'tool-workflow/run-end': {
+        const run = workflowRuns.get(event.data.runId)
+        if (run === undefined) return
+        run.stopReason = event.data.stopReason
+        return
+      }
+      default:
+        return
+    }
   }
 
   /**
@@ -430,6 +526,72 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
     }
   }
 
+  /** Collision-free phase-group key preserving the absent-vs-empty identity
+   *  (the web client's workflowPhaseKey). */
+  function workflowPhaseKey(phase: string | undefined): string {
+    return phase === undefined ? 'missing' : `value:${phase.length}:${phase}`
+  }
+
+  /**
+   * Project the folded runs into the panel contract. The display order — runs
+   * in insertion order, phases in first-appearance order, members in seq
+   * order — is defined here alone: the renderer draws exactly this nesting and
+   * the navigation handlers map indices onto the same flat order, so the two
+   * can never drift.
+   */
+  function workflowPanel(): WorkflowPanelInfo | undefined {
+    if (workflowRuns.size === 0) return undefined
+    let memberCount = 0
+    const runs: WorkflowRunRow[] = []
+    for (const run of workflowRuns.values()) {
+      const status: WorkflowRunStatus = run.stopReason !== undefined
+        ? run.stopReason === 'completed' ? 'completed'
+          : run.stopReason === 'cancelled' ? 'cancelled'
+          : 'failed'
+        : run.liveSeen ? 'running' : 'interrupted'
+      const groups: { key: string; phase: string | undefined; members: WorkflowMemberRow[] }[] = []
+      const groupIndex = new Map<string, number>()
+      for (const member of run.members.values()) {
+        const key = workflowPhaseKey(member.phase)
+        let index = groupIndex.get(key)
+        if (index === undefined) {
+          index = groups.length
+          groupIndex.set(key, index)
+          groups.push({ key, phase: member.phase, members: [] })
+        }
+        // Live runtime (activity/elapsed/tokens) only while the member's agent
+        // is resident — the teamPanel() rule, so settled rows show no clock.
+        const entry = agents?.get(SessionId(member.childId)) === undefined ? undefined : children.get(member.childId)
+        const activity = entry === undefined ? undefined : childActivity(entry.state)
+        const memberStatus: WorkflowMemberStatus = member.outcome !== undefined
+          ? member.outcome
+          : status === 'interrupted' ? 'interrupted' : 'running'
+        groups[index]!.members.push({
+          seq: member.seq,
+          // The engine truncates labels but a script may still pass an empty
+          // one; fall back so the row is never blank.
+          label: member.label === '' ? `agent #${member.seq}` : member.label,
+          childId: member.childId,
+          status: memberStatus,
+          ...activity === undefined ? {} : { activity },
+          ...entry === undefined ? {} : { startedAt: entry.startedAt, inputTokens: entry.inputTokens },
+        })
+        memberCount += 1
+      }
+      runs.push({
+        id: run.id,
+        name: run.name,
+        status,
+        phases: groups.map((group): WorkflowPhaseGroup => ({
+          key: group.key,
+          ...group.phase === undefined ? {} : { phase: group.phase },
+          members: group.members,
+        })),
+      })
+    }
+    return { runs, memberCount }
+  }
+
   // The input bar's slash menu: the registry's discovery descriptors mapped to
   // the renderer's CommandInfo shape. Recomputed per render so commands
   // registered after startup (late plugins) show up; list() is a small sorted
@@ -461,6 +623,12 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
       next.team = team
       // Rows are [main, ...members]: the selection clamps to the member count.
       if (teamSelected !== undefined) next.teamSelected = Math.min(teamSelected, Math.max(0, team.members.length))
+    }
+    const workflow = workflowPanel()
+    if (workflow !== undefined) {
+      next.workflow = workflow
+      // Members only (no main row): the 1-based selection clamps to the count.
+      if (workflowSelected !== undefined) next.workflowSelected = Math.min(workflowSelected, workflow.memberCount)
     }
     if (openChild !== undefined) {
       const opened = children.get(openChild)
@@ -585,6 +753,7 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
   // publishes the fully replayed state at once.
   for (const event of agent.session.snapshotEvents()) {
     trackUsage(event)
+    trackWorkflow(event, false)
     state = foldEvent(state, event, deps).state
   }
 
@@ -634,6 +803,9 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
     // A team event moves the authoritative agentTeam projection, so re-read it
     // before the render below to keep the team panel current.
     if ((event.type as string).startsWith('team/')) refreshTeam()
+    // The four durable workflow-record events fold into the run map; the
+    // adopt below renders the updated panel.
+    if ((event.type as string).startsWith('tool-workflow/')) trackWorkflow(event, true)
     // A message committed while a step was in flight rendered a local steering
     // echo; now that its durable user/message frame folds in below, drop the
     // local copy so the message does not appear twice.
@@ -693,9 +865,10 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
     const now = Date.now()
     const teamMemberIds = new Set(teamBase?.members.map(member => member.id) ?? [])
     for (const [childId, entry] of children) {
-      // Team members keep their transcript for the team panel's Enter-to-open,
-      // so they are never reaped; other children fade once their agent settles.
-      if (teamMemberIds.has(childId)) continue
+      // Team members and workflow members keep their transcript for their
+      // panel's Enter-to-open, so they are never reaped; other children fade
+      // once their agent settles.
+      if (teamMemberIds.has(childId) || workflowChildIds.has(childId)) continue
       if (!entry.fading && entry.state.frames.length > 0 && agents.get(SessionId(childId)) === undefined) {
         entry.fading = true
         entry.fadeAt = now + SUBAGENT_FADE_MS
@@ -840,17 +1013,26 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
     },
     onPanelOpen: () => {
       if (exiting) return
-      // The team panel owns navigation while a team exists (its members are the
-      // interesting rows); otherwise the subagent panel takes over for any
-      // non-team children. Enter from either opens the selected transcript.
-      // An existing selection is kept, so dropping into navigation from an
-      // open child starts on that child's own row.
+      // Navigation priority: team > workflow > subagent roster; Enter from any
+      // opens the selected transcript. An existing selection is kept, so
+      // dropping into navigation from an open child starts on that child's own
+      // row. The workflow branch needs at least one member — a run that only
+      // just started (no agent() yet) has no row worth cursoring.
+      const workflow = workflowPanel()
       if (teamBase !== undefined && teamBase.members.length > 0) {
         if (teamSelected === undefined) teamSelected = 0
         panelSelected = undefined
+        workflowSelected = undefined
+      } else if (workflow !== undefined && workflow.memberCount > 0) {
+        // Members only (no main row): the cursor starts on the first member;
+        // Esc from the child view is the way back to the main view.
+        if (workflowSelected === undefined) workflowSelected = 1
+        panelSelected = undefined
+        teamSelected = undefined
       } else if (rosterRows().length > 0) {
         if (panelSelected === undefined) panelSelected = 0
         teamSelected = undefined
+        workflowSelected = undefined
       } else {
         return
       }
@@ -859,10 +1041,16 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
     },
     onPanelMove: (delta) => {
       if (exiting) return
+      // A read-only child view has no editor to hand the keys to, so ↑ past
+      // the first row stays put there instead of exiting navigation onto a
+      // surface that cannot take input; Esc is the way out.
+      const exitUpBlocked = openChild !== undefined
+        && children.get(openChild)?.continuable !== true
       if (teamSelected !== undefined) {
         // ↑ at the main row leaves the panel back to where ↓ found it (the
         // input bar or the open child's editor), mirroring the entry gesture.
         if (delta < 0 && teamSelected === 0) {
+          if (exitUpBlocked) return
           teamSelected = undefined
           panelNav = false
           scheduleRender(true)
@@ -875,10 +1063,28 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
         scheduleRender(true)
         return
       }
+      if (workflowSelected !== undefined) {
+        // ↑ at the first member leaves the panel back to where ↓ found it,
+        // mirroring the entry gesture.
+        if (delta < 0 && workflowSelected === 1) {
+          if (exitUpBlocked) return
+          workflowSelected = undefined
+          panelNav = false
+          scheduleRender(true)
+          return
+        }
+        const count = workflowPanel()?.memberCount ?? 0
+        if (count === 0) return
+        // Members only (no main row): the selection spans 1..count.
+        workflowSelected = Math.min(count, Math.max(1, workflowSelected + delta))
+        scheduleRender(true)
+        return
+      }
       if (panelSelected === undefined) return
       // ↑ at the main row leaves the panel, mirroring the team panel and the
       // ↓ gesture that entered it.
       if (delta < 0 && panelSelected === 0) {
+        if (exitUpBlocked) return
         panelSelected = undefined
         panelNav = false
         scheduleRender(true)
@@ -911,6 +1117,19 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
         scheduleRender(true)
         return
       }
+      if (workflowSelected !== undefined) {
+        // The member maps through the driver's projection order — the same
+        // order the panel draws — so the index and the rows cannot drift.
+        // Returning to the main view is Esc's job, not Enter's.
+        const info = workflowPanel()
+        const member = info === undefined
+          ? undefined
+          : info.runs.flatMap(run => run.phases.flatMap(phase => phase.members))[workflowSelected - 1]
+        if (member !== undefined) openChild = member.childId
+        panelNav = true
+        scheduleRender(true)
+        return
+      }
       if (panelSelected === undefined) return
       if (panelSelected === 0) {
         // The main row is the way home: close any open child and return to
@@ -931,23 +1150,23 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
     },
     onPanelBack: () => {
       if (exiting) return
-      // One level per press: panel navigation → the opened child's editor →
-      // the input bar. Dropping into the editor ends the browsing session and
-      // takes the ❯ with it; the next Esc closes the child. A lone Esc on a
-      // retained cursor (e.g. after Enter on the main row) simply dismisses it.
-      if (openChild !== undefined && panelNav) {
+      const openedEntry = openChild === undefined ? undefined : children.get(openChild)
+      if (openChild !== undefined && panelNav && openedEntry?.continuable === true) {
+        // A continuable child keeps the two-step ladder: the first Esc drops
+        // into its editor (the browsing session ends, the ❯ goes with it),
+        // the second returns to the main input.
         panelNav = false
         panelSelected = undefined
         teamSelected = undefined
-      } else if (openChild !== undefined) {
-        openChild = undefined
-        panelSelected = undefined
-        teamSelected = undefined
-        panelNav = false
+        workflowSelected = undefined
       } else {
+        // A read-only child (or panel navigation with no child) lands on the
+        // main input in one press: the child closes and every cursor goes.
+        openChild = undefined
+        panelNav = false
         panelSelected = undefined
         teamSelected = undefined
-        panelNav = false
+        workflowSelected = undefined
       }
       scheduleRender(true)
     },

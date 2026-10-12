@@ -54,9 +54,9 @@ export interface InputHandlers {
   onPanelMove(delta: number): void
   /** Enter the selected panel row's view (the main row returns to the input bar). */
   onPanelEnter(): void
-  /** Return keyboard focus one level up: panel navigation to the opened
-   *  child, the opened child to the retained panel row. Entering the main
-   *  view is the panel's main row (Enter), never this. */
+  /** Step back: a continuable child's first Esc drops into its editor and
+   *  the next one reaches the main input; a read-only child (or plain panel
+   *  navigation) reaches the main input in one press. */
   onPanelBack(): void
   /** Send one human prompt to the opened continuable child; it steers into
    *  the child's nearest step boundary. */
@@ -156,6 +156,50 @@ export interface TeamPanelInfo {
   tasks: readonly TeamTaskRow[]
 }
 
+/** The display status of one workflow run or member (the web client's vocabulary). */
+export type WorkflowRunStatus = 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted'
+/** The display status of one workflow member row. */
+export type WorkflowMemberStatus = WorkflowRunStatus
+
+/** One workflow member row: one agent() call of the orchestration script. */
+export interface WorkflowMemberRow {
+  /** The agent()'s 1-based sequence within the run (a failed start can skip it). */
+  seq: number
+  label: string
+  /** The member's child session id; Enter opens this transcript. */
+  childId: string
+  status: WorkflowMemberStatus
+  /** The latest visible activity from the live child fold; absent while not resident. */
+  activity?: string
+  /** When the member's child run began; absent while it is not a live child. */
+  startedAt?: number
+  /** The member's reported input tokens; absent while it is not a live child. */
+  inputTokens?: number
+}
+
+/** Members sharing one phase identity; an absent `phase` is the unphased group. */
+export interface WorkflowPhaseGroup {
+  /** Collision-free key (`missing` / `value:len:phase`). */
+  key: string
+  phase?: string
+  members: readonly WorkflowMemberRow[]
+}
+
+/** One durable workflow run, folded from the four `tool-workflow/*` events. */
+export interface WorkflowRunRow {
+  id: string
+  name: string
+  status: WorkflowRunStatus
+  phases: readonly WorkflowPhaseGroup[]
+}
+
+/** The workflow panel contract: runs in display order plus the navigation bound. */
+export interface WorkflowPanelInfo {
+  runs: readonly WorkflowRunRow[]
+  /** Total member rows across every run; workflowSelected clamps to it (0 = main). */
+  memberCount: number
+}
+
 /** One registered slash command for the input bar's completion menu. */
 export interface CommandInfo {
   /** Command name without the leading slash. */
@@ -183,6 +227,10 @@ export interface RenderView {
   team?: TeamPanelInfo
   /** The selected team-member row; absent means the team panel is not focused. */
   teamSelected?: number
+  /** Durable workflow runs; absent hides the workflow panel. */
+  workflow?: WorkflowPanelInfo
+  /** The selected workflow row (0 = the main row); absent means the workflow panel is not focused. */
+  workflowSelected?: number
   /** Messages submitted while a step was in flight; shown immediately as steering until their durable echo lands. */
   pendingUser?: readonly PendingUserEcho[]
 }
@@ -343,6 +391,23 @@ export function TuiApp({
     const timer = setTimeout(() => setTeamBoardHidden(true), completedLingerMs ?? COMPLETED_BOARD_LINGER_MS)
     return () => clearTimeout(timer)
   }, [teamAllDone, completedLingerMs])
+  // The workflow panel hides the same way once every run settles; a new run
+  // arriving flips allSettled and cancels the hide automatically. A held
+  // cursor suppresses the hide so the arrows never drive an invisible panel.
+  const workflowRuns = view?.workflow?.runs
+  const workflowAllSettled = workflowRuns !== undefined && workflowRuns.length > 0
+    && workflowRuns.every(run => run.status !== 'running')
+  const [workflowHidden, setWorkflowHidden] = useState(false)
+  React.useEffect(() => {
+    if (!workflowAllSettled) {
+      setWorkflowHidden(false)
+      return
+    }
+    const timer = setTimeout(() => setWorkflowHidden(true), completedLingerMs ?? COMPLETED_BOARD_LINGER_MS)
+    return () => clearTimeout(timer)
+  }, [workflowAllSettled, completedLingerMs])
+  const workflowVisible = view?.workflow !== undefined
+    && !(workflowHidden && view?.workflowSelected === undefined)
   const { columns, rows: termRows } = useTerminalSize()
   const rows = viewportRows ?? termRows
   const frames = state.frames
@@ -360,6 +425,7 @@ export function TuiApp({
   // the keys (panelNav); otherwise a retained selection is just the row
   // highlight and the child transcript keeps the keyboard.
   const selectionActive = view?.subagentSelected !== undefined || view?.teamSelected !== undefined
+    || view?.workflowSelected !== undefined
   const focusMode: 'input' | 'panel' | 'child' = selectionActive && (opened === undefined || view?.panelNav === true)
     ? 'panel'
     : opened !== undefined
@@ -514,12 +580,19 @@ export function TuiApp({
           history={history}
           focusMode={focusMode}
           childPromptable={opened?.continuable === true}
+          {...(opened !== undefined && opened.continuable !== true
+            ? {
+              childReadOnly: true,
+              childReadOnlyNote: `subagent: ${opened.label} · ${READ_ONLY_CHILD_NOTE}`,
+            }
+            : {})}
           {...(opened?.continuable === true
             ? { childPlaceholder: `subagent: ${opened.label} (Enter 发送 · Esc 返回)` }
             : {})}
-          panelAvailable={subagents.length > 0 || (view?.team?.members.length ?? 0) > 0}
+          panelAvailable={subagents.length > 0 || (view?.team?.members.length ?? 0) > 0 || workflowVisible}
           commands={view?.commands ?? []}
           {...(view?.status === undefined ? {} : { status: view.status })}
+          {...(view?.workflowSelected !== undefined ? { statusHint: '↑↓ 选择 · Enter 打开 · Esc 返回' } : {})}
         />
         {approvalOverlay !== undefined ? (
           /* The question owns the screen bottom: the bar above rendered
@@ -527,8 +600,20 @@ export function TuiApp({
           <ApprovalPanel key={approvalKey(approvalOverlay)} overlay={approvalOverlay} selected={approvalIndex} width={columns} />
         ) : (
           <>
-            {/* The roster and team panels stay up in the child view too: the
-                main agent's world keeps moving while a transcript is open. */}
+            {/* The read-only child's identity now rides its own input box's
+                dim note at the screen bottom — no separate header row. */}
+            {/* The workflow, roster, and team panels stay up in the child view
+                too: the main agent's world keeps moving while a transcript is
+                open. The workflow run leads — it is the most specific activity. */}
+            {workflowVisible
+              ? (
+                <WorkflowPanel
+                  info={view!.workflow!}
+                  selected={view?.workflowSelected}
+                  {...(opened === undefined ? {} : { openChildId: opened.childId })}
+                />
+              )
+              : null}
             {subagents.length > 0
               ? (
                 <SubagentPanel
@@ -548,21 +633,6 @@ export function TuiApp({
                 />
               )
               : null}
-            {opened !== undefined && opened.continuable !== true ? (
-              /* The read-only child view's identity header pins at the very
-                 bottom: it is standing context (which subagent, how to
-                 return), not transcript content — inside the window it would
-                 be clipped at the live bottom and covered by the scroll
-                 indicator at the top. */
-              <>
-                <Text color="#a5d8ff">{'─'.repeat(columns)}</Text>
-                <Box justifyContent="center">
-                  <Text>
-                    subagent: <Text bold>{opened.label}</Text> <Text dimColor>(Esc 返回)</Text>
-                  </Text>
-                </Box>
-              </>
-            ) : null}
           </>
         )}
       </Box>
@@ -772,6 +842,195 @@ function TeamPanel({
   )
 }
 
+/** The status glyph of one workflow run or member — the task board's
+ *  vocabulary: ◼ light blue while in progress (static, and a square so it
+ *  never confuses with the ●/◯ open-marker column), ✔/✘/⊘ once settled. */
+function workflowStatusGlyph(status: WorkflowRunStatus): React.JSX.Element {
+  switch (status) {
+    case 'running': return <Text color="#a5d8ff">◼</Text>
+    case 'completed': return <Text color="green">✔</Text>
+    case 'failed': return <Text color="red">✘</Text>
+    case 'cancelled': return <Text dimColor>⊘</Text>
+    case 'interrupted': return <Text color="#ffd43b">⊘</Text>
+  }
+}
+
+/**
+ * The durable workflow runs as a run → phase → member tree, folded by the
+ * driver from the four `tool-workflow/*` session events (the same source the
+ * web client's run node consumes). Navigation walks the member rows (1-based,
+ * in the driver's projection order): Enter opens the selected transcript, ↑
+ * past the first row leaves the panel, and Esc from the child view is the way
+ * back to the main view. Member rows beyond the cap window around the
+ * selection (head-anchored while unselected — reading order, elision hides
+ * the tail); run headers pin above the window and a phase header stays while
+ * any of its members is visible.
+ */
+function WorkflowPanel({
+  info,
+  selected,
+  openChildId,
+}: {
+  info: WorkflowPanelInfo
+  /** The ❯ cursor's member index (1-based); undefined keeps focus elsewhere. */
+  selected: number | undefined
+  /** The child transcript currently open; its member row wears the ●. */
+  openChildId?: string
+}): React.JSX.Element {
+  const width = useTerminalWidth()
+  // Per-run content rows with global member indices: the renderer draws
+  // exactly the driver's projection order, so the selection index maps 1:1.
+  type FlatRow =
+    | { kind: 'phase'; group: WorkflowPhaseGroup; firstMember: number; lastMember: number }
+    | { kind: 'member'; member: WorkflowMemberRow; memberIndex: number }
+  // Only colliding run names carry a number: the count of this name's
+  // occurrences in projection order (the first duplicate is #1). The model
+  // picks the name, so collisions happen, but a unique name stays clean.
+  // Runs are never dropped from the fold, so the numbers are session-stable.
+  const nameTotals = new Map<string, number>()
+  for (const run of info.runs) nameTotals.set(run.name, (nameTotals.get(run.name) ?? 0) + 1)
+  const nameSeen = new Map<string, number>()
+  const blocks: { run: WorkflowRunRow; rows: FlatRow[]; memberCount: number; ordinal: number; numbered: boolean }[] = []
+  let memberIndex = 0
+  for (const run of info.runs) {
+    const rows: FlatRow[] = []
+    let count = 0
+    for (const group of run.phases) {
+      const firstMember = memberIndex
+      if (group.phase !== undefined) {
+        rows.push({ kind: 'phase', group, firstMember, lastMember: firstMember + group.members.length - 1 })
+      }
+      for (const member of group.members) {
+        rows.push({ kind: 'member', member, memberIndex: memberIndex++ })
+        count += 1
+      }
+    }
+    const seen = (nameSeen.get(run.name) ?? 0) + 1
+    nameSeen.set(run.name, seen)
+    blocks.push({ run, rows, memberCount: count, ordinal: seen, numbered: (nameTotals.get(run.name) ?? 0) > 1 })
+  }
+  // Only member rows window; a phase header stays visible as long as any of
+  // its members is in the window, so the tree never shows members without
+  // their phase (the pinned headers may push the band a row or two past the
+  // cap in phase-heavy windows — accepted, the team panel overflows alike).
+  const memberTotal = memberIndex
+  const selectedRow = selected === undefined || selected <= 0 ? -1 : selected - 1
+  const windowRows = Math.max(1, PANEL_MAX_ROWS - info.runs.length)
+  // Unselected (reading from the top): head-anchored, the oldest members lead
+  // and the trailing hint elides the tail. Selected: centered on the cursor.
+  const start = memberTotal <= windowRows
+    ? 0
+    : selectedRow < 0
+      ? 0
+      : Math.min(Math.max(0, selectedRow - Math.floor(windowRows / 2)), Math.max(0, memberTotal - windowRows))
+  const end = Math.min(start + windowRows, memberTotal) - 1
+  const hiddenBefore = start
+  const hiddenAfter = memberTotal - 1 - end
+  // Per-run visible rows: each run keeps its header directly above its own
+  // content (never stacked above another run's phases). A run whose members
+  // are entirely elided drops its header too — the same sticky rule as phase
+  // headers — while a memberless run (just started) keeps its header. The
+  // leading hint rides with the first visible member, the trailing hint
+  // closes the last visible block; both align with the member marker column.
+  type VisibleRow = FlatRow | { kind: 'hint'; count: number; key: string }
+  const visibleBlocks: { run: WorkflowRunRow; memberCount: number; ordinal: number; numbered: boolean; rows: VisibleRow[] }[] = []
+  let beforePlaced = false
+  for (const block of blocks) {
+    const rows: VisibleRow[] = []
+    let sawMember = false
+    for (const row of block.rows) {
+      if (row.kind === 'member') {
+        if (row.memberIndex < start || row.memberIndex > end) continue
+        if (hiddenBefore > 0 && !beforePlaced) {
+          rows.push({ kind: 'hint', count: hiddenBefore, key: 'hint-before' })
+          beforePlaced = true
+        }
+        rows.push(row)
+        sawMember = true
+      } else if (row.firstMember <= end && row.lastMember >= start) {
+        rows.push(row)
+      }
+    }
+    if (!sawMember && block.memberCount > 0) continue
+    visibleBlocks.push({ run: block.run, memberCount: block.memberCount, ordinal: block.ordinal, numbered: block.numbered, rows })
+  }
+  if (hiddenAfter > 0 && visibleBlocks.length > 0) {
+    visibleBlocks[visibleBlocks.length - 1]!.rows.push({ kind: 'hint', count: hiddenAfter, key: 'hint-after' })
+  }
+  return (
+    <Box flexDirection="column" marginBottom={1}>
+      {visibleBlocks.map(block => (
+        <Box key={block.run.id} flexDirection="column">
+          {/* The run header leads its own block; the two-column indent aligns
+              it under the other panels' marker column. */}
+          <Box>
+            <Text>  </Text>
+            <Text>
+              Workflow
+              {block.numbered ? <Text> #{block.ordinal}</Text> : null}
+              {block.run.name ? <Text dimColor> ({block.run.name})</Text> : null}
+              <Text dimColor> · {block.memberCount} 成员</Text>
+            </Text>
+          </Box>
+          {block.rows.map(row => {
+            if (row.kind === 'hint') {
+              // The eight-space lead aligns the hint with the member marker column.
+              return <Text key={row.key} dimColor>        … {row.count} more</Text>
+            }
+            if (row.kind === 'phase') {
+              return (
+                <Box key={row.group.key}>
+                  <Text>    {row.group.phase} · {row.group.members.length}</Text>
+                </Box>
+              )
+            }
+            const member = row.member
+            const isCursor = selected !== undefined && selected > 0 && row.memberIndex === selected - 1
+            const isOpen = openChildId === member.childId
+            const emphasized = isCursor || isOpen
+            const marker = isOpen ? '●' : '◯'
+            // Clamp the label so a long script-provided label cannot wrap the
+            // row past one physical line.
+            const label = truncateToWidth(member.label, Math.max(4, Math.floor(width * 0.4)))
+            const elapsed = member.startedAt !== undefined
+              ? `${formatElapsed(Date.now() - member.startedAt)} · ↓ ${formatTokenCount(member.inputTokens ?? 0)} tokens`
+              : ''
+            // The glyph column and the nesting indent cost eight cells over
+            // the team row's budget.
+            const budget = Math.min(width - stringWidth(label) - stringWidth(elapsed) - 15, Math.floor(width * PANEL_ACTIVITY_RATIO))
+            const activity = member.activity !== undefined
+              ? truncateToWidth(member.activity, Math.max(0, budget))
+              : undefined
+            return (
+              <Box key={member.childId}>
+                {/* The six-column indent steps members under their phase
+                    header: run header at 2 (aligned with the other panels'
+                    marker column), phase title at 4, member cursor at 6 —
+                    the run → phase → member hierarchy reads as a tree. */}
+                <Text>      </Text>
+                <Text>{isCursor ? <Text>❯</Text> : ' '}</Text>
+                <Text> </Text>
+                <Text>{emphasized ? <Text>{marker}</Text> : <Text dimColor>{marker}</Text>}</Text>
+                <Text> </Text>
+                {workflowStatusGlyph(member.status)}
+                <Text> </Text>
+                {emphasized ? <Text bold={isCursor}>{label}</Text> : <Text dimColor>{label}</Text>}
+                {activity !== undefined && activity !== ''
+                  ? emphasized ? <Text>  {activity}</Text> : <Text dimColor>  {activity}</Text>
+                  : null}
+                <Box flexGrow={1} />
+                {elapsed !== ''
+                  ? emphasized ? <Text>{elapsed}</Text> : <Text dimColor>{elapsed}</Text>
+                  : null}
+              </Box>
+            )
+          })}
+        </Box>
+      ))}
+    </Box>
+  )
+}
+
 /** A wall-clock duration as `45s`, `1m 26s`, or `2h 5m`. */
 function formatElapsed(ms: number): string {
   const seconds = Math.max(0, Math.round(ms / 1000))
@@ -858,8 +1117,11 @@ function ApprovalPanel({
 /** The fixed footer: model, session, working state, context usage, and scrollback hint. */
 function StatusBar({
   status,
+  hint,
 }: {
   status: StatusInfo | undefined
+  /** Panel key hints trailing the permission row (workflow navigation). */
+  hint?: string
 }): React.JSX.Element {
   if (status === undefined) return <></>
   return (
@@ -876,7 +1138,15 @@ function StatusBar({
           </Text>
         </Box>
       </Box>
-      {status.mode !== undefined ? <Text dimColor>{status.mode}</Text> : null}
+      {status.mode !== undefined || hint !== undefined
+        ? (
+          <Text dimColor>
+            {status.mode ?? ''}
+            {status.mode !== undefined && hint !== undefined ? ' · ' : ''}
+            {hint !== undefined ? `(${hint})` : ''}
+          </Text>
+        )
+        : null}
     </Box>
   )
 }
@@ -1478,10 +1748,13 @@ export function InputBar({
   history = [],
   focusMode = 'input',
   childPromptable = false,
+  childReadOnly = false,
+  childReadOnlyNote,
   childPlaceholder,
   panelAvailable = false,
   commands = [],
   status,
+  statusHint,
 }: {
   handlers: InputHandlers
   approvalPending: boolean
@@ -1502,6 +1775,12 @@ export function InputBar({
   /** The opened child is continuable: the child view borrows the editor to
    *  send continuation prompts (Enter steers, Esc returns). */
   childPromptable?: boolean
+  /** A read-only child is open: the box draws with a dim note in place of
+   *  an editor (identity plus the reason it takes no keys). */
+  childReadOnly?: boolean
+  /** The read-only box's dim note; defaults to the generic note when the
+   *  caller has no child identity to fold in. */
+  childReadOnlyNote?: string
   /** Identity-and-keys placeholder shown dim inside the empty child editor. */
   childPlaceholder?: string
   /** Whether the subagent panel has rows, so `↓` from an empty editor can enter it. */
@@ -1510,6 +1789,9 @@ export function InputBar({
   commands?: readonly CommandInfo[]
   /** The footer facts; while the completion menu is open it takes this slot. */
   status?: StatusInfo
+  /** Panel key hints trailing the permission row of the footer (the workflow
+   *  panel's navigation keys, shown in the main and child views alike). */
+  statusHint?: string
 }): React.JSX.Element {
   // A ref mirror keeps the key handler's reads fresh even when several keys
   // land inside one render cycle (ink throttles re-renders).
@@ -1591,7 +1873,8 @@ export function InputBar({
       return
     }
     if (focusMode === 'child') {
-      // Esc always returns one level up.
+      // Esc steps back: one press from a read-only child, the second press
+      // from a continuable child's editor (the first lands there).
       if (key.escape) { handlers.onPanelBack(); return }
       // ↓ hands the keys to the panels — starting on the open child's own row
       // — so Enter switches to another transcript without leaving the child
@@ -1761,9 +2044,25 @@ export function InputBar({
   // ApprovalPanel takes its rows in the chrome band) while still owning the
   // question's keys through the handler above.
   if (approvalPending) return <Box />
-  // A read-only child (one-shot, or no descriptor mode known) keeps the bar
-  // invisible; a continuable child renders the ordinary editor below.
-  if (focusMode === 'child' && !childPromptable) return <Box />
+  // A read-only child (one-shot, or no descriptor mode known) takes no
+  // prompts; its box still draws — in the child view's light-blue chrome —
+  // with a dim note explaining the silence in place of a caret, and the
+  // footer keeps the session's standing facts.
+  if (childReadOnly) {
+    const readOnlyRule = <Text color="#a5d8ff">{'─'.repeat(width)}</Text>
+    return (
+      <Box flexDirection="column">
+        {readOnlyRule}
+        {/* Darker than the ordinary dim: the disabled gray tells the user
+            the box takes no input before they try typing into it. */}
+        <Text color="#696969">
+          ❯ {truncateToWidth(childReadOnlyNote ?? READ_ONLY_CHILD_NOTE, Math.max(0, width - 2))}
+        </Text>
+        {readOnlyRule}
+        <StatusBar status={status} {...(statusHint === undefined ? {} : { hint: statusHint })} />
+      </Box>
+    )
+  }
 
   // The continuable child's editor wears the light-blue tint of the child
   // view's chrome; the main input keeps the dim rules.
@@ -1813,10 +2112,13 @@ export function InputBar({
           made the input box visibly jump before settling). */}
       {menuOpen
         ? <CommandMenu items={menuMatches} selected={menuSelected} width={width} />
-        : <StatusBar status={status} />}
+        : <StatusBar status={status} {...(statusHint === undefined ? {} : { hint: statusHint })} />}
     </Box>
   )
 }
+
+/** The dim note a read-only child's box shows where the editor would be. */
+const READ_ONLY_CHILD_NOTE = '当前子代理不接受新消息'
 
 /** Rows the slash completion menu shows before windowing around the selection. */
 const MENU_MAX_ROWS = 8

@@ -20,5 +20,11 @@ import type {} from '@deepseek-ai/dsh-session-projection'
 // projection key and the `team/*` session event types, so the driver can read
 // the authoritative team state and recognize team events on the session bus.
 import type {} from '@deepseek-ai/dsh-experimental-agent-team'
+// Pulls in the durable workflow-record event merge (the four
+// `tool-workflow/*` session events) so the driver can fold workflow runs.
+// Must be the /types subpath: the package root re-exports no types and
+// instead merges JobKindMap into @deepseek-ai/dsh-jobs, a package this tree
+// does not carry.
+import type {} from '@deepseek-ai/dsh-tool-workflow/types'
 
 export {}
