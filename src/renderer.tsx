@@ -1125,7 +1125,10 @@ function StatusBar({
 }): React.JSX.Element {
   if (status === undefined) return <></>
   return (
-    <Box flexDirection="column" marginBottom={1}>
+    // The two-column lead aligns the footer under the panels' header column
+    // (the Workflow run header's indent); the right-aligned effort keeps its
+    // own right padding, so only the left edge moves.
+    <Box flexDirection="column" marginBottom={1} paddingLeft={2}>
       <Box flexDirection="row">
         <Text dimColor>
           {status.model} · {shortenCwd(status.cwd)}
