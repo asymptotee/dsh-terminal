@@ -491,7 +491,7 @@ export function TuiApp({
   const childWindowed = opened === undefined ? undefined : windowFrames(opened.state.frames)
   const activePlan = opened === undefined ? state.plan : opened.state.plan
   // The heartbeat follows the active transcript too: while a child transcript
-  // is on screen, the child's own turn clocks its Running… line.
+  // is on screen, the child's own turn clocks its Working… line.
   const activeTurn = opened === undefined ? state : opened.state
   const transcriptKey = opened === undefined ? 'main' : opened.childId
   // The view switch activates during render — React re-runs the component
@@ -1501,13 +1501,13 @@ function GoalPanel({ goal }: { goal: GoalPanelInfo }): React.JSX.Element {
 
 
 /** The step heartbeat: one label for the whole step — the model call and its tool executions. */
-/** Star glyphs cycled in order to animate the heartbeat marker: a smooth
- *  same-family twinkle (bloom out then back), not mixed star shapes. */
-const HEARTBEAT_FRAMES = ['✶', '✸', '✹', '✺', '✹', '✸']
-const HEARTBEAT_INTERVAL_MS = 120
+/** Braille-dot spinner cycled to animate the working marker: the terminal
+ *  world's canonical busy indicator, a clockwise dot sweep. */
+const HEARTBEAT_FRAMES = ['⠋', '⠙', '⠉', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+const HEARTBEAT_INTERVAL_MS = 80
 
 function HeartbeatLine({ startedAt, tokens }: { startedAt: number; tokens: number | undefined }): React.JSX.Element {
-  // Self-driven animation: cycle the star glyph on an interval so the heartbeat
+  // Self-driven animation: cycle the spinner frame on an interval so the heartbeat
   // pulses — and the elapsed clock ticks — even while no session event arrives.
   // The timer is unref'd so it never holds the event loop open (tests exit cleanly).
   const [tick, setTick] = useState(0)
@@ -1525,7 +1525,7 @@ function HeartbeatLine({ startedAt, tokens }: { startedAt: number; tokens: numbe
   return (
     <Box marginBottom={1}>
       <Text>
-        <Text color="#a5d8ff">{glyph} Running…</Text> <Text dimColor>({formatElapsed(Date.now() - startedAt)}{tokenNote})</Text>
+        <Text color="#a5d8ff">{glyph} Working…</Text> <Text dimColor>({formatElapsed(Date.now() - startedAt)}{tokenNote})</Text>
       </Text>
     </Box>
   )

@@ -612,14 +612,14 @@ describe('TuiApp rendering', () => {
     const working: FrameState = { ...state([]), turnStartedAt: Date.now() }
     const { lastFrame } = renderApp(<TuiApp state={working} handlers={noopHandlers()} />)
     const frame = lastFrame() ?? ''
-    expect(frame).toContain('✶ Running… (0s)')
-    expect(frame.indexOf('✶ Running…')).toBeLessThan(frame.indexOf('❯'))
+    expect(frame).toContain('⠋ Working… (0s)')
+    expect(frame.indexOf('Working…')).toBeLessThan(frame.indexOf('❯'))
   })
 
   it('shows the per-turn output token count in the heartbeat', () => {
     const working: FrameState = { ...state([]), turnStartedAt: Date.now(), turnTokens: 3400 }
     const { lastFrame } = renderApp(<TuiApp state={working} handlers={noopHandlers()} />)
-    expect(lastFrame()).toContain('✶ Running… (0s · ↓ 3.4k tokens)')
+    expect(lastFrame()).toContain('⠋ Working… (0s · ↓ 3.4k tokens)')
   })
 
   it('pins the heartbeat above the plan and keeps the label while a tool is pending', () => {
@@ -630,11 +630,11 @@ describe('TuiApp rendering', () => {
     }
     const { lastFrame } = renderApp(<TuiApp state={thinking} handlers={noopHandlers()} />)
     const frame = lastFrame() ?? ''
-    expect(frame.indexOf('✶ Running…')).toBeLessThan(frame.indexOf('Todos · 1'))
+    expect(frame.indexOf('Working…')).toBeLessThan(frame.indexOf('Todos · 1'))
     // A step covers the model call and its tool executions: the heartbeat
     // stays up — and keeps its single label — while a tool runs.
     const busy: FrameState = { ...thinking, pendingTools: new Map([['c1', 0]]) }
-    expect(renderApp(<TuiApp state={busy} handlers={noopHandlers()} />).lastFrame()).toContain('✶ Running…')
+    expect(renderApp(<TuiApp state={busy} handlers={noopHandlers()} />).lastFrame()).toContain('Working…')
   })
 
   it('renders a failed generic tool result bare, without the console fence', () => {
@@ -1536,7 +1536,7 @@ describe('subagent panel', () => {
     // stay visible while its transcript is open.
     expect(frame).toContain('grep(pattern)')
     expect(frame).toContain('Teammates · 1')
-    expect(frame).toContain('Running…')
+    expect(frame).toContain('Working…')
     // The read-only child keeps its identity note at the bottom box.
     expect(frame).toContain('subagent: 调研包结构')
   })
@@ -2403,7 +2403,7 @@ describe('goal strip', () => {
     const working: FrameState = { ...state([], plan), turnStartedAt: Date.now() }
     const { lastFrame } = renderApp(<TuiApp state={working} handlers={noopHandlers()} view={{ goal: goal() }} />)
     const frame = lastFrame() ?? ''
-    expect(frame.indexOf('✶ Running…')).toBeLessThan(frame.indexOf('Goal · ongoing'))
+    expect(frame.indexOf('Working…')).toBeLessThan(frame.indexOf('Goal · ongoing'))
     // The goal strip leads the pinned chrome, above the plan.
     expect(frame.indexOf('Goal · ongoing')).toBeLessThan(frame.indexOf('Todos · 1'))
     // No goal in the view: nothing renders.
