@@ -585,9 +585,11 @@ describe('TuiApp rendering', () => {
     ]
     const { lastFrame } = renderApp(<TuiApp state={state([], plan)} handlers={noopHandlers()} />)
     const frame = lastFrame() ?? ''
-    // The first line carries the `⎿` connector; continuations align at five columns.
-    expect(frame).toContain('  ⎿  ◼ task one')
-    expect(frame).toContain('     ◻ task two')
+    // The first line carries the `⎿` connector at absolute column two (the
+    // transcript's tool-output alignment); continuations align at column five.
+    const rows = frame.split('\n')
+    expect(rows.find(row => row.includes('task one'))?.startsWith('  ⎿  ')).toBe(true)
+    expect(rows.find(row => row.includes('task two'))?.startsWith('     ◻')).toBe(true)
     // The header is the label plus the item count, matching the sibling
     // panels' `Header · N` format; it carries no status dot.
     expect(frame).toContain('Todos · 2')
@@ -620,7 +622,7 @@ describe('TuiApp rendering', () => {
     expect(lastFrame()).toContain('✶ Running… (0s · ↓ 3.4k tokens)')
   })
 
-  it('pins the heartbeat below the plan and keeps the label while a tool is pending', () => {
+  it('pins the heartbeat above the plan and keeps the label while a tool is pending', () => {
     const plan = [{ content: 'task one', status: 'in_progress' as const }]
     const thinking: FrameState = {
       ...state([], plan),
@@ -628,7 +630,7 @@ describe('TuiApp rendering', () => {
     }
     const { lastFrame } = renderApp(<TuiApp state={thinking} handlers={noopHandlers()} />)
     const frame = lastFrame() ?? ''
-    expect(frame.indexOf('Todos · 1')).toBeLessThan(frame.indexOf('✶ Running…'))
+    expect(frame.indexOf('✶ Running…')).toBeLessThan(frame.indexOf('Todos · 1'))
     // A step covers the model call and its tool executions: the heartbeat
     // stays up — and keeps its single label — while a tool runs.
     const busy: FrameState = { ...thinking, pendingTools: new Map([['c1', 0]]) }
@@ -2396,14 +2398,14 @@ describe('goal strip', () => {
 
   it('renders below the heartbeat and hides while absent or under an approval', () => {
     const plan = [{ content: 'task one', status: 'in_progress' as const }]
-    // A live turn clocks the heartbeat; the goal strip sits directly below it,
-    // right above the input bar.
+    // A live turn clocks the heartbeat; the goal strip sits directly below
+    // it, above the plan.
     const working: FrameState = { ...state([], plan), turnStartedAt: Date.now() }
     const { lastFrame } = renderApp(<TuiApp state={working} handlers={noopHandlers()} view={{ goal: goal() }} />)
     const frame = lastFrame() ?? ''
     expect(frame.indexOf('✶ Running…')).toBeLessThan(frame.indexOf('Goal · ongoing'))
-    // The plan leads the pinned chrome, above the goal strip.
-    expect(frame.indexOf('Todos · 1')).toBeLessThan(frame.indexOf('Goal · ongoing'))
+    // The goal strip leads the pinned chrome, above the plan.
+    expect(frame.indexOf('Goal · ongoing')).toBeLessThan(frame.indexOf('Todos · 1'))
     // No goal in the view: nothing renders.
     const bare = renderApp(<TuiApp state={state([])} handlers={noopHandlers()} />)
     expect(bare.lastFrame() ?? '').not.toContain('Goal ·')

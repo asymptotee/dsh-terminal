@@ -596,20 +596,19 @@ export function TuiApp({
         {view?.overlay?.kind === 'notice'
           ? <Text color="red" key="notice">{view.overlay.text}</Text>
           : null}
-        {/* The standing plan stays pinned above the input bar in every view;
-            it follows the active transcript (main session or opened child). */}
-        {activePlan !== undefined ? <PlanPanel todos={activePlan} /> : null}
-        {/* The step heartbeat sits below the plan and above the input bar:
-            shown throughout a step — its tool executions included — while no
-            overlay waits on the user; it tracks the active transcript's turn. */}
+        {/* The step heartbeat leads the pinned chrome: shown throughout a
+            step — its tool executions included — while no overlay waits on
+            the user; it tracks the active transcript's turn. */}
         {view?.overlay === undefined && activeTurn.turnStartedAt !== undefined
           ? <HeartbeatLine startedAt={activeTurn.turnStartedAt} tokens={activeTurn.turnTokens} />
           : null}
-        {/* The standing goal strip sits below the heartbeat, right above the
-            input bar: it is the session-level objective the plan and panels
-            serve, and unlike the plan it follows the main session, never the
-            opened child. */}
+        {/* The standing goal strip sits directly below the heartbeat: it is
+            the session-level objective the plan and panels serve, and unlike
+            the plan it follows the main session, never the opened child. */}
         {goalVisible && view?.goal !== undefined ? <GoalPanel goal={view.goal} /> : null}
+        {/* The standing plan sits below the goal strip, above the input bar;
+            it follows the active transcript (main session or opened child). */}
+        {activePlan !== undefined ? <PlanPanel todos={activePlan} /> : null}
         {/* The input bar stays mounted in every focus mode — it owns the single
             stdin listener; a read-only child view routes only Esc back, while a
             continuable child borrows the editor for its own prompts. */}
@@ -1428,23 +1427,24 @@ function PlanPanel({ todos }: { todos: FrameState['plan'] & object }): React.JSX
   const visible = todos.slice(-PLAN_MAX_TODOS)
   return (
     // The two-column lead puts the Todos header on the panels' shared header
-    // column (Teammates / Tasks / Workflow / Goal); the `⎿` items shift with
-    // it, so the header→item gap is preserved.
+    // column (Teammates / Tasks / Workflow / Goal).
     <Box flexDirection="column" marginBottom={1} paddingLeft={2}>
       <Text>Todos · {todos.length}</Text>
-      {hidden > 0 ? <Text dimColor>  ⎿  … {hidden} earlier</Text> : null}
+      {hidden > 0 ? <Text dimColor>⎿  … {hidden} earlier</Text> : null}
       {visible.map((todo, index) => {
         const mark = todo.status === 'completed'
           ? <Text color="green">✔</Text>
           : todo.status === 'in_progress'
             ? <Text color="#a5d8ff">◼</Text>
             : <Text dimColor>◻</Text>
-        // The first line carries the `⎿` connector; continuations align under
-        // its text (`⎿` is one cell wide, so `  ⎿  ` is five display columns).
-        // The connector is dim like every other connector in the project; dim
-        // is scoped to its own Text so it does not mute the colored status
-        // markers, and the content text takes its own dim wrapper.
-        const prefix = index === 0 && hidden === 0 ? '  ⎿  ' : '     '
+        // The first line carries the `⎿` connector at column two —
+        // absolutely aligned with the transcript's tool output connectors
+        // (the panel's padding supplies the indent); continuations align
+        // under its text (`⎿  ` is three display columns). The connector is
+        // dim like every other connector in the project; dim is scoped to
+        // its own Text so it does not mute the colored status markers, and
+        // the content text takes its own dim wrapper.
+        const prefix = index === 0 && hidden === 0 ? '⎿  ' : '   '
         return <Text key={index}><Text dimColor>{prefix}</Text>{mark} <Text dimColor>{todo.content}</Text></Text>
       })}
     </Box>
