@@ -32,6 +32,7 @@ export const BLESSED_PACKAGES: readonly BlessedPackage[] = [
   { name: '@deepseek-ai/dsh-agent-default-model', version: DSH_VERSION_LINE },
   { name: '@deepseek-ai/dsh-cmdline', version: DSH_VERSION_LINE },
   { name: '@deepseek-ai/dsh-commands', version: DSH_VERSION_LINE },
+  { name: '@deepseek-ai/dsh-goal', version: DSH_VERSION_LINE },
   { name: '@deepseek-ai/dsh-invariants', version: DSH_VERSION_LINE },
   { name: '@deepseek-ai/dsh-llm', version: DSH_VERSION_LINE },
   { name: '@deepseek-ai/dsh-session', version: DSH_VERSION_LINE },

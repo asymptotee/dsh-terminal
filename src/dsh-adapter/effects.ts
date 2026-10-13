@@ -26,5 +26,14 @@ import type {} from '@deepseek-ai/dsh-experimental-agent-team'
 // instead merges JobKindMap into @deepseek-ai/dsh-jobs, a package this tree
 // does not carry.
 import type {} from '@deepseek-ai/dsh-tool-workflow/types'
+// Pulls in the `goal` session-projection key (the stateOf type the driver reads
+// for the standing goal) and the `goal/activation-changed` cordis event (the
+// only signal of an armed/disarmed continuation flip). Must be the /types
+// subpath: the package root re-exports the host-coupled domain vocabulary and
+// drags dsh-agent/dsh-llm/dsh-typert into the program, while /types is the pure
+// client-safe outlet. The durable `goal/change` session-event merge lives in the
+// root, but the driver never needs it typed — it folds nothing itself, matching
+// live goal events by prefix and reading the projection through stateOf.
+import type {} from '@deepseek-ai/dsh-goal/types'
 
 export {}

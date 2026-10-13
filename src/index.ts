@@ -22,7 +22,7 @@ import { createFrameState, foldAssistantStreamChunk, foldEvent, readableFailureM
 import type { FoldDeps, Frame, FrameState } from './frames.ts'
 import { teamToolPresentation } from './team-present.ts'
 import { createInkRenderer, foldInvocationLine } from './renderer.tsx'
-import type { ApprovalChoice, CommandInfo, Overlay, RenderView, SubagentRow, TeamPanelInfo, TeamTaskRow, TuiRenderer, WorkflowMemberRow, WorkflowMemberStatus, WorkflowPanelInfo, WorkflowPhaseGroup, WorkflowRunRow, WorkflowRunStatus } from './renderer.tsx'
+import type { ApprovalChoice, CommandInfo, GoalPanelInfo, GoalPhase, Overlay, RenderView, SubagentRow, TeamPanelInfo, TeamTaskRow, TuiRenderer, WorkflowMemberRow, WorkflowMemberStatus, WorkflowPanelInfo, WorkflowPhaseGroup, WorkflowRunRow, WorkflowRunStatus } from './renderer.tsx'
 
 // Re-exported so driver suites import the renderer contract without reaching
 // the ink view's .tsx module directly (the host aggregate compiles specs).
@@ -530,6 +530,37 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
     }
   }
 
+  /**
+   * The standing goal strip's projection-derived data, plus the process-local
+   * continuation switch the projection deliberately omits. `goalBase` is
+   * cleared while no goal is current (never created, or cleared), so the strip
+   * stays hidden until the first goal lands. `goalActivation` starts disarmed —
+   * exactly the resume/fork default — and only the `goal/activation-changed`
+   * bus flips it, so the driver never invents unattended continuation.
+   */
+  let goalBase: GoalPanelInfo | undefined
+  let goalActivation: 'armed' | 'disarmed' = 'disarmed'
+  function refreshGoal(): void {
+    // Read the durable goal off the same projection the runtime owns (the
+    // agentTeam pattern) rather than folding goal/change ourselves; the
+    // StateMap cell carries a strict-replay failure we must not render past.
+    const cell = sessionProjections?.stateOf(agent.session, 'goal')
+    const current = cell === undefined || cell.failure !== null ? null : cell.current
+    if (current === null) {
+      goalBase = undefined
+      return
+    }
+    const { goal, roundsStarted } = current
+    goalBase = {
+      objective: goal.objective,
+      phase: goal.phase as GoalPhase,
+      roundsStarted,
+      maxGoalRounds: goal.maxGoalRounds,
+      activation: goalActivation,
+      ...goal.blockedReason === undefined ? {} : { blockedReason: goal.blockedReason },
+    }
+  }
+
   /** Collision-free phase-group key preserving the absent-vs-empty identity
    *  (the web client's workflowPhaseKey). */
   function workflowPhaseKey(phase: string | undefined): string {
@@ -617,6 +648,7 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
     const next: RenderView = { ...base }
     const infos = commandInfos()
     if (infos.length > 0) next.commands = infos
+    if (goalBase !== undefined) next.goal = goalBase
     const rows = rosterRows()
     if (rows.length > 0) {
       next.subagents = rows
@@ -767,6 +799,10 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
   // Seed the permission badge from the folded projection before the first
   // render: a resumed session's last /permission switch lives in the log.
   refreshPermissionBadge()
+  // Seed the goal strip from the durable log too: a resumed session with a
+  // current goal shows its objective and round progress immediately, starting
+  // disarmed until an activation event says otherwise.
+  refreshGoal()
   ctx.on('session/event', (session, event: SessionEvent) => {
     if (session.header.id !== agent.session.id) {
       // Descriptors are seeded at session creation, not live-appended, so they
@@ -807,6 +843,10 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
     // A team event moves the authoritative agentTeam projection, so re-read it
     // before the render below to keep the team panel current.
     if ((event.type as string).startsWith('team/')) refreshTeam()
+    // A goal event moves the goal projection's durable half (phase, objective,
+    // the round budget), so re-read it before the render below. The round
+    // counter itself advances on the goal-sourced user/message below, not here.
+    if ((event.type as string).startsWith('goal/')) refreshGoal()
     // The four durable workflow-record events fold into the run map; the
     // adopt below renders the updated panel.
     if ((event.type as string).startsWith('tool-workflow/')) trackWorkflow(event, true)
@@ -817,10 +857,27 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
       const echoed = pendingUser.findIndex(pending => pending.id === (event.data.id as string))
       if (echoed !== -1) pendingUser.splice(echoed, 1)
     }
+    // The goal projection advances its round counter on the admitted
+    // goal-round user/message (source.kind 'goal'), not on goal/change — so
+    // this is the trigger that keeps `round N/M` moving. The message itself
+    // stays out of the transcript (frames.ts ignores non-user sources). The
+    // `goal` MessageSourceMap merge lives in the package root (which drags
+    // dsh-agent/dsh-llm into the bundle), so match the kind as a bare string —
+    // the same reason the goal/ prefix match above is untyped.
+    if (event.type === 'user/message' && (event.data.source.kind as string) === 'goal') refreshGoal()
     // Streaming no longer rides durable session events (the harness publishes it
     // on the agent-scoped assistant-stream bus instead), so every remaining
     // session event is low-frequency and renders immediately.
     adopt(foldEvent(state, event, deps).state, true)
+  })
+  // The goal's process-local continuation switch never becomes a session event;
+  // the only signal is this cordis bus event. Track it for the owned session so
+  // the strip's armed/disarmed badge follows the runtime's actual state.
+  ctx.on('goal/activation-changed', (payload: { sessionId: string; goal?: { activation: 'armed' | 'disarmed' } }) => {
+    if (payload.sessionId !== agent.session.id) return
+    goalActivation = payload.goal?.activation ?? 'disarmed'
+    refreshGoal()
+    scheduleRender(true)
   })
   // Live assistant streaming arrives on the agent-scoped `agent/assistant-stream`
   // event as transient start/chunk/end frames. Chunk frames carry only the

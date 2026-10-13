@@ -92,6 +92,28 @@ export interface StatusInfo {
   effort?: string
 }
 
+/** The standing goal's durable lifecycle phase (the goal domain's vocabulary). */
+export type GoalPhase = 'active' | 'paused' | 'blocked' | 'complete'
+
+/** The current goal as a standing chrome strip: objective, phase, round
+ *  progress, and the process-local continuation switch. */
+export interface GoalPanelInfo {
+  /** The human-requested completion objective, shown in full. */
+  objective: string
+  /** The durable lifecycle phase. */
+  phase: GoalPhase
+  /** Admitted goal rounds so far; the round-driver's continuation counter. */
+  roundsStarted: number
+  /** The total round cap for this goal. */
+  maxGoalRounds: number
+  /** Process-local continuation eligibility: `armed` runs the next round
+   *  unattended, `disarmed` needs a human. Resume/fork always starts disarmed. */
+  activation: 'armed' | 'disarmed'
+  /** Present exactly while `phase` is `blocked`: the stable code plus a
+   *  human/model-readable reason. */
+  blockedReason?: { code: string; message: string }
+}
+
 /** One unfinished direct subagent as a panel row. */
 export interface SubagentRow {
   /** The child session id; entering the row opens this session's transcript. */
@@ -227,6 +249,8 @@ export interface RenderView {
   team?: TeamPanelInfo
   /** The selected team-member row; absent means the team panel is not focused. */
   teamSelected?: number
+  /** The current goal; absent (no goal, or cleared) hides the goal strip. */
+  goal?: GoalPanelInfo
   /** Durable workflow runs; absent hides the workflow panel. */
   workflow?: WorkflowPanelInfo
   /** The selected workflow row (0 = the main row); absent means the workflow panel is not focused. */
@@ -408,6 +432,21 @@ export function TuiApp({
   }, [workflowAllSettled, completedLingerMs])
   const workflowVisible = view?.workflow !== undefined
     && !(workflowHidden && view?.workflowSelected === undefined)
+  // The goal strip lingers on completion the same way the boards do: a
+  // completed goal shows its ✔ state for the linger window, then hides. Any
+  // phase change away from complete (a new goal, an edit back to active, a
+  // clear dropping it from the view) cancels the hide through goalComplete.
+  const goalComplete = view?.goal?.phase === 'complete'
+  const [goalHidden, setGoalHidden] = useState(false)
+  React.useEffect(() => {
+    if (!goalComplete) {
+      setGoalHidden(false)
+      return
+    }
+    const timer = setTimeout(() => setGoalHidden(true), completedLingerMs ?? COMPLETED_BOARD_LINGER_MS)
+    return () => clearTimeout(timer)
+  }, [goalComplete, completedLingerMs])
+  const goalVisible = view?.goal !== undefined && !(goalHidden && goalComplete)
   const { columns, rows: termRows } = useTerminalSize()
   const rows = viewportRows ?? termRows
   const frames = state.frames
@@ -566,6 +605,11 @@ export function TuiApp({
         {view?.overlay === undefined && activeTurn.turnStartedAt !== undefined
           ? <HeartbeatLine startedAt={activeTurn.turnStartedAt} tokens={activeTurn.turnTokens} />
           : null}
+        {/* The standing goal strip sits below the heartbeat, right above the
+            input bar: it is the session-level objective the plan and panels
+            serve, and unlike the plan it follows the main session, never the
+            opened child. */}
+        {goalVisible && view?.goal !== undefined ? <GoalPanel goal={view.goal} /> : null}
         {/* The input bar stays mounted in every focus mode — it owns the single
             stdin listener; a read-only child view routes only Esc back, while a
             continuable child borrows the editor for its own prompts. */}
@@ -1383,8 +1427,11 @@ function PlanPanel({ todos }: { todos: FrameState['plan'] & object }): React.JSX
   const hidden = Math.max(0, todos.length - PLAN_MAX_TODOS)
   const visible = todos.slice(-PLAN_MAX_TODOS)
   return (
-    <Box flexDirection="column" marginBottom={1}>
-      <Text><Text color="#51cf66">●</Text> Todo list</Text>
+    // The two-column lead puts the Todos header on the panels' shared header
+    // column (Teammates / Tasks / Workflow / Goal); the `⎿` items shift with
+    // it, so the header→item gap is preserved.
+    <Box flexDirection="column" marginBottom={1} paddingLeft={2}>
+      <Text>Todos · {todos.length}</Text>
       {hidden > 0 ? <Text dimColor>  ⎿  … {hidden} earlier</Text> : null}
       {visible.map((todo, index) => {
         const mark = todo.status === 'completed'
@@ -1400,6 +1447,54 @@ function PlanPanel({ todos }: { todos: FrameState['plan'] & object }): React.JSX
         const prefix = index === 0 && hidden === 0 ? '  ⎿  ' : '     '
         return <Text key={index}><Text dimColor>{prefix}</Text>{mark} <Text dimColor>{todo.content}</Text></Text>
       })}
+    </Box>
+  )
+}
+
+/** The header's state word: the phase fused with the continuation switch,
+ *  the web client's English dictionary — an active goal reads `ongoing` only
+ *  while armed; disarmed it is `inactive` (someone must resume it), and the
+ *  bare armed/disarmed jargon never reaches the screen. */
+function goalStateLabel(goal: GoalPanelInfo): string {
+  if (goal.phase === 'active') return goal.activation === 'armed' ? 'ongoing' : 'inactive'
+  if (goal.phase === 'paused') return 'paused'
+  if (goal.phase === 'blocked') return 'blocked'
+  return 'complete'
+}
+
+/** The glyph trailing the state word — the task board's vocabulary: ◼ light
+ *  blue while the goal runs unattended, ⊘ dim once the switch is off (the
+ *  inactive/paused pair, inert rather than failed), ✘ red when blocked, ✔
+ *  green once complete. */
+function goalStateGlyph(goal: GoalPanelInfo): React.JSX.Element {
+  if (goal.phase === 'active') return goal.activation === 'armed' ? <Text color="#a5d8ff">◼</Text> : <Text dimColor>⊘</Text>
+  if (goal.phase === 'paused') return <Text dimColor>⊘</Text>
+  if (goal.phase === 'blocked') return <Text color="red">✘</Text>
+  return <Text color="green">✔</Text>
+}
+
+/** The standing goal as a two-row strip right above the input bar: a header
+ *  carrying the fused state word, its glyph, and the round progress, then the
+ *  objective on a `⎿` connector. Blocked goals add a reason row. Purely
+ *  display — the goal strip takes no keys and never joins panel navigation. */
+function GoalPanel({ goal }: { goal: GoalPanelInfo }): React.JSX.Element {
+  return (
+    // Same two-column lead as the plan: the goal header joins the panels'
+    // shared header column, its `⎿` objective row shifting with it.
+    <Box flexDirection="column" marginBottom={1} paddingLeft={2}>
+      <Text>
+        Goal · {goalStateLabel(goal)} {goalStateGlyph(goal)}
+        {' · round '}
+        {goal.roundsStarted}/{goal.maxGoalRounds}
+      </Text>
+      {/* The objective's `⎿` sits at column two — absolutely aligned with the
+          bash tool output connector in the transcript; dim is scoped to the
+          connector and the text so it does not mute the header's glyph. The
+          blocked-reason `⊘` keeps its place under the objective text. */}
+      <Text><Text dimColor>⎿  </Text><Text dimColor>{goal.objective}</Text></Text>
+      {goal.phase === 'blocked' && goal.blockedReason !== undefined
+        ? <Text dimColor>   ⊘ {goal.blockedReason.code}: {goal.blockedReason.message}</Text>
+        : null}
     </Box>
   )
 }
