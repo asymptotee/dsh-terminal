@@ -587,12 +587,14 @@ export function TuiApp({
             }
             : {})}
           {...(opened?.continuable === true
-            ? { childPlaceholder: `subagent: ${opened.label} (Enter 发送 · Esc 返回)` }
+            ? { childPlaceholder: `subagent: ${opened.label}` }
             : {})}
           panelAvailable={subagents.length > 0 || (view?.team?.members.length ?? 0) > 0 || workflowVisible}
           commands={view?.commands ?? []}
           {...(view?.status === undefined ? {} : { status: view.status })}
-          {...(view?.workflowSelected !== undefined ? { statusHint: '↑↓ 选择 · Enter 打开 · Esc 返回' } : {})}
+          {...(view?.workflowSelected !== undefined || view?.teamSelected !== undefined
+            ? { statusHint: '↑↓ 选择 · Enter 打开 · Esc 返回' }
+            : {})}
         />
         {approvalOverlay !== undefined ? (
           /* The question owns the screen bottom: the bar above rendered
@@ -748,24 +750,38 @@ function TeamPanel({
   const hiddenTasks = team.tasks.length - visibleTasks.length
   return (
     <Box flexDirection="column" marginBottom={1}>
-      <Text>
-        Teammates · {team.members.length}
-        {selected !== undefined ? <Text dimColor>  (↑↓ 选择 · Enter 打开 · ↑ 返回)</Text> : null}
-      </Text>
-      {/* The lead row is the way home: Enter on it closes to the main view.
-          The ● shows which transcript is open — the lead's own when no
-          member is. (The subagent panel's counterpart keeps the 'main' name.) */}
-      <Box key="lead">
-        <Text>{selected === 0 ? <Text>❯</Text> : ' '}</Text>
-        <Text> </Text>
-        {selected === 0 || openChildId === undefined
-          ? <Text>{openChildId === undefined ? '●' : '◯'}</Text>
-          : <Text dimColor>◯</Text>}
-        <Text> </Text>
-        {selected === 0 || openChildId === undefined
-          ? <Text bold={selected === 0}>lead</Text>
-          : <Text dimColor>lead</Text>}
-      </Box>
+      {/* The two-column lead puts the section headers on the panels' shared
+          header column (the Workflow run header and the status footer's
+          indent); member rows keep the flush-left cursor column. */}
+      {/* The key hints live on the status bar's permission row, exactly
+          like the workflow panel's — the header keeps just its count. */}
+      {/* A lead that has only planned tasks (no workers spawned yet) shows
+          just the task board below — the empty roster section and its lone
+          lead row would read as noise, and team navigation is inert until
+          the first member exists. */}
+      {team.members.length > 0
+        ? (
+          <>
+            <Text>
+              {'  '}Teammates · {team.members.length}
+            </Text>
+            {/* The lead row is the way home: Enter on it closes to the main view.
+                The ● shows which transcript is open — the lead's own when no
+                member is. (The subagent panel's counterpart keeps the 'main' name.) */}
+            <Box key="lead" paddingLeft={2}>
+              <Text>{selected === 0 ? <Text>❯</Text> : ' '}</Text>
+              <Text> </Text>
+              {selected === 0 || openChildId === undefined
+                ? <Text>{openChildId === undefined ? '●' : '◯'}</Text>
+                : <Text dimColor>◯</Text>}
+              <Text> </Text>
+              {selected === 0 || openChildId === undefined
+                ? <Text bold={selected === 0}>lead</Text>
+                : <Text dimColor>lead</Text>}
+            </Box>
+          </>
+        )
+        : null}
       {visibleMembers.map((member, index) => {
         // The ❯ cursor follows the arrows; the ● stays on the member whose
         // transcript is actually open — Enter is what moves it.
@@ -782,13 +798,14 @@ function TeamPanel({
           : ''
         // Clamp the activity so the row stays on one line with a clear gap
         // before the right-aligned elapsed/tokens: the smaller of (terminal
-        // width minus name/elapsed/spacing) and PANEL_ACTIVITY_RATIO of width.
-        const budget = Math.min(width - stringWidth(name) - stringWidth(elapsed) - 7, Math.floor(width * PANEL_ACTIVITY_RATIO))
+        // width minus name/elapsed/spacing — 9 absorbs the two-column child
+        // indent plus the marker columns) and PANEL_ACTIVITY_RATIO of width.
+        const budget = Math.min(width - stringWidth(name) - stringWidth(elapsed) - 9, Math.floor(width * PANEL_ACTIVITY_RATIO))
         const activity = member.activity !== undefined
           ? truncateToWidth(member.activity, Math.max(0, budget))
           : undefined
         return (
-          <Box key={member.name}>
+          <Box key={member.name} paddingLeft={2}>
             {/* The cursor column keeps the member marker aligned under the
                 task marker, exactly like the old two-space indent did. */}
             <Text>{isCursor ? <Text>❯</Text> : ' '}</Text>
@@ -812,11 +829,13 @@ function TeamPanel({
           </Box>
         )
       })}
-      {hiddenMembers > 0 ? <Text dimColor>  … {hiddenMembers} more</Text> : null}
+      {hiddenMembers > 0 ? <Text dimColor>    … {hiddenMembers} more</Text> : null}
       {team.tasks.length > 0 && !tasksHidden ? (
-        // marginTop keeps a blank row between the roster and the task board.
-        <Box flexDirection="column" marginTop={1}>
-          <Text>Tasks · {team.tasks.length}</Text>
+        // marginTop keeps a blank row between the roster and the task board —
+        // only when a roster is actually above it (a task-only team leads with
+        // the board directly).
+        <Box flexDirection="column" marginTop={team.members.length > 0 ? 1 : 0}>
+          <Text>{'  '}Tasks · {team.tasks.length}</Text>
           {visibleTasks.map((task, index) => {
             const mark = task.status === 'completed'
               ? <Text color="green">✔</Text>
@@ -826,16 +845,17 @@ function TeamPanel({
                   ? <Text dimColor>⊘</Text>
                   : <Text dimColor>◻</Text>
             const meta = `(${task.ownerName ?? 'unowned'} · ${task.status})`
-            // Clamp the subject so the task row stays one physical line.
-            const subject = truncateToWidth(task.subject, Math.max(4, width - stringWidth(meta) - 6))
+            // Clamp the subject so the task row stays one physical line
+            // (8 absorbs the four-column child indent plus mark and gaps).
+            const subject = truncateToWidth(task.subject, Math.max(4, width - stringWidth(meta) - 8))
             return (
               <Box key={index}>
-                <Text>  {mark} {subject} </Text>
+                <Text>    {mark} {subject} </Text>
                 <Text dimColor>{meta}</Text>
               </Box>
             )
           })}
-          {hiddenTasks > 0 ? <Text dimColor>  … {hiddenTasks} more</Text> : null}
+          {hiddenTasks > 0 ? <Text dimColor>    … {hiddenTasks} more</Text> : null}
         </Box>
       ) : null}
     </Box>

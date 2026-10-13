@@ -1312,6 +1312,40 @@ describe('workflow panel', () => {
     await test.ctx.fiber.dispose()
   })
 
+  it('surfaces the task board when a lead has tasks but no members yet', async () => {
+    // The old guard blanked teamBase whenever members were empty, hiding the
+    // tasks a lead had just written (team_task_create precedes spawn). The
+    // panel must stay up on tasks alone.
+    const test = await bench({
+      sessionProjections: {
+        stateOf: (_session: unknown, key: string) => key === 'agentTeam'
+          ? {
+            members: [],
+            tasks: [{
+              id: 'task-1',
+              revision: 1,
+              subject: '实现 math_utils.py 工具库',
+              description: '',
+              status: 'pending',
+              blockedBy: [],
+              writeScopes: [],
+            }],
+          }
+          : undefined,
+      },
+      afterPrompt: () => {},
+    })
+    await settle()
+    const team = test.views.at(-1)?.team
+    expect(team).toBeDefined()
+    expect(team?.members).toHaveLength(0)
+    expect(team?.tasks).toHaveLength(1)
+    expect(team?.tasks[0]?.subject).toBe('实现 math_utils.py 工具库')
+    test.handlers.onExit()
+    await test.exited
+    await test.ctx.fiber.dispose()
+  })
+
   it('derives interrupted on resume and flips to running on live events', async () => {
     const test = await bench({
       resumeId: SessionId('resumed-session'),

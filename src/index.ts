@@ -479,14 +479,18 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
   let teamBase: { members: { id: string; name: string; description: string; phase: string }[]; tasks: TeamTaskRow[] } | undefined
   function refreshTeam(): void {
     const team = sessionProjections?.stateOf(agent.session, 'agentTeam')
-    if (team === undefined || team.members.length === 0) {
+    const activeTasks = team === undefined ? [] : team.tasks.filter(task => task.status !== 'deleted')
+    // The panel shows while the team holds any roster OR any task: a lead
+    // plans tasks before spawning workers (team_task_create with an empty
+    // roster), and the members-only guard used to blank the board exactly
+    // then — hiding the very tasks the lead had just written.
+    if (team === undefined || (team.members.length === 0 && activeTasks.length === 0)) {
       teamBase = undefined
       return
     }
     teamBase = {
       members: team.members.map(member => ({ id: member.id, name: member.name, description: member.description, phase: member.phase })),
-      tasks: team.tasks
-        .filter(task => task.status !== 'deleted')
+      tasks: activeTasks
         .map(task => {
           const ownerName = task.ownerId === undefined
             ? undefined

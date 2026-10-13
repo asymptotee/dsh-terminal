@@ -1209,6 +1209,22 @@ describe('subagent panel', () => {
     expect(lastFrame()).not.toContain('Teammates ·')
   })
 
+  it('shows a task-only team as just the board, no empty roster section', () => {
+    // A lead that plans tasks before spawning any worker: the roster is empty
+    // but the board must still show the tasks it just wrote.
+    const team: TeamPanelInfo = {
+      members: [],
+      tasks: [{ subject: '实现 math_utils.py', status: 'pending', blocked: false }],
+    }
+    const { lastFrame } = renderApp(<TuiApp state={state([])} handlers={noopHandlers()} view={{ team }} />)
+    const frame = lastFrame() ?? ''
+    expect(frame).toContain('Tasks · 1')
+    expect(frame).toContain('实现 math_utils.py')
+    // The empty Teammates header and its lone lead row are dropped.
+    expect(frame).not.toContain('Teammates ·')
+    expect(frame).not.toContain('lead')
+  })
+
   it('shows navigation hints and marks the selected team member', () => {
     const { lastFrame } = renderApp(
       <TuiApp
@@ -1223,12 +1239,14 @@ describe('subagent panel', () => {
             tasks: [],
           },
           teamSelected: 1,
+          status: { model: 'test-model', cwd: '/workspace/repo', mode: 'workspace-write' },
         }}
       />,
     )
     const frame = lastFrame() ?? ''
-    // The hint only renders while the team panel holds focus.
-    expect(frame).toContain('↑↓ 选择')
+    // The hint only renders while the team panel holds focus — on the
+    // status bar's permission row, exactly like the workflow panel's.
+    expect(frame).toContain('workspace-write · (↑↓ 选择 · Enter 打开 · Esc 返回)')
     expect(frame).toContain('researcher')
     expect(frame).toContain('writer')
   })
@@ -1448,7 +1466,7 @@ describe('subagent panel', () => {
     // identity-and-keys placeholder; the pinned header row is gone for a
     // continuable child.
     const chrome = lastFrame() ?? ''
-    expect(chrome).toContain('❯ █subagent: 调研包结构 (Enter 发送 · Esc 返回)')
+    expect(chrome).toContain('❯ █subagent: 调研包结构')
     stdin.write('换个思路')
     await settled()
     // Typing replaces the placeholder with the buffer and the caret.
