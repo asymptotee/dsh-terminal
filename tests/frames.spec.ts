@@ -412,6 +412,80 @@ describe('fold: notices', () => {
     expect(folded.lines).toEqual([])
     expect(folded.state.frames).toEqual([])
   })
+
+  // A tool-jobs settlement injects a single text block whose account is the
+  // flattened `<kind> <label> [status: …]` summary; the fold reads the summary
+  // off the source and rewrites it into a sentence. Fold one and return the
+  // rendered notice frame.
+  function foldJobNotice(account: string): Extract<Frame, { kind: 'notice' }> | undefined {
+    const folded = foldEvent(
+      createFrameState(),
+      ev('user/message', createUserMessage({
+        content: [{ type: 'text', text: 'background job bash-1 finished. Read its output with job_output.' }],
+        source: { kind: 'tool-jobs', form: 'notice', summary: account } as unknown as MessageSource,
+      })),
+      deps(),
+    )
+    return folded.state.frames[0] as Extract<Frame, { kind: 'notice' }> | undefined
+  }
+
+  it('rewrites a bash settlement into a named sentence with its exit code', () => {
+    const frame = foldJobNotice('bash sleep 5 && echo "done" [status: completed, exit code: 0]')
+    expect(frame?.summary).toBe('Background command "sleep 5 && echo "done"" completed (exit code: 0)')
+  })
+
+  it('renders a killed settlement as "was killed" with the signal detail', () => {
+    const frame = foldJobNotice('bash sleep 999 [status: killed, signal: SIGTERM]')
+    expect(frame?.summary).toBe('Background command "sleep 999" was killed (signal: SIGTERM)')
+  })
+
+  it('renders a failed subagent settlement with its failure detail', () => {
+    const frame = foldJobNotice('subagent refactor auth module [status: failed, max-tokens]')
+    expect(frame?.summary).toBe('Background subagent "refactor auth module" failed (max-tokens)')
+  })
+
+  it('omits the parentheses when the settlement carries no detail', () => {
+    const frame = foldJobNotice('workflow release [status: completed]')
+    expect(frame?.summary).toBe('Background workflow "release" completed')
+  })
+
+  it('names an unknown job kind as a generic background job', () => {
+    const frame = foldJobNotice('ralph iterate until green [status: completed]')
+    expect(frame?.summary).toBe('Background job "iterate until green" completed')
+  })
+
+  it('passes a truncated account through untouched when the status bracket is cut', () => {
+    // boundContextSummary caps the account at 120 chars, which can sever the
+    // closing bracket; without a parseable tail the rewrite must not guess.
+    const account = 'bash sleep 5 && echo "done" [status: completed, exit code: 0'
+    expect(foldJobNotice(account)?.summary).toBe(account)
+  })
+
+  it('keeps a non-tool-jobs account that happens to mention a status verbatim', () => {
+    // The rewrite is gated on the tool-jobs source kind, so another producer's
+    // bracket-shaped text is not reinterpreted.
+    const folded = foldEvent(
+      createFrameState(),
+      ev('user/message', createUserMessage({
+        content: [{ type: 'text', text: 'plugin note' }],
+        source: { kind: 'job-finished', form: 'notice', summary: 'bash sleep [status: completed]' } as unknown as MessageSource,
+      })),
+      deps(),
+    )
+    expect((folded.state.frames[0] as Extract<Frame, { kind: 'notice' }>).summary).toBe('bash sleep [status: completed]')
+  })
+
+  it('emits the rewritten sentence as the M2 notice line', () => {
+    const folded = foldEvent(
+      createFrameState(),
+      ev('user/message', createUserMessage({
+        content: [{ type: 'text', text: 'background job bash-1 finished.' }],
+        source: { kind: 'tool-jobs', form: 'notice', summary: 'bash ls [status: completed, exit code: 0]' } as unknown as MessageSource,
+      })),
+      deps(),
+    )
+    expect(folded.lines).toEqual(['[notice] Background command "ls" completed (exit code: 0)\n'])
+  })
 })
 
 describe('fold: assistant streaming', () => {

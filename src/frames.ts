@@ -229,6 +229,43 @@ function noticeSummary(source: MessageSource): string | undefined {
   return 'form' in source && source.form === 'notice' ? source.summary : undefined
 }
 
+/** The terminal noun for a job kind, so the settlement notice names the work. */
+function jobNoun(kind: string): string {
+  if (kind === 'bash' || kind === 'pwsh') return 'command'
+  if (kind === 'subagent') return 'subagent'
+  if (kind === 'workflow') return 'workflow'
+  return 'job'
+}
+
+/** The terminal verb for a job settlement status; detail rides in parentheses. */
+function jobVerb(status: string): string {
+  if (status === 'killed') return 'was killed'
+  if (status === 'failed') return 'failed'
+  return status
+}
+
+/**
+ * Rewrite a tool-jobs settlement account into a natural sentence. The upstream
+ * account is a flattened `<kind> <label> [status: <status>[, <detail>]]`; the
+ * terminal shows `Background <noun> "<label>" <verb>[ (<detail>)]` instead.
+ * Any summary that does not end in the status bracket (a 120-char truncation
+ * can cut it, or a producer may vary the shape) passes through untouched.
+ * @param summary - the upstream settlement account.
+ * @returns the rewritten sentence, or the original when it cannot be parsed.
+ */
+function rewriteJobSettlement(summary: string): string {
+  const match = summary.match(/ \[status: (running|stopping|completed|killed|failed)(?:, ([^\]]*))?\]$/)
+  if (match === null || match.index === undefined) return summary
+  const prefix = summary.slice(0, match.index)
+  const status = match[1]
+  const detail = match[2]
+  const space = prefix.indexOf(' ')
+  const kind = space === -1 ? prefix : prefix.slice(0, space)
+  const label = space === -1 ? '' : prefix.slice(space + 1)
+  const bracket = detail !== undefined && detail !== '' ? ` (${detail})` : ''
+  return `Background ${jobNoun(kind)} "${label}" ${jobVerb(status)}${bracket}`
+}
+
 /** Fold one terminal-visible injection; a message with no displayable account renders nothing. */
 function noticeFrame(
   seq: number,
@@ -242,9 +279,16 @@ function noticeFrame(
   // A team peer delivery leads with a long message id in its head block, so
   // show a clean "Message from <senderName>" account instead; subagent notices
   // use their own summary, and anything else falls back to the head text.
-  const summary = source.kind === 'team-message'
+  const rawSummary = source.kind === 'team-message'
     ? `Message from ${source.senderName}`
     : noticeSummary(source) ?? (headIsText ? head.text : '')
+  // The tool-jobs settlement account is a machine-shaped `<kind> <label>
+  // [status: …]` string; read it into a sentence. The kind is out of the
+  // terminal's compile-time union (it does not depend on dsh-tool-jobs), so
+  // gate on it as a bare string, like the goal-source check in index.ts.
+  const summary = (source.kind as string) === 'tool-jobs'
+    ? rewriteJobSettlement(rawSummary)
+    : rawSummary
   if (summary === '') return undefined
   // Notice content blocks are paragraphs (the account header, then the child's
   // message), so the body joins them one per line rather than concatenated.
