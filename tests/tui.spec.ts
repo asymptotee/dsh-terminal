@@ -40,6 +40,8 @@ interface Script {
   subagents?: unknown
   /** Registered before the driver reads session projections (agentTeam). */
   sessionProjections?: unknown
+  /** Registered before the driver reads the background-jobs registry. */
+  jobs?: unknown
   /** Append a pre-existing turn before the driver attaches its live fold. */
   seed?(session: Session): void
   /** Append one owned turn; `turn` increments per submitted line. */
@@ -149,6 +151,7 @@ async function bench(script: Script): Promise<BenchHandle> {
   if (script.permissionPresets !== undefined) ctx.provide('permissionPresets', script.permissionPresets as never)
   if (script.subagents !== undefined) ctx.provide('subagents', script.subagents as never)
   if (script.sessionProjections !== undefined) ctx.provide('sessionProjections', script.sessionProjections as never)
+  if (script.jobs !== undefined) ctx.provide('jobs', script.jobs as never)
   const states: FrameState[] = []
   const views: (RenderView | undefined)[] = []
   const order: string[] = []
@@ -1547,6 +1550,245 @@ describe('goal strip', () => {
     expect(goal?.objective).toBe('把测试套件跑通')
     expect(goal?.roundsStarted).toBe(2)
     expect(goal?.activation).toBe('disarmed')
+    test.handlers.onExit()
+    await test.exited
+    await test.ctx.fiber.dispose()
+  })
+})
+
+describe('jobs panel', () => {
+  const settle = (): Promise<void> => new Promise(resolve => setTimeout(resolve, 0))
+
+  type FakeJob = {
+    id: string
+    kind: string
+    label: string
+    status: 'running' | 'stopping' | 'completed' | 'killed' | 'failed'
+    progress?: string
+    detail?: string
+    startedAt: number
+    finishedAt?: number
+  }
+  type FakeEvent =
+    | { type: 'registered' | 'progress' | 'stopping' | 'removed'; job: FakeJob }
+    | { type: 'settled'; job: FakeJob; cause: 'producer' | 'kill' | 'teardown' }
+    | { type: 'output'; id: string; total: number }
+
+  /** A scripted registry: the rows list() returns, the chunks readAt hands
+   *  out from any offset, and the captured listener the test fires events at. */
+  function fakeRegistry() {
+    const rows: FakeJob[] = []
+    const output = new Map<string, string>()
+    let listener: ((event: FakeEvent) => void) | undefined
+    const reads: { id: string; from: number }[] = []
+    return {
+      rows,
+      output,
+      reads,
+      emit(event: FakeEvent): void {
+        // Mirror the registry: lifecycle events also move list(); the test
+        // mutates `rows` itself where the case needs it.
+        listener?.(event)
+      },
+      registry: {
+        list: () => rows.map(row => ({ ...row })),
+        readAt: (id: string, from: number) => {
+          reads.push({ id, from })
+          const text = output.get(id) ?? ''
+          return { chunks: from < text.length ? [{ text: text.slice(from) }] : [], next: text.length, lossy: false }
+        },
+        events: {
+          subscribe: (_filter: unknown, l: (event: FakeEvent) => void) => {
+            listener = l
+            return () => { listener = undefined }
+          },
+        },
+      },
+    }
+  }
+
+  const runningJob = (id: string, over?: Partial<FakeJob>): FakeJob =>
+    ({ id, kind: 'bash', label: `sleep 300 && echo ${id}`, status: 'running', startedAt: Date.now() - 12_000, ...over })
+
+  it('shows registered jobs, tracks progress, and lingers settled rows', async () => {
+    const fake = fakeRegistry()
+    fake.rows.push(runningJob('bash-1'))
+    const test = await bench({ jobs: fake.registry, afterPrompt: () => {} })
+    await settle()
+    // The seeded list() shows the running job with its live elapsed.
+    let jobs = test.views.at(-1)?.jobs
+    expect(jobs?.rows).toHaveLength(1)
+    expect(jobs?.rows[0]).toMatchObject({ id: 'bash-1', kind: 'bash', status: 'running' })
+    expect(jobs?.rows[0]?.elapsedMs).toBeGreaterThanOrEqual(12_000)
+    // A progress event updates the row in place.
+    fake.rows[0] = runningJob('bash-1', { progress: '42%' })
+    fake.emit({ type: 'progress', job: fake.rows[0] })
+    await settle()
+    expect(test.views.at(-1)?.jobs?.rows[0]?.progress).toBe('42%')
+    // Settlement keeps the row (lingering) with its terminal detail frozen.
+    const settledJob: FakeJob = { ...runningJob('bash-1'), status: 'completed', detail: 'exit code: 0', finishedAt: Date.now() }
+    fake.rows[0] = settledJob
+    fake.emit({ type: 'settled', job: settledJob, cause: 'producer' })
+    await settle()
+    jobs = test.views.at(-1)?.jobs
+    expect(jobs?.rows[0]?.status).toBe('completed')
+    expect(jobs?.rows[0]?.detail).toBe('exit code: 0')
+    test.handlers.onExit()
+    await test.exited
+    await test.ctx.fiber.dispose()
+  })
+
+  it('retires a settled job the registry keeps listing after the linger window', async () => {
+    // The registry's list() retains settled jobs until the owner is disposed —
+    // the linger clock must run off the driver's own settledAt stamp, not off
+    // the row's absence from list() (regression: three completed sleep jobs
+    // pinned the panel forever because every tick re-stamped settledAt).
+    vi.useFakeTimers()
+    try {
+      const fake = fakeRegistry()
+      const done: FakeJob = { ...runningJob('bash-9'), status: 'completed', detail: 'exit code: 0', finishedAt: Date.now() }
+      fake.rows.push(done)
+      const test = await bench({ jobs: fake.registry, afterPrompt: () => {} })
+      await vi.advanceTimersByTimeAsync(0)
+      expect(test.views.at(-1)?.jobs?.rows).toHaveLength(1)
+      expect(test.views.at(-1)?.jobs?.rows[0]?.status).toBe('completed')
+      // Still listed by the registry, but past the linger window: retired.
+      await vi.advanceTimersByTimeAsync(6_000)
+      expect(test.views.at(-1)?.jobs).toBeUndefined()
+      // The registry still lists it on every following tick; the tombstone
+      // keeps it retired — without it the next list() re-adds the row with a
+      // fresh settledAt and the panel oscillates forever (the revive bug).
+      await vi.advanceTimersByTimeAsync(3_000)
+      expect(test.views.at(-1)?.jobs).toBeUndefined()
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(test.views.at(-1)?.jobs).toBeUndefined()
+      test.handlers.onExit()
+      await test.exited
+      await test.ctx.fiber.dispose()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('drops a row the registry removes and retires lingerers after the window', async () => {
+    vi.useFakeTimers()
+    try {
+      const fake = fakeRegistry()
+      fake.rows.push(runningJob('bash-2'))
+      const test = await bench({ jobs: fake.registry, afterPrompt: () => {} })
+      await vi.advanceTimersByTimeAsync(0)
+      expect(test.views.at(-1)?.jobs?.rows).toHaveLength(1)
+      // A foreground bash promoted then removed before settlement vanishes at once.
+      fake.rows.length = 0
+      fake.emit({ type: 'removed', job: runningJob('bash-2') })
+      await vi.advanceTimersByTimeAsync(0)
+      expect(test.views.at(-1)?.jobs).toBeUndefined()
+      // A settled job lingers through the window, then the tick retires it.
+      fake.rows.push({ ...runningJob('bash-3'), status: 'completed', finishedAt: Date.now() })
+      fake.emit({ type: 'registered', job: fake.rows[0] })
+      await vi.advanceTimersByTimeAsync(0)
+      expect(test.views.at(-1)?.jobs?.rows).toHaveLength(1)
+      fake.rows.length = 0
+      await vi.advanceTimersByTimeAsync(6_000)
+      expect(test.views.at(-1)?.jobs).toBeUndefined()
+      test.handlers.onExit()
+      await test.exited
+      await test.ctx.fiber.dispose()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('reads the opened job output incrementally on Enter and output pulses', async () => {
+    const fake = fakeRegistry()
+    fake.rows.push(runningJob('bash-4'))
+    fake.output.set('bash-4', 'line one\n')
+    const test = await bench({ jobs: fake.registry, afterPrompt: () => {} })
+    await settle()
+    // Enter on the first row opens its output block, read from offset 0.
+    test.handlers.onPanelOpen()
+    expect(test.views.at(-1)?.jobsSelected).toBe(1)
+    test.handlers.onPanelEnter()
+    await settle()
+    let panel = test.views.at(-1)?.jobs
+    expect(panel?.output).toEqual({ jobId: 'bash-4', text: 'line one\n', lossy: false })
+    // New bytes land with an output pulse; the read resumes from the cursor.
+    fake.output.set('bash-4', 'line one\nline two\n')
+    fake.emit({ type: 'output', id: 'bash-4', total: 19 })
+    await settle()
+    panel = test.views.at(-1)?.jobs
+    expect(panel?.output?.text).toBe('line one\nline two\n')
+    expect(fake.reads.at(-1)).toEqual({ id: 'bash-4', from: 9 })
+    // Enter on the same row again toggles the block closed.
+    test.handlers.onPanelEnter()
+    await settle()
+    expect(test.views.at(-1)?.jobs?.output).toBeUndefined()
+    test.handlers.onExit()
+    await test.exited
+    await test.ctx.fiber.dispose()
+  })
+
+  it('joins the navigation ladder last and leaves on ↑ at the first row', async () => {
+    const fake = fakeRegistry()
+    fake.rows.push(runningJob('bash-5'), runningJob('bash-6'))
+    const test = await bench({ jobs: fake.registry, afterPrompt: () => {} })
+    await settle()
+    // With only jobs present, ↓ lands the cursor on the first job.
+    test.handlers.onPanelOpen()
+    expect(test.views.at(-1)?.jobsSelected).toBe(1)
+    test.handlers.onPanelMove(1)
+    expect(test.views.at(-1)?.jobsSelected).toBe(2)
+    // Clamped at the row count.
+    test.handlers.onPanelMove(1)
+    expect(test.views.at(-1)?.jobsSelected).toBe(2)
+    // ↑ at the first row exits navigation; the open output closes with it.
+    test.handlers.onPanelMove(-1)
+    test.handlers.onPanelEnter()
+    expect(test.views.at(-1)?.jobs?.output?.jobId).toBe('bash-5')
+    test.handlers.onPanelMove(-1)
+    expect(test.views.at(-1)?.jobsSelected).toBeUndefined()
+    expect(test.views.at(-1)?.jobs?.output).toBeUndefined()
+    test.handlers.onExit()
+    await test.exited
+    await test.ctx.fiber.dispose()
+  })
+
+  it('prefers every other panel over the jobs ladder rung', async () => {
+    const fake = fakeRegistry()
+    fake.rows.push(runningJob('bash-7'))
+    const test = await bench({
+      jobs: fake.registry,
+      sessionProjections: {
+        stateOf: (_session: unknown, key: string) => key === 'agentTeam'
+          ? { members: [{ id: 'm-1', name: 'lead', description: 'd', phase: 'active' }], tasks: [] }
+          : undefined,
+      },
+      afterPrompt: () => {},
+    })
+    await settle()
+    // With a team present, ↓ enters the team panel; jobs stay unfocused.
+    test.handlers.onPanelOpen()
+    expect(test.views.at(-1)?.teamSelected).toBe(0)
+    expect(test.views.at(-1)?.jobsSelected).toBeUndefined()
+    // The jobs roster still renders below the team panel.
+    expect(test.views.at(-1)?.jobs?.rows).toHaveLength(1)
+    test.handlers.onExit()
+    await test.exited
+    await test.ctx.fiber.dispose()
+  })
+
+  it('escapes from the jobs panel in one press', async () => {
+    const fake = fakeRegistry()
+    fake.rows.push(runningJob('bash-8'))
+    const test = await bench({ jobs: fake.registry, afterPrompt: () => {} })
+    await settle()
+    test.handlers.onPanelOpen()
+    test.handlers.onPanelEnter()
+    expect(test.views.at(-1)?.jobs?.output).toBeDefined()
+    // No child transcript is open, so Esc clears the cursor and output at once.
+    test.handlers.onPanelBack()
+    expect(test.views.at(-1)?.jobsSelected).toBeUndefined()
+    expect(test.views.at(-1)?.jobs?.output).toBeUndefined()
     test.handlers.onExit()
     await test.exited
     await test.ctx.fiber.dispose()

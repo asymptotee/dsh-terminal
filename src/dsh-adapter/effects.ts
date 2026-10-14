@@ -35,5 +35,10 @@ import type {} from '@deepseek-ai/dsh-tool-workflow/types'
 // root, but the driver never needs it typed — it folds nothing itself, matching
 // live goal events by prefix and reading the projection through stateOf.
 import type {} from '@deepseek-ai/dsh-goal/types'
+// Pulls in the background-jobs merges: the `ctx.jobs` registry on the cordis
+// Context plus the JobView/JobEvent vocabulary the driver shapes into rows.
+// Root import is safe here — unlike dsh-goal, jobs has no separate /types
+// outlet, and a type-only root import emits nothing at runtime.
+import type {} from '@deepseek-ai/dsh-jobs'
 
 export {}

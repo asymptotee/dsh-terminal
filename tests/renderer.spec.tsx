@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { render } from 'ink-testing-library'
 import stringWidth from 'string-width'
 import { TuiApp, padToWidth, truncateToWidth } from '../src/renderer.tsx'
-import type { GoalPanelInfo, InputHandlers, RenderView, StatusInfo, SubagentRow, TeamPanelInfo, WorkflowMemberRow, WorkflowMemberStatus, WorkflowRunRow } from '../src/renderer.tsx'
+import type { GoalPanelInfo, InputHandlers, JobsPanelInfo, JobRow, RenderView, StatusInfo, SubagentRow, TeamPanelInfo, WorkflowMemberRow, WorkflowMemberStatus, WorkflowRunRow } from '../src/renderer.tsx'
 import { createFrameState } from '../src/frames.ts'
 import type { Frame, FrameState } from '../src/frames.ts'
 
@@ -2428,5 +2428,130 @@ describe('goal strip', () => {
     />)
     // The goal is the session-level objective: it stays up over a child view.
     expect(lastFrame() ?? '').toContain('Goal · ongoing ◼ · round 3/10')
+  })
+})
+
+describe('jobs panel', () => {
+  const job = (over?: Partial<JobRow>): JobRow => ({
+    id: 'bash-1',
+    kind: 'bash',
+    label: 'sleep 300 && echo done',
+    status: 'running',
+    elapsedMs: 12_000,
+    ...over,
+  })
+
+  it('renders the header, status glyphs, and elapsed', () => {
+    const rows = (info: JobsPanelInfo): string =>
+      (renderApp(<TuiApp state={state([])} handlers={noopHandlers()} view={{ jobs: info }} />).lastFrame() ?? '')
+        .split('\n').find(row => row.includes('bash-')) ?? ''
+    // The header carries the job count on the shared header column.
+    const { lastFrame } = renderApp(<TuiApp state={state([])} handlers={noopHandlers()} view={{ jobs: { rows: [job()] } }} />)
+    expect(lastFrame()).toContain('Jobs · 1')
+    // Each status wears its task-board glyph.
+    expect(rows({ rows: [job({ status: 'running' })] })).toContain('◼')
+    expect(rows({ rows: [job({ status: 'stopping' })] })).toContain('⊘')
+    expect(rows({ rows: [job({ status: 'completed' })] })).toContain('✔')
+    expect(rows({ rows: [job({ status: 'failed' })] })).toContain('✘')
+    expect(rows({ rows: [job({ status: 'killed' })] })).toContain('⊘')
+    // The row carries the id, label, and elapsed; running shows progress.
+    const line = rows({ rows: [job({ progress: '42%' })] })
+    expect(line).toContain('bash-1')
+    expect(line).toContain('sleep 300 && echo done')
+    expect(line).toContain('42%')
+    expect(line).toContain('12s')
+  })
+
+  it('shows the terminal detail on settled rows', () => {
+    const { lastFrame } = renderApp(<TuiApp
+      state={state([])}
+      handlers={noopHandlers()}
+      view={{ jobs: { rows: [job({ status: 'completed', detail: 'exit code: 0', progress: '42%' })] } }}
+    />)
+    // Settled rows swap the live progress for the terminal detail.
+    expect(lastFrame()).toContain('exit code: 0')
+    expect(lastFrame()).not.toContain('42%')
+  })
+
+  it('expands the opened job output under its row', () => {
+    const info: JobsPanelInfo = {
+      rows: [job()],
+      output: { jobId: 'bash-1', text: 'line one\nline two\n', lossy: false },
+    }
+    const { lastFrame } = renderApp(<TuiApp state={state([])} handlers={noopHandlers()} view={{ jobs: info, jobsSelected: 1 }} />)
+    const frame = lastFrame() ?? ''
+    expect(frame).toContain('line one')
+    expect(frame).toContain('line two')
+    // The output block trails its row and keeps only the tail.
+    expect(frame.indexOf('bash-1')).toBeLessThan(frame.indexOf('line one'))
+    // A lossy read says the head is gone.
+    const lossy = renderApp(<TuiApp
+      state={state([])}
+      handlers={noopHandlers()}
+      view={{ jobs: { rows: [job()], output: { jobId: 'bash-1', text: 'tail', lossy: true } }, jobsSelected: 1 }}
+    />)
+    expect(lossy.lastFrame()).toContain('… earlier output dropped')
+  })
+
+  it('tails long output blocks at a bounded height', () => {
+    const many = Array.from({ length: 40 }, (_, i) => `line ${i + 1}`).join('\n')
+    const { lastFrame } = renderApp(<TuiApp
+      state={state([])}
+      handlers={noopHandlers()}
+      view={{ jobs: { rows: [job()], output: { jobId: 'bash-1', text: many, lossy: false } }, jobsSelected: 1 }}
+    />)
+    const frame = lastFrame() ?? ''
+    // Only the tail survives the window; the head is elided.
+    expect(frame).toContain('line 40')
+    expect(frame).not.toContain('line 1\n')
+    expect(frame).not.toContain('line 28')
+  })
+
+  it('moves the ❯ cursor with the selection', () => {
+    const rows = [job({ id: 'bash-1' }), job({ id: 'bash-2' })]
+    const { lastFrame } = renderApp(<TuiApp
+      state={state([])}
+      handlers={noopHandlers()}
+      view={{ jobs: { rows }, jobsSelected: 2 }}
+    />)
+    const frame = lastFrame() ?? ''
+    const rowOf = (id: string): string => frame.split('\n').find(row => row.includes(id)) ?? ''
+    expect(rowOf('bash-2')).toContain('❯')
+    expect(rowOf('bash-1')).not.toContain('❯')
+  })
+
+  it('renders below the team panel and hides while absent or under an approval', () => {
+    const team: TeamPanelInfo = {
+      members: [{ name: 'lead', description: 'lead', phase: 'active' }],
+      tasks: [],
+    }
+    const { lastFrame } = renderApp(<TuiApp
+      state={state([])}
+      handlers={noopHandlers()}
+      view={{ team, jobs: { rows: [job()] } }}
+    />)
+    // The jobs panel is the ladder's last rung: it trails the team panel.
+    const frame = lastFrame() ?? ''
+    expect(frame.indexOf('Teammates · 1')).toBeLessThan(frame.indexOf('Jobs · 1'))
+    // No jobs: nothing renders.
+    const bare = renderApp(<TuiApp state={state([])} handlers={noopHandlers()} />)
+    expect(bare.lastFrame() ?? '').not.toContain('Jobs ·')
+    // An approval question owns the screen bottom; the panel waits it out.
+    const approval = renderApp(<TuiApp
+      state={state([])}
+      handlers={noopHandlers()}
+      view={{ jobs: { rows: [job()] }, overlay: { kind: 'approval', toolName: 'bash', reason: 'run rm -rf' } }}
+    />)
+    expect(approval.lastFrame() ?? '').not.toContain('Jobs ·')
+  })
+
+  it('puts the jobs key hints on the status bar while navigating', () => {
+    const status: StatusInfo = { model: 'test-model', cwd: '/workspace/repo', mode: 'workspace-write' }
+    const { lastFrame } = renderApp(<TuiApp
+      state={state([])}
+      handlers={noopHandlers()}
+      view={{ jobs: { rows: [job()] }, jobsSelected: 1, status }}
+    />)
+    expect(lastFrame()).toContain('workspace-write · (↑↓ 选择 · Enter 输出 · Esc 返回)')
   })
 })

@@ -222,6 +222,43 @@ export interface WorkflowPanelInfo {
   memberCount: number
 }
 
+/** The background-job lifecycle state (the jobs registry's vocabulary). */
+export type JobStatus = 'running' | 'stopping' | 'completed' | 'killed' | 'failed'
+
+/** One background job as a panel row. */
+export interface JobRow {
+  /** The registry-issued id (`<kind>-N`). */
+  id: string
+  /** The producer kind (bash, subagent, workflow, …); shown as the row's dim tag. */
+  kind: string
+  /** The producer's one-line label (the command; the delegation description). */
+  label: string
+  status: JobStatus
+  /** The producer's live progress line while running; cleared at settlement. */
+  progress?: string
+  /** The terminal reason once settled (`exit code: 3`, the kill reason). */
+  detail?: string
+  /** Milliseconds since registration; frozen at settlement (finishedAt − startedAt). */
+  elapsedMs: number
+}
+
+/** The live-output block of one opened job, read incrementally by the driver. */
+export interface JobOutputBlock {
+  /** The job whose output this is. */
+  jobId: string
+  /** The retained output tail (the driver caps the buffer). */
+  text: string
+  /** The read cursor fell below the ring's retained window; head bytes are gone. */
+  lossy: boolean
+}
+
+/** The jobs panel contract: rows in registry order plus the opened job's output. */
+export interface JobsPanelInfo {
+  rows: readonly JobRow[]
+  /** Present while one job's output block is expanded under its row. */
+  output?: JobOutputBlock
+}
+
 /** One registered slash command for the input bar's completion menu. */
 export interface CommandInfo {
   /** Command name without the leading slash. */
@@ -255,6 +292,10 @@ export interface RenderView {
   workflow?: WorkflowPanelInfo
   /** The selected workflow row (0 = the main row); absent means the workflow panel is not focused. */
   workflowSelected?: number
+  /** Background jobs; absent hides the jobs panel. */
+  jobs?: JobsPanelInfo
+  /** The selected job row; absent means the jobs panel is not focused. */
+  jobsSelected?: number
   /** Messages submitted while a step was in flight; shown immediately as steering until their durable echo lands. */
   pendingUser?: readonly PendingUserEcho[]
 }
@@ -447,6 +488,9 @@ export function TuiApp({
     return () => clearTimeout(timer)
   }, [goalComplete, completedLingerMs])
   const goalVisible = view?.goal !== undefined && !(goalHidden && goalComplete)
+  // The jobs panel has no hide latch of its own: the driver lingers settled
+  // rows and drops them, so the renderer draws exactly what it is given.
+  const jobsVisible = view?.jobs !== undefined && view.jobs.rows.length > 0
   const { columns, rows: termRows } = useTerminalSize()
   const rows = viewportRows ?? termRows
   const frames = state.frames
@@ -464,7 +508,7 @@ export function TuiApp({
   // the keys (panelNav); otherwise a retained selection is just the row
   // highlight and the child transcript keeps the keyboard.
   const selectionActive = view?.subagentSelected !== undefined || view?.teamSelected !== undefined
-    || view?.workflowSelected !== undefined
+    || view?.workflowSelected !== undefined || view?.jobsSelected !== undefined
   const focusMode: 'input' | 'panel' | 'child' = selectionActive && (opened === undefined || view?.panelNav === true)
     ? 'panel'
     : opened !== undefined
@@ -632,12 +676,14 @@ export function TuiApp({
           {...(opened?.continuable === true
             ? { childPlaceholder: `subagent: ${opened.label}` }
             : {})}
-          panelAvailable={subagents.length > 0 || (view?.team?.members.length ?? 0) > 0 || workflowVisible}
+          panelAvailable={subagents.length > 0 || (view?.team?.members.length ?? 0) > 0 || workflowVisible || jobsVisible}
           commands={view?.commands ?? []}
           {...(view?.status === undefined ? {} : { status: view.status })}
           {...(view?.workflowSelected !== undefined || view?.teamSelected !== undefined
             ? { statusHint: '↑↓ 选择 · Enter 打开 · Esc 返回' }
-            : {})}
+            : view?.jobsSelected !== undefined
+              ? { statusHint: '↑↓ 选择 · Enter 输出 · Esc 返回' }
+              : {})}
         />
         {approvalOverlay !== undefined ? (
           /* The question owns the screen bottom: the bar above rendered
@@ -675,6 +721,14 @@ export function TuiApp({
                   selected={view.teamSelected}
                   tasksHidden={teamBoardHidden}
                   {...(opened === undefined ? {} : { openChildId: opened.childId })}
+                />
+              )
+              : null}
+            {jobsVisible
+              ? (
+                <JobsPanel
+                  info={view!.jobs!}
+                  selected={view?.jobsSelected}
                 />
               )
               : null}
@@ -901,6 +955,102 @@ function TeamPanel({
           {hiddenTasks > 0 ? <Text dimColor>    … {hiddenTasks} more</Text> : null}
         </Box>
       ) : null}
+    </Box>
+  )
+}
+
+/** Output lines the expanded job block shows before tailing. */
+const JOB_OUTPUT_MAX_LINES = 12
+
+/** The status glyph of one background job — the task board's vocabulary:
+ *  ◼ light blue while running, ⊘ yellow while stopping, then ✔/✘/⊘. */
+function jobStatusGlyph(status: JobStatus): React.JSX.Element {
+  switch (status) {
+    case 'running': return <Text color="#a5d8ff">◼</Text>
+    case 'stopping': return <Text color="#ffd43b">⊘</Text>
+    case 'completed': return <Text color="green">✔</Text>
+    case 'failed': return <Text color="red">✘</Text>
+    case 'killed': return <Text dimColor>⊘</Text>
+  }
+}
+
+/** The background-jobs roster: one row per live or lingering job, the opened
+ *  row expanding its live output underneath. The last panel in the ladder —
+ *  the whole-session backdrop the other panels' activities run against. */
+function JobsPanel({
+  info,
+  selected,
+}: {
+  info: JobsPanelInfo
+  /** The ❯ cursor's 1-based row index; undefined keeps focus elsewhere. */
+  selected: number | undefined
+}): React.JSX.Element {
+  const width = useTerminalWidth()
+  const rows = info.rows
+  // Windowing follows the SubagentPanel semantics: tail-anchored while
+  // unselected (the newest jobs lead), centered on the cursor when selected.
+  const selectedRow = selected === undefined || selected <= 0 ? -1 : selected - 1
+  const start = rows.length <= PANEL_MAX_ROWS
+    ? 0
+    : selectedRow < 0
+      ? rows.length - PANEL_MAX_ROWS
+      : Math.min(Math.max(0, selectedRow - Math.floor(PANEL_MAX_ROWS / 2)), rows.length - PANEL_MAX_ROWS)
+  const visible = rows.slice(start, start + PANEL_MAX_ROWS)
+  const hiddenBefore = start
+  const hiddenAfter = rows.length - start - visible.length
+  return (
+    <Box flexDirection="column" marginBottom={1}>
+      <Text>{'  '}Jobs · {rows.length}</Text>
+      {hiddenBefore > 0 ? <Text dimColor>    … {hiddenBefore} more</Text> : null}
+      {visible.map((row, index) => {
+        const rowIndex = start + index
+        const isCursor = rowIndex + 1 === selected
+        const isOpen = info.output?.jobId === row.id
+        // The cursor row and the open output's row stay bright; the rest dim.
+        const emphasized = isCursor || isOpen
+        const id = truncateToWidth(row.id, 12)
+        const label = truncateToWidth(row.label, Math.max(4, Math.floor(width * 0.35)))
+        // The producer's live progress while running, its terminal detail
+        // once settled — one line, clamped against the row's other columns.
+        const note = row.status === 'running' || row.status === 'stopping'
+          ? row.progress
+          : row.detail ?? row.progress
+        const elapsed = formatElapsed(row.elapsedMs)
+        const budget = Math.min(width - stringWidth(id) - stringWidth(label) - stringWidth(elapsed) - 10, Math.floor(width * PANEL_ACTIVITY_RATIO))
+        const noteText = note !== undefined && note !== '' ? truncateToWidth(note, Math.max(0, budget)) : undefined
+        return (
+          <React.Fragment key={row.id}>
+            {/* The two-column lead nests the row under the `Jobs · N` header,
+                matching the team/workflow panels' header→row step: the cursor
+                lands at column two, the status glyph at four. */}
+            <Box paddingLeft={2}>
+              <Text>{isCursor ? <Text>❯</Text> : ' '}</Text>
+              <Text> </Text>
+              {jobStatusGlyph(row.status)}
+              <Text> </Text>
+              {emphasized ? <Text>{id}</Text> : <Text dimColor>{id}</Text>}
+              <Text> </Text>
+              {emphasized ? <Text bold={isCursor}>{label}</Text> : <Text dimColor>{label}</Text>}
+              {noteText !== undefined
+                ? emphasized ? <Text>  {noteText}</Text> : <Text dimColor>  {noteText}</Text>
+                : null}
+              <Box flexGrow={1} />
+              {emphasized ? <Text>{elapsed}</Text> : <Text dimColor>{elapsed}</Text>}
+            </Box>
+            {isOpen && info.output !== undefined
+              ? (
+                <Box flexDirection="column">
+                  {info.output.lossy ? <Text dimColor>        … earlier output dropped</Text> : null}
+                  {info.output.text.split('\n').slice(-JOB_OUTPUT_MAX_LINES).map((line, lineIndex) => (
+                    <Text key={lineIndex} dimColor>        {line === '' ? ' ' : line}</Text>
+                  ))}
+                </Box>
+              )
+              : null}
+          </React.Fragment>
+        )
+      })}
+      {hiddenAfter > 0 ? <Text dimColor>    … {hiddenAfter} more</Text> : null}
     </Box>
   )
 }
