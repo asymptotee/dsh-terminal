@@ -21,12 +21,12 @@ import './dsh-adapter/effects.ts'
 import { createFrameState, foldAssistantStreamChunk, foldEvent, readableFailureMessage } from './frames.ts'
 import type { FoldDeps, Frame, FrameState } from './frames.ts'
 import { teamToolPresentation } from './team-present.ts'
-import { createInkRenderer, foldInvocationLine } from './renderer.tsx'
-import type { ApprovalChoice, CommandInfo, GoalPanelInfo, GoalPhase, JobDetailView, JobsPanelInfo, JobRow, Overlay, RenderView, SubagentRow, TeamPanelInfo, TeamTaskRow, TuiRenderer, WorkflowMemberRow, WorkflowMemberStatus, WorkflowPanelInfo, WorkflowPhaseGroup, WorkflowRunRow, WorkflowRunStatus } from './renderer.tsx'
+import { createInkRenderer, foldInvocationLine } from './view/renderer.tsx'
+import type { ApprovalChoice, CommandInfo, GoalPanelInfo, GoalPhase, JobDetailView, JobsPanelInfo, JobRow, Overlay, RenderView, SubagentRow, TeamPanelInfo, TeamTaskRow, TuiRenderer, WorkflowMemberRow, WorkflowMemberStatus, WorkflowPanelInfo, WorkflowPhaseGroup, WorkflowRunRow, WorkflowRunStatus } from './view/renderer.tsx'
 
 // Re-exported so driver suites import the renderer contract without reaching
 // the ink view's .tsx module directly (the host aggregate compiles specs).
-export type { InputHandlers, OpenSubagent, Overlay, RenderView, SubagentRow, TuiRenderer } from './renderer.tsx'
+export type { InputHandlers, OpenSubagent, Overlay, RenderView, SubagentRow, TuiRenderer } from './view/renderer.tsx'
 
 /** Stable Cordis plugin name. */
 export const name = 'tui'
