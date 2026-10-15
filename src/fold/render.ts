@@ -5,7 +5,7 @@
  * @module dsh-terminal/src/render
  */
 
-import type { ContentBlock, TodoItem } from './dsh-adapter/types.ts'
+import type { ContentBlock, TodoItem } from '../dsh-adapter/types.ts'
 import type { Frame } from './frames.ts'
 
 /**

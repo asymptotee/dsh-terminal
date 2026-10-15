@@ -10,9 +10,9 @@
 import React, { useState } from 'react'
 import { Box, Text } from 'ink'
 import stringWidth from 'string-width'
-import type { FrameState } from '../frames.ts'
+import type { FrameState } from '../fold/frames.ts'
 import type { GoalPanelInfo, Overlay, PendingUserEcho, StatusInfo } from './view-types.ts'
-import { formatContext, formatElapsed, formatTokenCount, shortenCwd, toolLabel, wrapToWidth } from '../text-helpers.ts'
+import { formatContext, formatElapsed, formatTokenCount, shortenCwd, toolLabel, wrapToWidth } from './text-helpers.ts'
 
 /** How long the task board lingers after its last task completes, before the
  *  whole section disappears at once — enough time to read the final state. */

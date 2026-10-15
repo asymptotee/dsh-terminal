@@ -12,8 +12,8 @@ import {
   transcriptMarginTop,
   wheelDeltaFromInput,
   WHEEL_SCROLL_LINES,
-} from '../src/terminal.ts'
-import type { ScrollState } from '../src/terminal.ts'
+} from '../src/view/terminal.ts'
+import type { ScrollState } from '../src/view/terminal.ts'
 
 describe('wheelDeltaFromInput', () => {
   it('decodes a wheel notch with ink\'s leading ESC stripped', () => {

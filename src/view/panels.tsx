@@ -23,8 +23,8 @@ import type {
   WorkflowRunRow,
   WorkflowRunStatus,
 } from './view-types.ts'
-import { formatElapsed, formatTokenCount, padToWidth, truncateToWidth } from '../text-helpers.ts'
-import { useTerminalSize, useTerminalWidth } from '../use-terminal.ts'
+import { formatElapsed, formatTokenCount, padToWidth, truncateToWidth } from './text-helpers.ts'
+import { useTerminalSize, useTerminalWidth } from './use-terminal.ts'
 
 /** Panel rows beyond this cap are elided with a hint row, keeping the chrome
  *  band bounded; the window follows the arrow selection. */

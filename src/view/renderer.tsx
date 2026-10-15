@@ -11,8 +11,8 @@
 // tsc build uses react-jsx; React.createElement below keeps the import used.
 import React, { useLayoutEffect, useReducer, useRef, useState } from 'react'
 import { Box, measureElement, render, Text } from 'ink'
-import type { Frame, FrameState } from '../frames.ts'
-import { createFrameState } from '../frames.ts'
+import type { Frame, FrameState } from '../fold/frames.ts'
+import { createFrameState } from '../fold/frames.ts'
 import {
   createScrollState,
   createScrollStates,
@@ -26,7 +26,7 @@ import {
   PRE_MEASURE_MARGIN,
   scrollStatesReducer,
   transcriptMarginTop,
-} from '../terminal.ts'
+} from './terminal.ts'
 import type { InputHandlers, Overlay, RenderView, TuiRenderer } from './view-types.ts'
 import {
   ApprovalPanel,
@@ -40,7 +40,7 @@ import {
 import { JobDetail, JobsPanel, SubagentPanel, TeamPanel, WorkflowPanel } from './panels.tsx'
 import { FrameRow, frameKey } from './transcript.tsx'
 import { InputBar, READ_ONLY_CHILD_NOTE } from './input-bar.tsx'
-import { useTerminalSize } from '../use-terminal.ts'
+import { useTerminalSize } from './use-terminal.ts'
 
 // The renderer's public type surface and text helpers, re-exported from here so
 // the driver and the tests keep a single import path (./renderer) unchanged.
@@ -55,7 +55,7 @@ export {
   splitLines,
   truncateToWidth,
   wrapToWidth,
-} from '../text-helpers.ts'
+} from './text-helpers.ts'
 export { COMPLETED_BOARD_LINGER_MS } from './chrome.tsx'
 
 /** The pre-driver placeholder: nothing renders until the first driven render, so the full surface appears once. */

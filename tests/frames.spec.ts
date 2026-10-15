@@ -6,8 +6,8 @@ import { ToolCallId } from '@deepseek-ai/dsh-llm/brand'
 import { createAssistantMessage, createToolResultMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { MessageSource } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent, SessionEventType } from '@deepseek-ai/dsh-session'
-import { createFrameState, foldAssistantStreamChunk, foldEvent, readableFailureMessage } from '../src/frames.ts'
-import type { FoldDeps, FoldResult, Frame, FrameState, ToolPresentation } from '../src/frames.ts'
+import { createFrameState, foldAssistantStreamChunk, foldEvent, readableFailureMessage } from '../src/fold/frames.ts'
+import type { FoldDeps, FoldResult, Frame, FrameState, ToolPresentation } from '../src/fold/frames.ts'
 
 let nextSeq = 0
 beforeEach(() => { nextSeq = 0 })

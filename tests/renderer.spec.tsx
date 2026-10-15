@@ -6,8 +6,8 @@ import { render } from 'ink-testing-library'
 import stringWidth from 'string-width'
 import { TuiApp, padToWidth, truncateToWidth } from '../src/view/renderer.tsx'
 import type { GoalPanelInfo, InputHandlers, JobDetailView, JobsPanelInfo, JobRow, RenderView, StatusInfo, SubagentRow, TeamPanelInfo, WorkflowMemberRow, WorkflowMemberStatus, WorkflowRunRow } from '../src/view/renderer.tsx'
-import { createFrameState } from '../src/frames.ts'
-import type { Frame, FrameState } from '../src/frames.ts'
+import { createFrameState } from '../src/fold/frames.ts'
+import type { Frame, FrameState } from '../src/fold/frames.ts'
 
 /** Let the throttled ink render flush after a stdin write. */
 async function settled(ms = 30): Promise<void> {

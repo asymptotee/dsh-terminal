@@ -7,7 +7,7 @@
  * @module dsh-terminal/src/frames
  */
 
-import type { ContentBlock, MessageSource, SessionEvent, StreamChunk, TodoItem, ToolCallView, ToolResult, ToolResultView } from './dsh-adapter/types.ts'
+import type { ContentBlock, MessageSource, SessionEvent, StreamChunk, TodoItem, ToolCallView, ToolResult, ToolResultView } from '../dsh-adapter/types.ts'
 import {
   contentToText,
   renderCommandLine,

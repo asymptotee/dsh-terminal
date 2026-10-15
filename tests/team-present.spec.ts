@@ -1,7 +1,7 @@
 /** The local presentation table for the official Agent Teams tools. */
 
 import { describe, expect, it } from 'vitest'
-import { teamToolPresentation } from '../src/team-present.ts'
+import { teamToolPresentation } from '../src/fold/team-present.ts'
 import type { ToolCallView, ToolResult, ToolResultView } from '../src/dsh-adapter/types.ts'
 
 /** A successful tool result carrying one JSON text block, as the team tools render. */

@@ -10,7 +10,7 @@
  * @module dsh-terminal/src/team-present
  */
 
-import type { ContentBlock, ToolCallView, ToolResult, ToolResultView } from './dsh-adapter/types.ts'
+import type { ContentBlock, ToolCallView, ToolResult, ToolResultView } from '../dsh-adapter/types.ts'
 import type { ToolPresentation } from './frames.ts'
 
 /** Narrow an unknown payload to a plain record; anything else is unreadable. */

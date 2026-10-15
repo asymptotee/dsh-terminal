@@ -9,11 +9,11 @@
 import React, { useState } from 'react'
 import { Box, Text, useInput, usePaste } from 'ink'
 import stringWidth from 'string-width'
-import type { ScrollAction } from '../terminal.ts'
-import { containsMouseReport, wheelDeltaFromInput } from '../terminal.ts'
+import type { ScrollAction } from './terminal.ts'
+import { containsMouseReport, wheelDeltaFromInput } from './terminal.ts'
 import type { CommandInfo, InputHandlers, StatusInfo } from './view-types.ts'
-import { padToWidth, truncateToWidth } from '../text-helpers.ts'
-import { useTerminalWidth } from '../use-terminal.ts'
+import { padToWidth, truncateToWidth } from './text-helpers.ts'
+import { useTerminalWidth } from './use-terminal.ts'
 import { StatusBar } from './chrome.tsx'
 
 /** The dim note a read-only child's box shows where the editor would be. */

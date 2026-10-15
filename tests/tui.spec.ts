@@ -16,8 +16,8 @@ import type { InputHandlers, RenderView } from '../src/index.ts'
 // Side-effect type import: the `subagent/descriptor` event kind the child
 // sessions append in the panel tests declaration-merges into the session map.
 import type {} from '@deepseek-ai/dsh-subagent'
-import { createFrameState } from '../src/frames.ts'
-import type { FrameState } from '../src/frames.ts'
+import { createFrameState } from '../src/fold/frames.ts'
+import type { FrameState } from '../src/fold/frames.ts'
 
 interface Script {
   /** When set, the driver must resume this persisted session id. */

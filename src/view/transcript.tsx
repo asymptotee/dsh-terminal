@@ -13,10 +13,10 @@
 import React, { useState } from 'react'
 import { Box, Text } from 'ink'
 import stringWidth from 'string-width'
-import type { Frame } from '../frames.ts'
-import { contentToText, stripOuterCodeFence } from '../render.ts'
-import { foldInvocationLine, inlineDiffLines, padToWidth, toolLabel, trimNewline, truncateToWidth } from '../text-helpers.ts'
-import { useTerminalWidth } from '../use-terminal.ts'
+import type { Frame } from '../fold/frames.ts'
+import { contentToText, stripOuterCodeFence } from '../fold/render.ts'
+import { foldInvocationLine, inlineDiffLines, padToWidth, toolLabel, trimNewline, truncateToWidth } from './text-helpers.ts'
+import { useTerminalWidth } from './use-terminal.ts'
 
 /** Fraction of the terminal width a tool call line may occupy before its
  *  invocation is truncated with an ellipsis (ctrl+o reveals the full text). */

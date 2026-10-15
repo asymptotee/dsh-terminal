@@ -6,7 +6,7 @@
  * @module dsh-terminal/src/view-types
  */
 
-import type { FrameState } from '../frames.ts'
+import type { FrameState } from '../fold/frames.ts'
 
 /** The user's answer to a pending approval question. */
 export type ApprovalChoice = 'allow' | 'reject' | 'cancel'
