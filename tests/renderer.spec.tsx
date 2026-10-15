@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { render } from 'ink-testing-library'
 import stringWidth from 'string-width'
 import { TuiApp, padToWidth, truncateToWidth } from '../src/renderer.tsx'
-import type { GoalPanelInfo, InputHandlers, JobsPanelInfo, JobRow, RenderView, StatusInfo, SubagentRow, TeamPanelInfo, WorkflowMemberRow, WorkflowMemberStatus, WorkflowRunRow } from '../src/renderer.tsx'
+import type { GoalPanelInfo, InputHandlers, JobDetailView, JobsPanelInfo, JobRow, RenderView, StatusInfo, SubagentRow, TeamPanelInfo, WorkflowMemberRow, WorkflowMemberStatus, WorkflowRunRow } from '../src/renderer.tsx'
 import { createFrameState } from '../src/frames.ts'
 import type { Frame, FrameState } from '../src/frames.ts'
 
@@ -29,6 +29,7 @@ function noopHandlers(): InputHandlers {
     onPanelEnter: () => {},
     onPanelBack: () => {},
     onChildPrompt: () => {},
+    onJobKill: () => {},
   }
 }
 
@@ -1814,7 +1815,7 @@ describe('slash command completion menu', () => {
     return {
       onCommit: vi.fn(), onInterrupt: vi.fn(), onApproval: vi.fn(), onExit: vi.fn(),
       onPanelOpen: vi.fn(), onPanelMove: vi.fn(), onPanelEnter: vi.fn(), onPanelBack: vi.fn(),
-      onChildPrompt: vi.fn(),
+      onChildPrompt: vi.fn(), onJobKill: vi.fn(),
     }
   }
 
@@ -2473,38 +2474,91 @@ describe('jobs panel', () => {
     expect(lastFrame()).not.toContain('42%')
   })
 
-  it('expands the opened job output under its row', () => {
-    const info: JobsPanelInfo = {
-      rows: [job()],
-      output: { jobId: 'bash-1', text: 'line one\nline two\n', lossy: false },
-    }
-    const { lastFrame } = renderApp(<TuiApp state={state([])} handlers={noopHandlers()} view={{ jobs: info, jobsSelected: 1 }} />)
-    const frame = lastFrame() ?? ''
-    expect(frame).toContain('line one')
-    expect(frame).toContain('line two')
-    // The output block trails its row and keeps only the tail.
-    expect(frame.indexOf('bash-1')).toBeLessThan(frame.indexOf('line one'))
-    // A lossy read says the head is gone.
-    const lossy = renderApp(<TuiApp
-      state={state([])}
-      handlers={noopHandlers()}
-      view={{ jobs: { rows: [job()], output: { jobId: 'bash-1', text: 'tail', lossy: true } }, jobsSelected: 1 }}
-    />)
-    expect(lossy.lastFrame()).toContain('… earlier output dropped')
+  const detail = (over?: Partial<JobDetailView>): JobDetailView => ({
+    jobId: 'bash-1',
+    title: 'Command details',
+    labelField: 'Command',
+    label: 'sleep 300 && echo done',
+    status: 'running',
+    elapsedMs: 12_000,
+    output: '',
+    lossy: false,
+    killArmed: false,
+    killable: true,
+    ...over,
   })
 
-  it('tails long output blocks at a bounded height', () => {
+  it('renders the opened job as a full-screen detail view', () => {
+    const { lastFrame } = renderApp(<TuiApp
+      state={state([])}
+      handlers={noopHandlers()}
+      view={{ openJob: detail({ output: 'line one\nline two\n' }) }}
+    />)
+    const frame = lastFrame() ?? ''
+    // The kind-driven heading and labelled fields lead; the output tail follows.
+    expect(frame).toContain('Command details')
+    expect(frame).toContain('Status:')
+    expect(frame).toContain('running')
+    expect(frame).toContain('Runtime:')
+    expect(frame).toContain('12s')
+    expect(frame).toContain('Command:')
+    expect(frame).toContain('sleep 300 && echo done')
+    expect(frame).toContain('Output:')
+    expect(frame).toContain('line one')
+    expect(frame).toContain('line two')
+    // The detail owns the transcript window: no editor caret below it.
+    expect(frame).not.toContain('█')
+    // The heading aligns with the field labels' two-column lead, the Status
+    // row carries no glyph, and the output lines render bright (not dim).
+    const rows = frame.split('\n')
+    expect(rows.find(row => row.includes('Command details'))?.startsWith('  Command details')).toBe(true)
+    const statusRow = rows.find(row => row.includes('Status:')) ?? ''
+    expect(statusRow).toContain('running')
+    expect(statusRow).not.toContain('◼')
+    expect(rows.find(row => row.includes('line one'))?.startsWith('    line one')).toBe(true)
+  })
+
+  it('shows a placeholder for a job with no output ring', () => {
+    // A background subagent registers a job with no output source, so its
+    // detail names the work but has nothing to stream.
+    const { lastFrame } = renderApp(<TuiApp
+      state={state([])}
+      handlers={noopHandlers()}
+      view={{ openJob: detail({ title: 'Subagent details', labelField: 'Task', label: '调研包结构', output: '', killable: true }) }}
+    />)
+    const frame = lastFrame() ?? ''
+    expect(frame).toContain('Subagent details')
+    expect(frame).toContain('Task:')
+    expect(frame).toContain('No output available')
+  })
+
+  it('tails long detail output and flags a lossy head', () => {
     const many = Array.from({ length: 40 }, (_, i) => `line ${i + 1}`).join('\n')
     const { lastFrame } = renderApp(<TuiApp
       state={state([])}
       handlers={noopHandlers()}
-      view={{ jobs: { rows: [job()], output: { jobId: 'bash-1', text: many, lossy: false } }, jobsSelected: 1 }}
+      view={{ openJob: detail({ output: many, lossy: true }) }}
     />)
     const frame = lastFrame() ?? ''
-    // Only the tail survives the window; the head is elided.
+    // Only the tail survives the window; the head is elided with a marker.
     expect(frame).toContain('line 40')
     expect(frame).not.toContain('line 1\n')
-    expect(frame).not.toContain('line 28')
+    expect(frame).toContain('… earlier output dropped')
+  })
+
+  it('carries the kill hints in its own footer, hiding the status bar', () => {
+    const status: StatusInfo = { model: 'test-model', cwd: '/workspace/repo', mode: 'workspace-write' }
+    // The detail owns the region below the transcript, so the status footer
+    // hides — the hints live in the detail's own bottom line instead.
+    const idle = renderApp(<TuiApp state={state([])} handlers={noopHandlers()} view={{ openJob: detail(), status }} />)
+    expect(idle.lastFrame()).toContain('Esc/Enter 关闭 · x 停止任务')
+    expect(idle.lastFrame()).not.toContain('workspace-write')
+    const armed = renderApp(<TuiApp state={state([])} handlers={noopHandlers()} view={{ openJob: detail({ killArmed: true }), status }} />)
+    expect(armed.lastFrame()).toContain('再按 x 确认停止 · Esc 取消')
+    // A settled job cannot be stopped: no kill hint.
+    const settled = renderApp(<TuiApp state={state([])} handlers={noopHandlers()} view={{ openJob: detail({ status: 'completed', killable: false, detail: 'exit code: 0' }), status }} />)
+    expect(settled.lastFrame()).toContain('Esc/Enter 关闭')
+    expect(settled.lastFrame()).not.toContain('x 停止任务')
   })
 
   it('moves the ❯ cursor with the selection', () => {
@@ -2552,6 +2606,6 @@ describe('jobs panel', () => {
       handlers={noopHandlers()}
       view={{ jobs: { rows: [job()] }, jobsSelected: 1, status }}
     />)
-    expect(lastFrame()).toContain('workspace-write · (↑↓ 选择 · Enter 输出 · Esc 返回)')
+    expect(lastFrame()).toContain('workspace-write · (↑↓ 选择 · Enter 详情 · Esc 返回)')
   })
 })

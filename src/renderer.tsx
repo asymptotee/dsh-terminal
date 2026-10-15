@@ -61,6 +61,9 @@ export interface InputHandlers {
   /** Send one human prompt to the opened continuable child; it steers into
    *  the child's nearest step boundary. */
   onChildPrompt(text: string): void
+  /** The job detail's two-step stop gesture: the first `x` arms, a second
+   *  within the window kills the opened job. */
+  onJobKill(): void
 }
 
 /** A transient surface message (above the input bar) or the bottom approval question. */
@@ -242,21 +245,37 @@ export interface JobRow {
   elapsedMs: number
 }
 
-/** The live-output block of one opened job, read incrementally by the driver. */
-export interface JobOutputBlock {
-  /** The job whose output this is. */
-  jobId: string
-  /** The retained output tail (the driver caps the buffer). */
-  text: string
-  /** The read cursor fell below the ring's retained window; head bytes are gone. */
-  lossy: boolean
-}
-
-/** The jobs panel contract: rows in registry order plus the opened job's output. */
+/** The jobs panel contract: rows in registry order. The opened job renders as
+ *  a full-screen detail view (RenderView.openJob), not an inline block. */
 export interface JobsPanelInfo {
   rows: readonly JobRow[]
-  /** Present while one job's output block is expanded under its row. */
-  output?: JobOutputBlock
+}
+
+/** The full-screen detail of one opened job: kind-named heading, labelled
+ *  fields, and the incrementally-read output tail. */
+export interface JobDetailView {
+  /** The job being inspected. */
+  jobId: string
+  /** The kind-driven heading (`Command details`, `Subagent details`, …). */
+  title: string
+  /** The kind-driven label field name (`Command:`, `Task:`, …). */
+  labelField: string
+  /** The producer's label (the command; the delegation description; the name). */
+  label: string
+  status: JobStatus
+  /** The terminal reason once settled (`exit code: 0`); absent while live. */
+  detail?: string
+  /** Milliseconds since registration; frozen at settlement. */
+  elapsedMs: number
+  /** The retained output tail (the driver caps the buffer); empty shows a
+   *  "No output available" placeholder (a subagent job has no output ring). */
+  output: string
+  /** The read cursor fell below the ring's retained window; head bytes are gone. */
+  lossy: boolean
+  /** The kill gesture is armed: a second `x` within the window stops the job. */
+  killArmed: boolean
+  /** Only a live job can be stopped; settled rows hide the kill hint. */
+  killable: boolean
 }
 
 /** One registered slash command for the input bar's completion menu. */
@@ -296,6 +315,9 @@ export interface RenderView {
   jobs?: JobsPanelInfo
   /** The selected job row; absent means the jobs panel is not focused. */
   jobsSelected?: number
+  /** The opened job's full-screen detail; replaces the transcript window while
+   *  set, exactly like openSubagent replaces it with a child transcript. */
+  openJob?: JobDetailView
   /** Messages submitted while a step was in flight; shown immediately as steering until their durable echo lands. */
   pendingUser?: readonly PendingUserEcho[]
 }
@@ -370,6 +392,7 @@ export function createInkRenderer(): TuiRenderer {
     onPanelEnter: () => {},
     onPanelBack: () => {},
     onChildPrompt: () => {},
+    onJobKill: () => {},
   }
   const props = (): { state: FrameState; handlers: InputHandlers; view?: RenderView } => ({
     state,
@@ -501,6 +524,9 @@ export function TuiApp({
     .map(frame => frame.text)
   const subagents = view?.subagents ?? []
   const opened = view?.openSubagent
+  // The opened job's full-screen detail owns the transcript window (and the
+  // keys) while set; it never coexists with an opened child transcript.
+  const openJob = view?.openJob
   // The pending approval question, when one owns the screen bottom: the input
   // bar, status bar, and side panels all yield to the ApprovalPanel below.
   const approvalOverlay = view?.overlay?.kind === 'approval' ? view.overlay : undefined
@@ -509,11 +535,16 @@ export function TuiApp({
   // highlight and the child transcript keeps the keyboard.
   const selectionActive = view?.subagentSelected !== undefined || view?.teamSelected !== undefined
     || view?.workflowSelected !== undefined || view?.jobsSelected !== undefined
-  const focusMode: 'input' | 'panel' | 'child' = selectionActive && (opened === undefined || view?.panelNav === true)
-    ? 'panel'
-    : opened !== undefined
-      ? 'child'
-      : 'input'
+  // The job detail outranks every other surface: while it is open it owns the
+  // window and the keys (Esc/Enter close, x stops), so the panel cursor — if
+  // the driver retained one — does not take the arrows.
+  const focusMode: 'input' | 'panel' | 'child' | 'job' = openJob !== undefined
+    ? 'job'
+    : selectionActive && (opened === undefined || view?.panelNav === true)
+      ? 'panel'
+      : opened !== undefined
+        ? 'child'
+        : 'input'
 
   // ---- Transcript scroll state ---------------------------------------
   // The transcript is the app's own data (no terminal scrollback): the
@@ -676,19 +707,27 @@ export function TuiApp({
           {...(opened?.continuable === true
             ? { childPlaceholder: `subagent: ${opened.label}` }
             : {})}
+          jobDetailOpen={openJob !== undefined}
           panelAvailable={subagents.length > 0 || (view?.team?.members.length ?? 0) > 0 || workflowVisible || jobsVisible}
           commands={view?.commands ?? []}
           {...(view?.status === undefined ? {} : { status: view.status })}
-          {...(view?.workflowSelected !== undefined || view?.teamSelected !== undefined
-            ? { statusHint: '↑↓ 选择 · Enter 打开 · Esc 返回' }
-            : view?.jobsSelected !== undefined
-              ? { statusHint: '↑↓ 选择 · Enter 输出 · Esc 返回' }
-              : {})}
+          {...(openJob !== undefined
+            ? {}
+            : view?.workflowSelected !== undefined || view?.teamSelected !== undefined
+              ? { statusHint: '↑↓ 选择 · Enter 打开 · Esc 返回' }
+              : view?.jobsSelected !== undefined
+                ? { statusHint: '↑↓ 选择 · Enter 详情 · Esc 返回' }
+                : {})}
         />
         {approvalOverlay !== undefined ? (
           /* The question owns the screen bottom: the bar above rendered
              nothing, and the side panels and child header wait it out. */
           <ApprovalPanel key={approvalKey(approvalOverlay)} overlay={approvalOverlay} selected={approvalIndex} width={columns} />
+        ) : openJob !== undefined ? (
+          /* The opened job's detail owns the region below the status bar:
+             it covers the side panels (the roster stays visible through the
+             cursor on its row) while the transcript keeps scrolling above. */
+          <JobDetail view={openJob} />
         ) : (
           <>
             {/* The read-only child's identity now rides its own input box's
@@ -959,9 +998,6 @@ function TeamPanel({
   )
 }
 
-/** Output lines the expanded job block shows before tailing. */
-const JOB_OUTPUT_MAX_LINES = 12
-
 /** The status glyph of one background job — the task board's vocabulary:
  *  ◼ light blue while running, ⊘ yellow while stopping, then ✔/✘/⊘. */
 function jobStatusGlyph(status: JobStatus): React.JSX.Element {
@@ -974,9 +1010,10 @@ function jobStatusGlyph(status: JobStatus): React.JSX.Element {
   }
 }
 
-/** The background-jobs roster: one row per live or lingering job, the opened
- *  row expanding its live output underneath. The last panel in the ladder —
- *  the whole-session backdrop the other panels' activities run against. */
+/** The background-jobs roster: one row per live or lingering job. Enter opens
+ *  a row's full-screen detail (RenderView.openJob); the roster itself stays a
+ *  flat list. The last panel in the ladder — the whole-session backdrop the
+ *  other panels' activities run against. */
 function JobsPanel({
   info,
   selected,
@@ -1005,9 +1042,7 @@ function JobsPanel({
       {visible.map((row, index) => {
         const rowIndex = start + index
         const isCursor = rowIndex + 1 === selected
-        const isOpen = info.output?.jobId === row.id
-        // The cursor row and the open output's row stay bright; the rest dim.
-        const emphasized = isCursor || isOpen
+        // The cursor row stays bright; the rest dim entirely.
         const id = truncateToWidth(row.id, 12)
         const label = truncateToWidth(row.label, Math.max(4, Math.floor(width * 0.35)))
         // The producer's live progress while running, its terminal detail
@@ -1019,38 +1054,68 @@ function JobsPanel({
         const budget = Math.min(width - stringWidth(id) - stringWidth(label) - stringWidth(elapsed) - 10, Math.floor(width * PANEL_ACTIVITY_RATIO))
         const noteText = note !== undefined && note !== '' ? truncateToWidth(note, Math.max(0, budget)) : undefined
         return (
-          <React.Fragment key={row.id}>
+          <Box key={row.id} paddingLeft={2}>
             {/* The two-column lead nests the row under the `Jobs · N` header,
                 matching the team/workflow panels' header→row step: the cursor
                 lands at column two, the status glyph at four. */}
-            <Box paddingLeft={2}>
-              <Text>{isCursor ? <Text>❯</Text> : ' '}</Text>
-              <Text> </Text>
-              {jobStatusGlyph(row.status)}
-              <Text> </Text>
-              {emphasized ? <Text>{id}</Text> : <Text dimColor>{id}</Text>}
-              <Text> </Text>
-              {emphasized ? <Text bold={isCursor}>{label}</Text> : <Text dimColor>{label}</Text>}
-              {noteText !== undefined
-                ? emphasized ? <Text>  {noteText}</Text> : <Text dimColor>  {noteText}</Text>
-                : null}
-              <Box flexGrow={1} />
-              {emphasized ? <Text>{elapsed}</Text> : <Text dimColor>{elapsed}</Text>}
-            </Box>
-            {isOpen && info.output !== undefined
-              ? (
-                <Box flexDirection="column">
-                  {info.output.lossy ? <Text dimColor>        … earlier output dropped</Text> : null}
-                  {info.output.text.split('\n').slice(-JOB_OUTPUT_MAX_LINES).map((line, lineIndex) => (
-                    <Text key={lineIndex} dimColor>        {line === '' ? ' ' : line}</Text>
-                  ))}
-                </Box>
-              )
+            <Text>{isCursor ? <Text>❯</Text> : ' '}</Text>
+            <Text> </Text>
+            {jobStatusGlyph(row.status)}
+            <Text> </Text>
+            {isCursor ? <Text>{id}</Text> : <Text dimColor>{id}</Text>}
+            <Text> </Text>
+            {isCursor ? <Text bold>{label}</Text> : <Text dimColor>{label}</Text>}
+            {noteText !== undefined
+              ? isCursor ? <Text>  {noteText}</Text> : <Text dimColor>  {noteText}</Text>
               : null}
-          </React.Fragment>
+            <Box flexGrow={1} />
+            {isCursor ? <Text>{elapsed}</Text> : <Text dimColor>{elapsed}</Text>}
+          </Box>
         )
       })}
       {hiddenAfter > 0 ? <Text dimColor>    … {hiddenAfter} more</Text> : null}
+    </Box>
+  )
+}
+
+/** The full-screen detail of one opened job: a kind-named heading, labelled
+ *  status/runtime/command fields, and the live output tail (or a placeholder
+ *  for a job with no output ring, e.g. a background subagent). */
+function JobDetail({ view }: { view: JobDetailView }): React.JSX.Element {
+  const width = useTerminalWidth()
+  const { rows } = useTerminalSize()
+  // The output tail adapts to the viewport: the detail owns everything below
+  // the status footer, and the frame around the output is fixed — the
+  // transcript window's floor (3), the footer (3), and the detail's own rules,
+  // title, fields, and labels (10, plus one lossy-marker row of slack).
+  const maxOutputLines = Math.max(4, rows - 17)
+  const outputLines = view.output === '' ? [] : view.output.split('\n').slice(-maxOutputLines)
+  return (
+    <Box flexDirection="column">
+      <Text color="#a5d8ff">{'─'.repeat(width)}</Text>
+      {/* The heading aligns with the labelled fields below it (two-column
+          lead), not centered — the detail reads as one field block. */}
+      <Text>  {view.title}</Text>
+      <Text> </Text>
+      <Text><Text dimColor>  Status:   </Text>{view.status}</Text>
+      <Text><Text dimColor>  Runtime:  </Text>{formatElapsed(view.elapsedMs)}</Text>
+      <Text><Text dimColor>  {padToWidth(`${view.labelField}:`, 9)}</Text>{view.label}</Text>
+      <Text> </Text>
+      <Text dimColor>  Output:</Text>
+      {view.lossy ? <Text dimColor>    … earlier output dropped</Text> : null}
+      {outputLines.length === 0
+        ? <Text dimColor>    No output available</Text>
+        : outputLines.map((line, index) => (
+          <Text key={index}>    {line === '' ? ' ' : line}</Text>
+        ))}
+      <Text> </Text>
+      {/* The detail hides the status footer, so it carries its own key hints
+          in the bottom line — armed flips them to the confirm gesture. */}
+      <Text dimColor>
+        {'  '}{view.killArmed
+          ? '再按 x 确认停止 · Esc 取消'
+          : view.killable ? 'Esc/Enter 关闭 · x 停止任务' : 'Esc/Enter 关闭'}
+      </Text>
     </Box>
   )
 }
@@ -2019,6 +2084,7 @@ export function InputBar({
   childReadOnly = false,
   childReadOnlyNote,
   childPlaceholder,
+  jobDetailOpen = false,
   panelAvailable = false,
   commands = [],
   status,
@@ -2038,8 +2104,9 @@ export function InputBar({
   onFirstInput?: () => void
   /** The session's submitted lines; the arrows browse them (log-restored on resume). */
   history?: readonly string[]
-  /** Which surface owns the keys; the panel and child view borrow them from the editor. */
-  focusMode?: 'input' | 'panel' | 'child'
+  /** Which surface owns the keys; the panel, child view, and job detail borrow
+   *  them from the editor. */
+  focusMode?: 'input' | 'panel' | 'child' | 'job'
   /** The opened child is continuable: the child view borrows the editor to
    *  send continuation prompts (Enter steers, Esc returns). */
   childPromptable?: boolean
@@ -2051,6 +2118,9 @@ export function InputBar({
   childReadOnlyNote?: string
   /** Identity-and-keys placeholder shown dim inside the empty child editor. */
   childPlaceholder?: string
+  /** A job detail owns the transcript window: the input region collapses to
+   *  the standing footer (the detail draws its own light-blue rules). */
+  jobDetailOpen?: boolean
   /** Whether the subagent panel has rows, so `↓` from an empty editor can enter it. */
   panelAvailable?: boolean
   /** The registered slash commands; a leading-`/` buffer opens the completion menu. */
@@ -2138,6 +2208,14 @@ export function InputBar({
       if (key.upArrow) onApprovalSelect(-1)
       if (key.downArrow) onApprovalSelect(1)
       if (key.return) handlers.onApproval(approvalSelected === 0 ? 'allow' : 'reject')
+      return
+    }
+    if (focusMode === 'job') {
+      // The job detail owns the window: Esc or Enter closes it back to the
+      // roster (the cursor stays), x fires the two-step stop gesture, and
+      // everything else waits.
+      if (key.escape || key.return) { handlers.onPanelBack(); return }
+      if (input === 'x') { handlers.onJobKill(); return }
       return
     }
     if (focusMode === 'child') {
@@ -2312,6 +2390,10 @@ export function InputBar({
   // ApprovalPanel takes its rows in the chrome band) while still owning the
   // question's keys through the handler above.
   if (approvalPending) return <Box />
+  // A job detail owns the region below the transcript: the input bar (and its
+  // status footer) yields entirely — the detail's own keys hint carries the
+  // standing facts, so no duplicate footer line.
+  if (jobDetailOpen) return <Box />
   // A read-only child (one-shot, or no descriptor mode known) takes no
   // prompts; its box still draws — in the child view's light-blue chrome —
   // with a dim note explaining the silence in place of a caret, and the

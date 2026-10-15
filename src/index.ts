@@ -22,7 +22,7 @@ import { createFrameState, foldAssistantStreamChunk, foldEvent, readableFailureM
 import type { FoldDeps, Frame, FrameState } from './frames.ts'
 import { teamToolPresentation } from './team-present.ts'
 import { createInkRenderer, foldInvocationLine } from './renderer.tsx'
-import type { ApprovalChoice, CommandInfo, GoalPanelInfo, GoalPhase, JobsPanelInfo, JobRow, Overlay, RenderView, SubagentRow, TeamPanelInfo, TeamTaskRow, TuiRenderer, WorkflowMemberRow, WorkflowMemberStatus, WorkflowPanelInfo, WorkflowPhaseGroup, WorkflowRunRow, WorkflowRunStatus } from './renderer.tsx'
+import type { ApprovalChoice, CommandInfo, GoalPanelInfo, GoalPhase, JobDetailView, JobsPanelInfo, JobRow, Overlay, RenderView, SubagentRow, TeamPanelInfo, TeamTaskRow, TuiRenderer, WorkflowMemberRow, WorkflowMemberStatus, WorkflowPanelInfo, WorkflowPhaseGroup, WorkflowRunRow, WorkflowRunStatus } from './renderer.tsx'
 
 // Re-exported so driver suites import the renderer contract without reaching
 // the ink view's .tsx module directly (the host aggregate compiles specs).
@@ -192,6 +192,10 @@ const SETTLED_JOB_LINGER_MS = 5_000
 /** Cap of the expanded job's retained output tail (bytes ≈ chars, ASCII-ish). */
 const JOB_OUTPUT_BUFFER_MAX = 8_000
 
+/** How long the job detail's first `x` stays armed before the second press is
+ *  needed again (the web kill button's same re-arm window). */
+const JOB_KILL_ARM_MS = 3_000
+
 /** One unfinished direct subagent tracked for the panel below the status bar. */
 interface ChildEntry {
   /** The child's display label: its delegation description once the descriptor arrives. */
@@ -316,6 +320,10 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
   let jobsOpenCursor = 0
   let jobsOpenBuffer = ''
   let jobsOpenLossy = false
+  /** Epoch ms of the detail's armed kill gesture; armed while within
+   *  JOB_KILL_ARM_MS. Derived at projection time, so the panel tick re-render
+   *  disarms it without a dedicated timer. */
+  let jobsKillArmedAt: number | undefined
   // Child session id → the error detail of its last failed turn, so the child's
   // settlement notice can show the concrete cause instead of just "failed".
   // Cleared by any later non-error turn, so a child that recovered shows none.
@@ -380,6 +388,7 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
     | {
       list(caller?: unknown): readonly JobViewShape[]
       readAt(id: string, from: number, caller?: unknown): { chunks: readonly { text: string }[]; next: number; lossy: boolean }
+      kill(id: string, caller?: unknown, reason?: string): 'requested' | 'already-finished'
       events: {
         subscribe(filter: { owner: string }, listener: (event: JobRegistryEvent) => void): () => void
       }
@@ -710,6 +719,7 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
     jobsOpenCursor = 0
     jobsOpenBuffer = ''
     jobsOpenLossy = false
+    jobsKillArmedAt = undefined
   }
 
   /** The registry's event bus: lifecycle events move the linger table, the
@@ -746,10 +756,39 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
       ...row.detail === undefined ? {} : { detail: row.detail },
       elapsedMs: (row.finishedAt ?? Date.now()) - row.startedAt,
     }))
-    const output = jobsOpen === undefined
-      ? undefined
-      : { jobId: jobsOpen, text: jobsOpenBuffer, lossy: jobsOpenLossy }
-    return { rows, ...output === undefined ? {} : { output } }
+    return { rows }
+  }
+
+  /** The kind-driven heading and label field name for one job's detail view. */
+  function jobDetailVocabulary(kind: string): { title: string; labelField: string } {
+    if (kind === 'bash' || kind === 'pwsh') return { title: 'Command details', labelField: 'Command' }
+    if (kind === 'subagent') return { title: 'Subagent details', labelField: 'Task' }
+    if (kind === 'workflow') return { title: 'Workflow details', labelField: 'Workflow' }
+    return { title: 'Job details', labelField: 'Label' }
+  }
+
+  /** The opened job's full-screen detail slice, or undefined when none is open. */
+  function jobDetail(): JobDetailView | undefined {
+    if (jobsOpen === undefined) return undefined
+    const row = jobsRows.get(jobsOpen)
+    if (row === undefined) return undefined
+    const { title, labelField } = jobDetailVocabulary(row.kind)
+    const killArmed = jobsKillArmedAt !== undefined && Date.now() - jobsKillArmedAt < JOB_KILL_ARM_MS
+    // Only a live job can be stopped; a settled row shows the outcome alone.
+    const killable = row.status === 'running' || row.status === 'stopping'
+    return {
+      jobId: row.id,
+      title,
+      labelField,
+      label: row.label,
+      status: row.status,
+      ...row.detail === undefined ? {} : { detail: row.detail },
+      elapsedMs: (row.finishedAt ?? Date.now()) - row.startedAt,
+      output: jobsOpenBuffer,
+      lossy: jobsOpenLossy,
+      killArmed,
+      killable,
+    }
   }
 
   /** Collision-free phase-group key preserving the absent-vs-empty identity
@@ -863,6 +902,8 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
       // Members only (no main row): the 1-based selection clamps to the count.
       if (jobsSelected !== undefined) next.jobsSelected = Math.min(jobsSelected, jobPanel.rows.length)
     }
+    const openJobDetail = jobDetail()
+    if (openJobDetail !== undefined) next.openJob = openJobDetail
     if (openChild !== undefined) {
       const opened = children.get(openChild)
       if (opened !== undefined) {
@@ -1274,6 +1315,29 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
         scheduleRender(true)
       })
     },
+    onJobKill: () => {
+      if (exiting || jobsOpen === undefined) return
+      const row = jobsRows.get(jobsOpen)
+      if (row === undefined || (row.status !== 'running' && row.status !== 'stopping')) return
+      // Two-step confirm: the first x arms the gesture, a second within the
+      // window kills (the web button's same re-arm cadence — the panel tick's
+      // re-render disarms a stale arm through the derived killArmed flag).
+      const armed = jobsKillArmedAt !== undefined && Date.now() - jobsKillArmedAt < JOB_KILL_ARM_MS
+      if (!armed) {
+        jobsKillArmedAt = Date.now()
+        scheduleRender(true)
+        return
+      }
+      jobsKillArmedAt = undefined
+      try {
+        jobs?.kill(jobsOpen, agent.session.id, 'stopped from the terminal')
+      } catch {
+        // A kill racing the job's own settlement can throw (unknown job or a
+        // fence rejection); the settled event converges the detail either way.
+        setOverlay({ kind: 'notice', text: `停止失败：${jobsOpen} 已不在运行` })
+      }
+      scheduleRender(true)
+    },
     onInterrupt: () => {
       if (exiting) return
       agent.cancel({ kind: 'user' })
@@ -1429,9 +1493,10 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
         return
       }
       if (jobsSelected !== undefined) {
-        // Enter toggles the selected job's live output block — there is no
-        // child transcript to open, so the panel keeps the keys and the cursor
-        // stays put. The index maps through jobsPanel()'s row order.
+        // Enter opens the selected job's full-screen detail (or toggles it
+        // closed if already open). The detail owns the keys while set, so the
+        // roster cursor stays put underneath. The index maps through
+        // jobsPanel()'s row order.
         const row = jobsPanel()?.rows[jobsSelected - 1]
         if (row !== undefined) {
           if (jobsOpen === row.id) {
@@ -1468,6 +1533,15 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
     },
     onPanelBack: () => {
       if (exiting) return
+      // A job detail is its own surface above the roster: the first Esc closes
+      // it back to the jobs list (the cursor stays on the row), the second
+      // leaves the panel — mirroring the continuable child's two-step ladder.
+      if (jobsOpen !== undefined) {
+        closeJobOutput()
+        panelNav = true
+        scheduleRender(true)
+        return
+      }
       const openedEntry = openChild === undefined ? undefined : children.get(openChild)
       if (openChild !== undefined && panelNav && openedEntry?.continuable === true) {
         // A continuable child keeps the two-step ladder: the first Esc drops

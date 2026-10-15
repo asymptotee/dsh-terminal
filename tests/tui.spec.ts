@@ -165,6 +165,7 @@ async function bench(script: Script): Promise<BenchHandle> {
     onPanelEnter: () => {},
     onPanelBack: () => {},
     onChildPrompt: () => {},
+    onJobKill: () => {},
   }
   let resolveBound: () => void = () => {}
   const bound = new Promise<void>((resolve) => { resolveBound = resolve })
@@ -1581,10 +1582,12 @@ describe('jobs panel', () => {
     const output = new Map<string, string>()
     let listener: ((event: FakeEvent) => void) | undefined
     const reads: { id: string; from: number }[] = []
+    const kills: { id: string; reason: string | undefined }[] = []
     return {
       rows,
       output,
       reads,
+      kills,
       emit(event: FakeEvent): void {
         // Mirror the registry: lifecycle events also move list(); the test
         // mutates `rows` itself where the case needs it.
@@ -1596,6 +1599,10 @@ describe('jobs panel', () => {
           reads.push({ id, from })
           const text = output.get(id) ?? ''
           return { chunks: from < text.length ? [{ text: text.slice(from) }] : [], next: text.length, lossy: false }
+        },
+        kill: (id: string, _caller: unknown, reason?: string) => {
+          kills.push({ id, reason })
+          return 'requested' as const
         },
         events: {
           subscribe: (_filter: unknown, l: (event: FakeEvent) => void) => {
@@ -1699,30 +1706,128 @@ describe('jobs panel', () => {
     }
   })
 
-  it('reads the opened job output incrementally on Enter and output pulses', async () => {
+  it('opens the job detail on Enter and reads its output incrementally', async () => {
     const fake = fakeRegistry()
     fake.rows.push(runningJob('bash-4'))
     fake.output.set('bash-4', 'line one\n')
     const test = await bench({ jobs: fake.registry, afterPrompt: () => {} })
     await settle()
-    // Enter on the first row opens its output block, read from offset 0.
+    // Enter on the first row opens its full-screen detail, read from offset 0.
     test.handlers.onPanelOpen()
     expect(test.views.at(-1)?.jobsSelected).toBe(1)
     test.handlers.onPanelEnter()
     await settle()
-    let panel = test.views.at(-1)?.jobs
-    expect(panel?.output).toEqual({ jobId: 'bash-4', text: 'line one\n', lossy: false })
+    let detail = test.views.at(-1)?.openJob
+    expect(detail?.jobId).toBe('bash-4')
+    expect(detail?.title).toBe('Command details')
+    expect(detail?.labelField).toBe('Command')
+    expect(detail?.output).toBe('line one\n')
+    expect(detail?.lossy).toBe(false)
     // New bytes land with an output pulse; the read resumes from the cursor.
     fake.output.set('bash-4', 'line one\nline two\n')
     fake.emit({ type: 'output', id: 'bash-4', total: 19 })
     await settle()
-    panel = test.views.at(-1)?.jobs
-    expect(panel?.output?.text).toBe('line one\nline two\n')
+    detail = test.views.at(-1)?.openJob
+    expect(detail?.output).toBe('line one\nline two\n')
     expect(fake.reads.at(-1)).toEqual({ id: 'bash-4', from: 9 })
-    // Enter on the same row again toggles the block closed.
+    // Enter on the same row again toggles the detail closed.
     test.handlers.onPanelEnter()
     await settle()
-    expect(test.views.at(-1)?.jobs?.output).toBeUndefined()
+    expect(test.views.at(-1)?.openJob).toBeUndefined()
+    test.handlers.onExit()
+    await test.exited
+    await test.ctx.fiber.dispose()
+  })
+
+  it('shows an empty detail output for a subagent job with no output ring', async () => {
+    const fake = fakeRegistry()
+    fake.rows.push(runningJob('subagent-1', { kind: 'subagent', label: '调研包结构' }))
+    const test = await bench({ jobs: fake.registry, afterPrompt: () => {} })
+    await settle()
+    test.handlers.onPanelOpen()
+    test.handlers.onPanelEnter()
+    await settle()
+    const detail = test.views.at(-1)?.openJob
+    expect(detail?.title).toBe('Subagent details')
+    expect(detail?.labelField).toBe('Task')
+    expect(detail?.label).toBe('调研包结构')
+    expect(detail?.output).toBe('')
+    test.handlers.onExit()
+    await test.exited
+    await test.ctx.fiber.dispose()
+  })
+
+  it('arms the kill gesture then kills on the second press within the window', async () => {
+    vi.useFakeTimers()
+    try {
+      const fake = fakeRegistry()
+      fake.rows.push(runningJob('bash-9'))
+      const test = await bench({ jobs: fake.registry, afterPrompt: () => {} })
+      await vi.advanceTimersByTimeAsync(0)
+      test.handlers.onPanelOpen()
+      test.handlers.onPanelEnter()
+      await vi.advanceTimersByTimeAsync(0)
+      // The first x only arms: the detail flags it, no kill yet.
+      test.handlers.onJobKill()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(test.views.at(-1)?.openJob?.killArmed).toBe(true)
+      expect(fake.kills).toHaveLength(0)
+      // The second x within the window kills with the terminal's reason.
+      test.handlers.onJobKill()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(fake.kills).toEqual([{ id: 'bash-9', reason: 'stopped from the terminal' }])
+      expect(test.views.at(-1)?.openJob?.killArmed).toBe(false)
+      test.handlers.onExit()
+      await test.exited
+      await test.ctx.fiber.dispose()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('disarms the kill gesture once the re-arm window lapses', async () => {
+    vi.useFakeTimers()
+    try {
+      const fake = fakeRegistry()
+      fake.rows.push(runningJob('bash-10'))
+      const test = await bench({ jobs: fake.registry, afterPrompt: () => {} })
+      await vi.advanceTimersByTimeAsync(0)
+      test.handlers.onPanelOpen()
+      test.handlers.onPanelEnter()
+      await vi.advanceTimersByTimeAsync(0)
+      test.handlers.onJobKill()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(test.views.at(-1)?.openJob?.killArmed).toBe(true)
+      // Past the window the arm lapses (the projection re-derives it); the next
+      // x only re-arms instead of killing.
+      await vi.advanceTimersByTimeAsync(4_000)
+      expect(test.views.at(-1)?.openJob?.killArmed).toBe(false)
+      test.handlers.onJobKill()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(fake.kills).toHaveLength(0)
+      expect(test.views.at(-1)?.openJob?.killArmed).toBe(true)
+      test.handlers.onExit()
+      await test.exited
+      await test.ctx.fiber.dispose()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not arm a kill for a settled job', async () => {
+    const fake = fakeRegistry()
+    fake.rows.push({ ...runningJob('bash-11'), status: 'completed', detail: 'exit code: 0', finishedAt: Date.now() })
+    const test = await bench({ jobs: fake.registry, afterPrompt: () => {} })
+    await settle()
+    test.handlers.onPanelOpen()
+    test.handlers.onPanelEnter()
+    await settle()
+    const detail = test.views.at(-1)?.openJob
+    expect(detail?.killable).toBe(false)
+    test.handlers.onJobKill()
+    await settle()
+    expect(fake.kills).toHaveLength(0)
+    expect(test.views.at(-1)?.openJob?.killArmed).toBe(false)
     test.handlers.onExit()
     await test.exited
     await test.ctx.fiber.dispose()
@@ -1741,13 +1846,15 @@ describe('jobs panel', () => {
     // Clamped at the row count.
     test.handlers.onPanelMove(1)
     expect(test.views.at(-1)?.jobsSelected).toBe(2)
-    // ↑ at the first row exits navigation; the open output closes with it.
+    // ↑ at the first row exits navigation; the open detail closes with it.
     test.handlers.onPanelMove(-1)
     test.handlers.onPanelEnter()
-    expect(test.views.at(-1)?.jobs?.output?.jobId).toBe('bash-5')
+    expect(test.views.at(-1)?.openJob?.jobId).toBe('bash-5')
+    test.handlers.onPanelBack()
+    expect(test.views.at(-1)?.openJob).toBeUndefined()
+    expect(test.views.at(-1)?.jobsSelected).toBe(1)
     test.handlers.onPanelMove(-1)
     expect(test.views.at(-1)?.jobsSelected).toBeUndefined()
-    expect(test.views.at(-1)?.jobs?.output).toBeUndefined()
     test.handlers.onExit()
     await test.exited
     await test.ctx.fiber.dispose()
@@ -1777,18 +1884,21 @@ describe('jobs panel', () => {
     await test.ctx.fiber.dispose()
   })
 
-  it('escapes from the jobs panel in one press', async () => {
+  it('steps out of the job detail to the roster, then to the input', async () => {
     const fake = fakeRegistry()
     fake.rows.push(runningJob('bash-8'))
     const test = await bench({ jobs: fake.registry, afterPrompt: () => {} })
     await settle()
     test.handlers.onPanelOpen()
     test.handlers.onPanelEnter()
-    expect(test.views.at(-1)?.jobs?.output).toBeDefined()
-    // No child transcript is open, so Esc clears the cursor and output at once.
+    expect(test.views.at(-1)?.openJob).toBeDefined()
+    // The first Esc closes the detail back to the roster (the cursor stays).
+    test.handlers.onPanelBack()
+    expect(test.views.at(-1)?.openJob).toBeUndefined()
+    expect(test.views.at(-1)?.jobsSelected).toBe(1)
+    // The second Esc leaves the panel to the main input.
     test.handlers.onPanelBack()
     expect(test.views.at(-1)?.jobsSelected).toBeUndefined()
-    expect(test.views.at(-1)?.jobs?.output).toBeUndefined()
     test.handlers.onExit()
     await test.exited
     await test.ctx.fiber.dispose()
