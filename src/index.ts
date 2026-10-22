@@ -22,7 +22,7 @@ import { createFrameState, foldAssistantStreamChunk, foldEvent, readableFailureM
 import type { FoldDeps, Frame, FrameState } from './fold/frames.ts'
 import { teamToolPresentation } from './fold/team-present.ts'
 import { createInkRenderer, foldInvocationLine } from './view/renderer.tsx'
-import type { ApprovalChoice, CommandInfo, GoalPanelInfo, GoalPhase, JobDetailView, JobsPanelInfo, JobRow, Overlay, RenderView, SubagentRow, TeamPanelInfo, TeamTaskRow, TuiRenderer, WorkflowMemberRow, WorkflowMemberStatus, WorkflowPanelInfo, WorkflowPhaseGroup, WorkflowRunRow, WorkflowRunStatus } from './view/renderer.tsx'
+import type { ApprovalChoice, CommandInfo, GoalPanelInfo, GoalPhase, JobDetailView, JobsPanelInfo, JobRow, Overlay, QuestionAnswer, QuestionItem, RenderView, SubagentRow, TeamPanelInfo, TeamTaskRow, TuiRenderer, WorkflowMemberRow, WorkflowMemberStatus, WorkflowPanelInfo, WorkflowPhaseGroup, WorkflowRunRow, WorkflowRunStatus } from './view/renderer.tsx'
 
 // Re-exported so driver suites import the renderer contract without reaching
 // the ink view's .tsx module directly (the host aggregate compiles specs).
@@ -1227,6 +1227,57 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
     })
   })
 
+  // ask_user_question (and plan-mode's exit_plan_mode review) reach the human
+  // through the scoped `user-questions/request` waterfall: return an answer to
+  // claim the request, or call next() to delegate. This listener sits on the
+  // unscoped loader context, so it receives the main agent's requests; a
+  // request that names a different live agent passes through. Without this
+  // answerer the tool blocks forever (NO_PROVIDER) — and plan review fails.
+  let pendingQuestion: ((answer: QuestionAnswer) => void) | undefined
+  ctx.on('user-questions/request', (request, next) => {
+    if (request.agent !== undefined && request.agent.session.id !== agent.session.id) return next()
+    // Strip the upstream item to the terminal's structural mirror: the fields
+    // the QuestionPanel renders. `intent` (plan-review) is dropped — the
+    // terminal presents the generic option flow, never the specialty panel.
+    const questions: QuestionItem[] = request.questions.map(question => ({
+      id: question.id,
+      question: question.question,
+      ...question.detail === undefined ? {} : { detail: question.detail },
+      ...question.header === undefined ? {} : { header: question.header },
+      ...question.options === undefined
+        ? {}
+        : { options: question.options.map(option => ({
+          label: option.label,
+          ...option.description === undefined ? {} : { description: option.description },
+        })) },
+      ...question.multiSelect === undefined ? {} : { multiSelect: question.multiSelect },
+    }))
+    setOverlay({
+      kind: 'question',
+      questions,
+      ...request.wait?.callId === undefined ? {} : { callId: request.wait.callId },
+    })
+    return new Promise<{ answers: { id: string; selected: string[]; custom?: string }[] }>((resolve) => {
+      // The view's answer is readonly (the view-types contract); the waterfall
+      // wants the upstream's mutable batch, so convert here at the boundary.
+      pendingQuestion = (answer) => resolve({
+        answers: answer.answers.map(item => ({
+          id: item.id,
+          selected: [...item.selected],
+          ...item.custom === undefined ? {} : { custom: item.custom },
+        })),
+      })
+      // A cancelled turn aborts the request: answer every question empty so
+      // the waterfall resolves (never hangs) and the model sees "no answer".
+      request.signal?.addEventListener('abort', () => {
+        resolve({ answers: questions.map(question => ({ id: question.id, selected: [] })) })
+      })
+    }).finally(() => {
+      pendingQuestion = undefined
+      setOverlay(undefined)
+    })
+  })
+
   // Command executions run against the session's command registry; an
   // unresolved slash line is a notice, never a model message.
   const commandSignal = new AbortController().signal
@@ -1345,6 +1396,10 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
     onApproval: (choice: ApprovalChoice) => {
       if (exiting) return
       pendingApproval?.(choice === 'allow' ? 'allowed-once' : choice === 'reject' ? 'rejected' : 'cancelled')
+    },
+    onQuestionAnswer: (answer: QuestionAnswer) => {
+      if (exiting) return
+      pendingQuestion?.(answer)
     },
     onPanelOpen: () => {
       if (exiting) return

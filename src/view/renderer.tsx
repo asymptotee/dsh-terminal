@@ -27,7 +27,7 @@ import {
   scrollStatesReducer,
   transcriptMarginTop,
 } from './terminal.ts'
-import type { InputHandlers, Overlay, RenderView, TuiRenderer } from './view-types.ts'
+import type { InputHandlers, Overlay, QuestionAnswerItem, QuestionDraft, QuestionItem, RenderView, TuiRenderer } from './view-types.ts'
 import {
   ApprovalPanel,
   COMPLETED_BOARD_LINGER_MS,
@@ -35,6 +35,7 @@ import {
   HeartbeatLine,
   PendingUserEchoes,
   PlanPanel,
+  QuestionPanel,
   WelcomeBlock,
 } from './chrome.tsx'
 import { JobDetail, JobsPanel, SubagentPanel, TeamPanel, WorkflowPanel } from './panels.tsx'
@@ -110,6 +111,7 @@ export function createInkRenderer(): TuiRenderer {
     onPanelBack: () => {},
     onChildPrompt: () => {},
     onJobKill: () => {},
+    onQuestionAnswer: () => {},
   }
   const props = (): { state: FrameState; handlers: InputHandlers; view?: RenderView } => ({
     state,
@@ -183,6 +185,118 @@ export function TuiApp({
   const [approvalIndex, setApprovalIndex] = useState(0)
   const onApprovalSelect = (delta: number): void => {
     setApprovalIndex(current => Math.min(1, Math.max(0, current + delta)))
+  }
+  // The pending ask_user_question batch, when one owns the screen bottom: the
+  // input bar routes its keys and the QuestionPanel renders it, wizard-style.
+  const questionOverlay = view?.overlay?.kind === 'question' ? view.overlay : undefined
+  // The ask_user_question wizard state, owned here (same ownership as
+  // approvalIndex): a step index walks the question batch plus a terminal
+  // Submit step, and every question keeps its own draft (option cursor,
+  // multi-select set, text, confirmed flag) so ←→ navigation can revisit and
+  // revise an answer — the step bar's ☐/✔ reads the confirmed flags. All
+  // state resets when a new question batch arrives (the overlay key changes).
+  const [questionIndex, setQuestionIndex] = useState(0)
+  const [questionDrafts, setQuestionDrafts] = useState<readonly QuestionDraft[]>([])
+  // The Submit step's own ↑↓ selection: 0 = submit the batch, 1 = cancel.
+  const [questionSubmitSelected, setQuestionSubmitSelected] = useState(0)
+  const questionQuestions = questionOverlay?.questions
+  const questionKey = questionOverlay === undefined ? '' : questionOverlay.questions.map(q => q.id).join('|')
+  const lastQuestionKeyRef = React.useRef('')
+  if (lastQuestionKeyRef.current !== questionKey) {
+    lastQuestionKeyRef.current = questionKey
+    setQuestionIndex(0)
+    setQuestionDrafts((questionQuestions ?? []).map(() => ({
+      optionSelected: 0, multiSelected: [], text: '', confirmed: false, confirmedIndex: undefined,
+    })))
+    setQuestionSubmitSelected(0)
+  }
+  const questionCount = questionQuestions?.length ?? 0
+  const questionOnSubmit = questionIndex >= questionCount
+  const currentQuestion = questionQuestions?.[questionIndex]
+  const currentDraft = questionDrafts[questionIndex]
+  // ←→ (and Tab) walk the step bar: question steps plus the Submit step.
+  const onQuestionStep = (delta: number): void => {
+    setQuestionIndex(current => Math.min(questionCount, Math.max(0, current + delta)))
+  }
+  const updateQuestionDraft = (patch: Partial<QuestionDraft>): void => {
+    const index = questionIndex
+    setQuestionDrafts(current => current.map((draft, i) => i === index ? { ...draft, ...patch } : draft))
+  }
+  const onQuestionSelect = (delta: number): void => {
+    // On the Submit step the arrows move the submit/cancel choice instead.
+    if (questionOnSubmit) {
+      setQuestionSubmitSelected(current => Math.min(1, Math.max(0, current + delta)))
+      return
+    }
+    const options = currentQuestion?.options ?? []
+    if (options.length === 0) return
+    const from = currentDraft?.optionSelected ?? 0
+    updateQuestionDraft({ optionSelected: Math.min(options.length - 1, Math.max(0, from + delta)) })
+  }
+  const onQuestionToggle = (): void => {
+    if (currentQuestion?.multiSelect !== true) return
+    const options = currentQuestion.options ?? []
+    const label = options[currentDraft?.optionSelected ?? 0]?.label
+    if (label === undefined) return
+    const checked = currentDraft?.multiSelected ?? []
+    updateQuestionDraft({
+      multiSelected: checked.includes(label) ? checked.filter(l => l !== label) : [...checked, label],
+    })
+  }
+  // The free-text draft for a no-options question; the InputBar routes typed
+  // characters here while the question overlay owns the keys.
+  const onQuestionTextChange = (text: string): void => { updateQuestionDraft({ text }) }
+  // One draft becomes its question's answer item: only a confirmed draft
+  // answers; anything left unconfirmed submits empty (skipped). A single-select
+  // question submits the index locked in at confirm time, so the submitted
+  // answer always matches the trailing ✔ the user saw.
+  const questionAnswerOf = (question: QuestionItem, draft: QuestionDraft | undefined): QuestionAnswerItem => {
+    if (draft === undefined || !draft.confirmed) return { id: question.id, selected: [] }
+    const options = question.options ?? []
+    if (options.length > 0) {
+      if (question.multiSelect === true) return { id: question.id, selected: [...draft.multiSelected] }
+      const confirmed = draft.confirmedIndex ?? draft.optionSelected
+      return { id: question.id, selected: [options[confirmed]?.label ?? ''] }
+    }
+    const trimmed = draft.text.trim()
+    return { id: question.id, selected: [], ...(trimmed === '' ? {} : { custom: trimmed }) }
+  }
+  const onQuestionConfirm = (): void => {
+    if (questionQuestions === undefined) return
+    // Enter on the Submit step follows the submit/cancel choice: 0 resolves
+    // the waterfall with every draft, 1 abandons the batch (all questions
+    // answered empty, the same as Esc).
+    if (questionOnSubmit) {
+      if (questionSubmitSelected === 1) {
+        onQuestionSkip()
+        return
+      }
+      handlers.onQuestionAnswer({
+        answers: questionQuestions.map((question, i) => questionAnswerOf(question, questionDrafts[i])),
+      })
+      return
+    }
+    // Confirm the current question (the step bar's ☒) and jump to the next
+    // unconfirmed one, falling through to the Submit step when none is left.
+    // For a single-select option question, snapshot the cursor index so the
+    // trailing ✔ tracks the confirmed choice, not the live cursor (revisiting
+    // the question and moving the arrows must not move the checkmark).
+    const singleOption = (currentQuestion?.options?.length ?? 0) > 0 && currentQuestion?.multiSelect !== true
+    updateQuestionDraft({
+      confirmed: true,
+      confirmedIndex: singleOption ? (currentDraft?.optionSelected ?? 0) : undefined,
+    })
+    const next = questionDrafts.findIndex((draft, i) => i > questionIndex && !draft.confirmed)
+    setQuestionIndex(next === -1 ? questionCount : next)
+  }
+  const onQuestionSkip = (): void => {
+    if (questionQuestions === undefined) return
+    // Esc gives up the whole batch: every question answers empty, so the
+    // waterfall resolves with a complete batch (one item per question — the
+    // tool rejects partial ones) and the model sees them all unanswered.
+    handlers.onQuestionAnswer({
+      answers: questionQuestions.map(question => ({ id: question.id, selected: [] })),
+    })
   }
   // The all-completed team board's hide flag lives here, not in TeamPanel:
   // TeamPanel unmounts while an approval question owns the screen bottom, and
@@ -430,6 +544,16 @@ export function TuiApp({
             ? { childPlaceholder: `subagent: ${opened.label}` }
             : {})}
           jobDetailOpen={openJob !== undefined}
+          questionPending={questionOverlay !== undefined}
+          questionHasOptions={(currentQuestion?.options?.length ?? 0) > 0}
+          questionMultiSelect={currentQuestion?.multiSelect === true}
+          questionTextDraft={currentDraft?.text ?? ''}
+          onQuestionSelect={onQuestionSelect}
+          onQuestionToggle={onQuestionToggle}
+          onQuestionConfirm={onQuestionConfirm}
+          onQuestionSkip={onQuestionSkip}
+          onQuestionStep={onQuestionStep}
+          onQuestionTextChange={onQuestionTextChange}
           panelAvailable={subagents.length > 0 || (view?.team?.members.length ?? 0) > 0 || workflowVisible || jobsVisible}
           commands={view?.commands ?? []}
           {...(view?.status === undefined ? {} : { status: view.status })}
@@ -445,6 +569,18 @@ export function TuiApp({
           /* The question owns the screen bottom: the bar above rendered
              nothing, and the side panels and child header wait it out. */
           <ApprovalPanel key={approvalKey(approvalOverlay)} overlay={approvalOverlay} selected={approvalIndex} width={columns} />
+        ) : questionOverlay !== undefined ? (
+          /* The ask_user_question batch owns the screen bottom the same way:
+             the step bar walks the whole batch (plus the Submit step), one
+             question at a time, keyed by the InputBar above. */
+          <QuestionPanel
+            key={questionKey}
+            questions={questionOverlay.questions}
+            index={questionIndex}
+            drafts={questionDrafts}
+            submitSelected={questionSubmitSelected}
+            width={columns}
+          />
         ) : openJob !== undefined ? (
           /* The opened job's detail owns the region below the status bar:
              it covers the side panels (the roster stays visible through the

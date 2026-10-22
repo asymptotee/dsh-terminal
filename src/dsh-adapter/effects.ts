@@ -40,5 +40,15 @@ import type {} from '@deepseek-ai/dsh-goal/types'
 // Root import is safe here — unlike dsh-goal, jobs has no separate /types
 // outlet, and a type-only root import emits nothing at runtime.
 import type {} from '@deepseek-ai/dsh-jobs'
+// Pulls in the user-questions merges the runner's question answerer needs:
+// the `user-questions/request` waterfall event on the cordis Events map, the
+// `userQuestions` session-projection key, and the `user-question-reply`
+// MessageSourceMap entry. Must be the /types subpath: the package root
+// re-exports the host-coupled service (ctx.userQuestions on the cordis
+// Context plus runtime classes) that would drag the service's implementation
+// into the program, while /types is the pure client-safe outlet. The runner
+// reads the service structurally via ctx.get, so the Context merge is not
+// needed — only the waterfall event type.
+import type {} from '@deepseek-ai/dsh-user-questions/types'
 
 export {}

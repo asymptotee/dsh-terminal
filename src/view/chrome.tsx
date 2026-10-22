@@ -11,8 +11,8 @@ import React, { useState } from 'react'
 import { Box, Text } from 'ink'
 import stringWidth from 'string-width'
 import type { FrameState } from '../fold/frames.ts'
-import type { GoalPanelInfo, Overlay, PendingUserEcho, StatusInfo } from './view-types.ts'
-import { formatContext, formatElapsed, formatTokenCount, shortenCwd, toolLabel, wrapToWidth } from './text-helpers.ts'
+import type { GoalPanelInfo, Overlay, PendingUserEcho, QuestionDraft, QuestionItem, StatusInfo } from './view-types.ts'
+import { formatContext, formatElapsed, formatTokenCount, shortenCwd, toolLabel, truncateToWidth, wrapToWidth } from './text-helpers.ts'
 
 /** How long the task board lingers after its last task completes, before the
  *  whole section disappears at once — enough time to read the final state. */
@@ -119,6 +119,240 @@ export function ApprovalPanel({
       <Text> </Text>
       <Text dimColor> Esc to cancel</Text>
     </Box>
+  )
+}
+
+/**
+ * One ask_user_question batch, rendered wizard-style over a step bar (the
+ * Claude Code pattern): every question owns a step plus a terminal Submit
+ * step, ←/→/Tab walks the bar, and the current step's question renders below
+ * with numbered options (❯ cursor, ☑/☐ for multi-select) or a free-text
+ * draft line. Confirmed steps wear ✔ on the bar, unconfirmed ☐. The driver
+ * owns the batch; the TuiApp owns the step index and per-question drafts.
+ * The panel owns the screen bottom exactly like the approval panel — the
+ * input bar renders nothing beneath it.
+ */
+export function QuestionPanel({
+  questions,
+  index,
+  drafts,
+  submitSelected,
+  width,
+}: {
+  questions: readonly QuestionItem[]
+  /** The current step: a question index, or `questions.length` for Submit. */
+  index: number
+  /** Per-question wizard state, in batch order. */
+  drafts: readonly QuestionDraft[]
+  /** The Submit step's ↑↓ choice: 0 = submit, 1 = cancel. */
+  submitSelected: number
+  width: number
+}): React.JSX.Element {
+  const onSubmit = index >= questions.length
+  const question = onSubmit ? undefined : questions[index]
+  const draft = onSubmit ? undefined : drafts[index]
+  const indent = '   '
+  const budget = Math.max(0, width - stringWidth(indent))
+  // The step bar: one cell per question (☒ confirmed, ☐ open; the current
+  // step wears ❯ and the highlight) then the Submit step. Labels shorten to
+  // the question's header when it has one, else the leading columns of the
+  // question text, so a wide batch stays one physical row.
+  const stepLabel = (q: QuestionItem): string =>
+    truncateToWidth(q.header ?? q.question, 8)
+  return (
+    <Box flexDirection="column" marginBottom={1}>
+      <Text color="#a5d8ff">{'─'.repeat(width)}</Text>
+      <Text>
+        {questions.map((q, i) => {
+          const confirmed = drafts[i]?.confirmed === true
+          const isCurrent = i === index
+          const mark = confirmed ? <Text color="green">☒</Text> : <Text dimColor>☐</Text>
+          return (
+            <Text key={q.id}>
+              {isCurrent ? <Text color="#a5d8ff"> ❯ </Text> : <Text> </Text>}
+              {mark}
+              <Text {...(isCurrent ? { color: '#a5d8ff' } : {})}> {stepLabel(q)} </Text>
+            </Text>
+          )
+        })}
+        <Text> </Text>
+        {onSubmit
+          ? <Text color="#a5d8ff">❯ ✔ Submit</Text>
+          : <Text>✔ Submit</Text>}
+      </Text>
+      {onSubmit
+        ? <QuestionReview questions={questions} drafts={drafts} submitSelected={submitSelected} indent={indent} budget={budget} />
+        : question !== undefined && (
+          <QuestionStep question={question} draft={draft} indent={indent} budget={budget} width={width} />
+        )}
+    </Box>
+  )
+}
+
+/** One question's drafted answer as review text: the option label(s) or the
+ *  free-text draft; anything unconfirmed (or blank) reads as a skip. */
+function questionReviewAnswer(question: QuestionItem, draft: QuestionDraft | undefined): string {
+  if (draft === undefined || !draft.confirmed) return '(no answer — skipped)'
+  const options = question.options ?? []
+  if (options.length > 0) {
+    if (question.multiSelect === true) {
+      return draft.multiSelected.length === 0 ? '(nothing selected — skipped)' : draft.multiSelected.join(', ')
+    }
+    return options[draft.confirmedIndex ?? draft.optionSelected]?.label ?? '(no answer — skipped)'
+  }
+  const trimmed = draft.text.trim()
+  return trimmed === '' ? '(no answer — skipped)' : trimmed
+}
+
+/** The Submit step's review: only the answered questions (each with its
+ *  drafted answer in green), an ⚠ line when some questions are still
+ *  unanswered, then the submit/cancel choice — the Claude Code confirmation
+ *  pattern, so the batch is inspected as a whole before it resolves the
+ *  model's tool call. */
+function QuestionReview({
+  questions,
+  drafts,
+  submitSelected,
+  indent,
+  budget,
+}: {
+  questions: readonly QuestionItem[]
+  drafts: readonly QuestionDraft[]
+  submitSelected: number
+  indent: string
+  budget: number
+}): React.JSX.Element {
+  // Only confirmed questions are listed; the rest are "skipped" and flagged by
+  // the warning below rather than shown as empty rows.
+  const answered = questions
+    .map((question, i) => ({ question, draft: drafts[i] }))
+    .filter((entry): entry is { question: QuestionItem; draft: QuestionDraft } => entry.draft?.confirmed === true)
+  const unanswered = questions.length - answered.length
+  return (
+    <>
+      <Text> </Text>
+      <Text>{indent}Review your answers</Text>
+      {unanswered > 0
+        ? (
+          <>
+            <Text> </Text>
+            <Text color="#ffd43b">{indent}⚠ You have not answered all questions</Text>
+          </>
+        )
+        : null}
+      <Text> </Text>
+      {answered.map(({ question, draft }) => (
+        <Box key={question.id} flexDirection="column">
+          <Text>{indent}● {truncateToWidth(question.question, budget)}</Text>
+          <Text color="#51cf66">{indent}  → {questionReviewAnswer(question, draft)}</Text>
+        </Box>
+      ))}
+      <Text> </Text>
+      <Text>{indent}Ready to submit your answers?</Text>
+      <Text> </Text>
+      {['Submit answers', 'Cancel'].map((label, i) => {
+        // The number is always dim; the cursor row's ❯ and label turn light
+        // blue, while an unselected label stays plain white (never dim — only
+        // its number is).
+        const isCursor = i === submitSelected
+        return (
+          <Text key={label}>
+            {indent}{isCursor ? <Text color="#a5d8ff">❯</Text> : <Text> </Text>}
+            <Text dimColor> {i + 1}.</Text>
+            {isCursor ? <Text color="#a5d8ff"> {label}</Text> : <Text> {label}</Text>}
+          </Text>
+        )
+      })}
+      <Text> </Text>
+      <Text dimColor>{indent}↑↓ 选择 · Enter 确认 · ←/→ 回看修改 · Esc 取消</Text>
+    </>
+  )
+}
+
+/** The current step's question body: header, question text, detail, then the
+ *  numbered option menu or the free-text draft line, and the step's key hint. */
+function QuestionStep({
+  question,
+  draft,
+  indent,
+  budget,
+  width: _width,
+}: {
+  question: QuestionItem
+  draft: QuestionDraft | undefined
+  indent: string
+  budget: number
+  width: number
+}): React.JSX.Element {
+  const options = question.options ?? []
+  const hasOptions = options.length > 0
+  const selected = draft?.optionSelected ?? 0
+  const multiSelected = draft?.multiSelected ?? []
+  const textDraft = draft?.text ?? ''
+  const questionLines = wrapToWidth(question.question, budget)
+  const detailLines = question.detail === undefined ? [] : wrapToWidth(question.detail, budget)
+  return (
+    <>
+      {/* The header is already shown as this step's cell on the step bar, so
+          the body leads straight into the question text — no repeated eyebrow,
+          just one breathing row under the bar. */}
+      <Text> </Text>
+      {questionLines.map((line, i) => <Text key={`q-${i}`}>{indent}{line}</Text>)}
+      {detailLines.length === 0 ? null : (
+        <>
+          <Text> </Text>
+          {detailLines.map((line, i) => <Text key={`d-${i}`} dimColor>{indent}{line}</Text>)}
+        </>
+      )}
+      <Text> </Text>
+      {hasOptions
+        ? options.map((option, i) => {
+          // One row = `❯ 1. [✔] label` for a multi-select question (the
+          // bracket checkbox after the number is the at-a-glance "takes
+          // several" signal, checked rows green) or `❯ 1. label ✔` for a
+          // single-select one (the trailing ✔ marks the index locked in at
+          // confirm time, never the live cursor). The number is always dim;
+          // the label is light green once chosen, light blue while the cursor
+          // sits on it, plain white otherwise; the description line is always
+          // dim, indented to sit under the label in both layouts.
+          const isCursor = i === selected
+          const isMulti = question.multiSelect === true
+          const checked = isMulti && multiSelected.includes(option.label)
+          const chosen = isMulti ? checked : draft?.confirmedIndex === i
+          const labelColor = chosen ? '#51cf66' : isCursor ? '#a5d8ff' : undefined
+          // Multi rows carry the extra `[✔] ` checkbox (4 columns), so their
+          // description indent grows to stay under the label.
+          const descIndent = isMulti ? `${indent}         ` : `${indent}     `
+          return (
+            <Box key={option.label} flexDirection="column">
+              <Text>
+                {indent}
+                {isCursor ? <Text color="#a5d8ff">❯</Text> : <Text> </Text>}
+                <Text dimColor> {i + 1}.</Text>
+                {isMulti
+                  ? checked ? <Text color="green"> [✔]</Text> : <Text dimColor> [ ]</Text>
+                  : null}
+                <Text {...(labelColor === undefined ? {} : { color: labelColor })}> {option.label}</Text>
+                {!isMulti && chosen ? <Text color="green"> ✔</Text> : null}
+              </Text>
+              {option.description === undefined ? null : (
+                <Text dimColor>{descIndent}{option.description}</Text>
+              )}
+            </Box>
+          )
+        })
+        : (
+          <Box>
+            <Text>{indent}❯ {textDraft}<Text>█</Text></Text>
+          </Box>
+        )}
+      <Text> </Text>
+      <Text dimColor>
+        {indent}{hasOptions
+          ? `${question.multiSelect === true ? '↑↓ 选择 · space 勾选 · ' : '↑↓ 选择 · '}Enter 确认 · ←/→ 跳题 · Esc 放弃全部`
+          : 'Enter 提交 · ←/→ 跳题 · Esc 放弃全部'}
+      </Text>
+    </>
   )
 }
 

@@ -36,6 +36,15 @@
     - id: auto-review
       name: '@deepseek-ai/dsh-experimental-auto-review'
 
+    # The model-facing ask_user_question tool. The user-questions service is
+    # already mounted by dsh-base; this row adds the tool (legacy blocking
+    # mode, the web-app default) whose waterfall the terminal's runner
+    # answers with its question overlay. Without an answerer row here the
+    # model has no way to ask; without the runner's answerer every ask (and
+    # plan-mode's exit_plan_mode review) would fail with NO_PROVIDER.
+    - id: tool-ask-user
+      name: '@deepseek-ai/dsh-tool-ask-user'
+
     # Bare package names: the dsh plugin mechanism installs this package into
     # the profile's node_modules, where the Loader resolves its exports.
     - id: tui-startup

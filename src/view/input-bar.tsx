@@ -41,6 +41,16 @@ export function InputBar({
   childReadOnlyNote,
   childPlaceholder,
   jobDetailOpen = false,
+  questionPending = false,
+  questionHasOptions = false,
+  questionMultiSelect = false,
+  questionTextDraft = '',
+  onQuestionSelect,
+  onQuestionToggle,
+  onQuestionConfirm,
+  onQuestionSkip,
+  onQuestionStep,
+  onQuestionTextChange,
   panelAvailable = false,
   commands = [],
   status,
@@ -54,6 +64,27 @@ export function InputBar({
   onToggleExpand: () => void
   /** Move the arrow selection of the pending approval question. */
   onApprovalSelect: (delta: number) => void
+  /** A question batch owns the screen bottom: the bar renders nothing (the
+   *  QuestionPanel takes its rows) while still routing the question's keys. */
+  questionPending?: boolean
+  /** The current question offers options (a menu) rather than free text. */
+  questionHasOptions?: boolean
+  /** The current question allows multiple option selections (space toggles). */
+  questionMultiSelect?: boolean
+  /** The current free-text draft for a no-options question, owned by TuiApp. */
+  questionTextDraft?: string
+  /** Move the arrow selection of the current question's options. */
+  onQuestionSelect?: (delta: number) => void
+  /** Toggle the arrow-selected option in a multi-select question. */
+  onQuestionToggle?: () => void
+  /** Confirm the current question (its selected options, or its text draft). */
+  onQuestionConfirm?: () => void
+  /** Skip the current question (an empty answer item). */
+  onQuestionSkip?: () => void
+  /** Walk the question step bar (←/→/Tab) across the batch and its Submit step. */
+  onQuestionStep?: (delta: number) => void
+  /** Replace the free-text draft as the user types a no-options answer. */
+  onQuestionTextChange?: (text: string) => void
   /** Scroll the transcript: wheel notches and PageUp/PageDown. */
   onScroll?: (action: ScrollAction) => void
   /** Fired once when the buffer first becomes non-empty (typing or paste). */
@@ -164,6 +195,38 @@ export function InputBar({
       if (key.upArrow) onApprovalSelect(-1)
       if (key.downArrow) onApprovalSelect(1)
       if (key.return) handlers.onApproval(approvalSelected === 0 ? 'allow' : 'reject')
+      return
+    }
+    if (questionPending) {
+      // The pending question batch owns the keys, wizard-style: one question
+      // at a time. An option question takes the arrows, space (multi-select
+      // toggle), Enter (confirm), and Esc (skip). A free-text question types
+      // into the TuiApp-owned draft (rendered by the QuestionPanel), and
+      // Enter/Esc mean the same. The main buffer, history, and the slash menu
+      // all stay untouched.
+      if (key.escape) { onQuestionSkip?.(); return }
+      if (key.return) { onQuestionConfirm?.(); return }
+      // ←→ (and Tab/Shift+Tab) walk the step bar across the batch and its
+      // Submit step, independent of the current question's kind.
+      if (key.leftArrow || (key.tab && key.shift)) { onQuestionStep?.(-1); return }
+      if (key.rightArrow || (key.tab && !key.shift)) { onQuestionStep?.(1); return }
+      // ↑↓ always route to the TuiApp, which decides by step: the Submit
+      // step's choice, an option question's cursor, or a no-op for text.
+      if (key.upArrow) { onQuestionSelect?.(-1); return }
+      if (key.downArrow) { onQuestionSelect?.(1); return }
+      if (questionHasOptions) {
+        if (input === ' ' && questionMultiSelect) { onQuestionToggle?.(); return }
+        return
+      }
+      if (key.backspace) {
+        onQuestionTextChange?.(questionTextDraft.slice(0, -1))
+        return
+      }
+      if (input !== '' && !key.ctrl && !key.meta) {
+        // A pasted chunk reaching useInput carries CR/CRLF; normalize to LF
+        // like the main editor does (the draft renders line-split).
+        onQuestionTextChange?.(questionTextDraft + input.replace(/\r\n|\r/g, '\n'))
+      }
       return
     }
     if (focusMode === 'job') {
@@ -350,6 +413,10 @@ export function InputBar({
   // status footer) yields entirely — the detail's own keys hint carries the
   // standing facts, so no duplicate footer line.
   if (jobDetailOpen) return <Box />
+  // A pending ask_user_question owns the screen bottom: the bar renders
+  // nothing (the QuestionPanel takes its rows in the chrome band) while still
+  // routing the question's keys through the handler above.
+  if (questionPending) return <Box />
   // A read-only child (one-shot, or no descriptor mode known) takes no
   // prompts; its box still draws — in the child view's light-blue chrome —
   // with a dim note explaining the silence in place of a caret, and the

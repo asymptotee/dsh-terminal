@@ -38,6 +38,59 @@ export interface InputHandlers {
   /** The job detail's two-step stop gesture: the first `x` arms, a second
    *  within the window kills the opened job. */
   onJobKill(): void
+  /** Answer the pending ask_user_question batch, resolving the answerer
+   *  waterfall that the tool call blocks on. */
+  onQuestionAnswer(answer: QuestionAnswer): void
+}
+
+/** One question the agent asks the user (the terminal's structural mirror of
+ *  the upstream AskUserQuestionItem; intent is dropped — the terminal renders
+ *  the generic option flow, never the plan-review specialty). */
+export interface QuestionItem {
+  /** Stable caller-provided question id, echoed in the answer. */
+  id: string
+  /** The question text. */
+  question: string
+  /** Optional supporting detail rendered dim under the question. */
+  detail?: string
+  /** Optional short heading/group label. */
+  header?: string
+  /** Optional choices the UI renders as a menu; absent asks for free text. */
+  options?: readonly { label: string; description?: string }[]
+  /** Whether more than one option may be selected; defaults to single-select. */
+  multiSelect?: boolean
+}
+
+/** The answer to one question: selected option labels, optionally custom text.
+ *  A skipped question is an item with empty `selected` and no `custom`. */
+export interface QuestionAnswerItem {
+  id: string
+  selected: readonly string[]
+  custom?: string
+}
+
+/** One question's in-progress wizard state, keyed by question id so the step
+ *  bar can navigate back and forth without losing a draft. `confirmed` is the
+ *  ✔ on the step bar: the user pressed Enter on this question at least once. */
+export interface QuestionDraft {
+  /** The arrow-selected option index (single-select) or cursor (multi-select). */
+  optionSelected: number
+  /** The checked option labels for a multi-select question. */
+  multiSelected: readonly string[]
+  /** The free-text draft for a no-options question. */
+  text: string
+  /** Whether Enter has confirmed this question (the step bar's ✔). */
+  confirmed: boolean
+  /** The option index locked in at confirm time (single-select only). The
+   *  trailing ✔ follows this saved choice, NOT the live cursor, so moving the
+   *  cursor over a confirmed question does not move the checkmark. Undefined
+   *  while the question is unconfirmed (or was reset). */
+  confirmedIndex: number | undefined
+}
+
+/** The user's answer to one ask_user_question batch. */
+export interface QuestionAnswer {
+  answers: readonly QuestionAnswerItem[]
 }
 
 /** A transient surface message (above the input bar) or the bottom approval question. */
@@ -52,6 +105,14 @@ export type Overlay =
     detail?: string
     /** The decided call's id, when the asker had one: the transcript dims that
      *  pending card's dot while the question waits. */
+    callId?: string
+  }
+  | {
+    kind: 'question'
+    /** The question batch, asked one at a time in wizard order. */
+    questions: readonly QuestionItem[]
+    /** The asking tool call's id, when the asker had one: the transcript dims
+     *  that pending card's dot while the question waits. */
     callId?: string
   }
 

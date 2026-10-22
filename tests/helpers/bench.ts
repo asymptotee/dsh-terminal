@@ -164,6 +164,7 @@ export async function bench(script: Script): Promise<BenchHandle> {
     onPanelBack: () => {},
     onChildPrompt: () => {},
     onJobKill: () => {},
+    onQuestionAnswer: () => {},
   }
   let resolveBound: () => void = () => {}
   const bound = new Promise<void>((resolve) => { resolveBound = resolve })
