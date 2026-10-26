@@ -11,7 +11,7 @@ import React, { useState } from 'react'
 import { Box, Text } from 'ink'
 import stringWidth from 'string-width'
 import type { FrameState } from '../fold/frames.ts'
-import type { GoalPanelInfo, Overlay, PendingUserEcho, QuestionDraft, QuestionItem, StatusInfo } from './view-types.ts'
+import type { GoalPanelInfo, Overlay, PendingUserEcho, PlanReviewNarrowed, QuestionDraft, QuestionItem, StatusInfo } from './view-types.ts'
 import { formatContext, formatElapsed, formatTokenCount, shortenCwd, toolLabel, truncateToWidth, wrapToWidth } from './text-helpers.ts'
 
 /** How long the task board lingers after its last task completes, before the
@@ -353,6 +353,111 @@ function QuestionStep({
           : 'Enter 提交 · ←/→ 跳题 · Esc 放弃全部'}
       </Text>
     </>
+  )
+}
+
+/**
+ * Narrow a question batch to a plan review, or undefined to leave it to the
+ * generic question flow — the web client's planReviewOf. It accepts one
+ * question carrying the plan markdown as its detail and a named approve option,
+ * with at most one alternative and no multi-select; larger choices stay generic.
+ * The narrowed view keeps the asker's own option labels (an answer must carry
+ * one verbatim) and the logged plan-call id; the control bar's display copy is
+ * the terminal's own fixed text, like the web client's localized buttons.
+ */
+export function planReviewOf(questions: readonly QuestionItem[]): PlanReviewNarrowed | undefined {
+  if (questions.length !== 1) return undefined
+  const question = questions[0]
+  const intent = question.intent
+  if (intent?.kind !== 'plan-review' || question.detail === undefined) return undefined
+  if (question.multiSelect === true) return undefined
+  const options = question.options ?? []
+  if (options.length > 2) return undefined
+  const approve = options.find(option => option.label === intent.approve)
+  if (approve === undefined) return undefined
+  const decline = options.find(option => option.label !== intent.approve)
+  return {
+    id: question.id,
+    plan: question.detail,
+    ...intent.callId === undefined ? {} : { callId: intent.callId },
+    approveLabel: intent.approve,
+    ...decline === undefined ? {} : { declineLabel: decline.label },
+  }
+}
+
+/** The control bar's fixed display copy (the reference wording, DSH-branded);
+ *  the submitted answer still carries the asker's own option labels. */
+const PLAN_LEAD = 'DSH has written up a plan and is ready to execute. Would you like to proceed?'
+const PLAN_APPROVE_ROW = 'Yes'
+const PLAN_FEEDBACK_ROW = 'Tell DSH what to change'
+
+/**
+ * The plan-review control bar at the screen bottom, the reference layout: a
+ * plain-white lead asks whether to proceed, `❯ 1. Yes` approves, and row 2 IS the
+ * feedback input (the reference's input-row pattern, no open step): the row
+ * reads dim like a placeholder at rest, the ❯ landing on it starts the caret
+ * at the line head ahead of the placeholder text, and the first typed
+ * character replaces the placeholder with the live draft. Enter there submits
+ * the keep-planning answer with the draft as its custom text (an empty draft
+ * refuses Enter), and Esc keeps planning without feedback from any row. The
+ * plan document renders in the transcript window above, never down here.
+ */
+export function PlanReviewPanel({
+  review,
+  selected,
+  feedback,
+  width,
+}: {
+  review: PlanReviewNarrowed
+  /** The arrow-selected decision: 0 = approve, 1 = the feedback input row. */
+  selected: number
+  /** The in-progress feedback text. */
+  feedback: string
+  width: number
+}): React.JSX.Element {
+  const hasDecline = review.declineLabel !== undefined
+  const rows = hasDecline ? [PLAN_APPROVE_ROW, PLAN_FEEDBACK_ROW] : [PLAN_APPROVE_ROW]
+  const leadLines = wrapToWidth(PLAN_LEAD, Math.max(0, width - 1))
+  // The input row is live exactly while the ❯ sits on it — there is no
+  // separate opened state; selection is the mode.
+  const inputLive = hasDecline && selected === rows.length - 1
+  return (
+    <Box flexDirection="column" marginBottom={1}>
+      <Text color="#a5d8ff">{'─'.repeat(width)}</Text>
+      <Text> </Text>
+      {leadLines.map((line, i) => <Text key={`lead-${i}`}> {line}</Text>)}
+      <Text> </Text>
+      {rows.map((row, i) => {
+        const isCursor = i === selected
+        const isInput = hasDecline && i === rows.length - 1
+        return (
+          <Text key={row}>
+            {isCursor ? <Text color="#a5d8ff"> ❯</Text> : <Text>  </Text>}
+            <Text dimColor> {i + 1}.</Text>
+            {isInput
+              ? inputLive
+                ? (
+                  <>
+                    {/* Live input: the caret leads at the line head while the
+                        draft is empty (the dim placeholder still reads right
+                        after it); the first typed character replaces the
+                        placeholder and carries the caret from then on. */}
+                    <Text> {feedback === '' ? '█' : `${feedback}█`}</Text>
+                    {feedback === '' ? <Text dimColor>{PLAN_FEEDBACK_ROW}</Text> : null}
+                  </>
+                )
+                : <Text dimColor> {PLAN_FEEDBACK_ROW}</Text>
+              : <Text {...(isCursor ? { color: '#a5d8ff' } : {})}> {row}</Text>}
+          </Text>
+        )
+      })}
+      <Text> </Text>
+      <Text dimColor>
+        {inputLive
+          ? ' 输入修改意见 · Enter 连同反馈提交 · Esc 保持规划'
+          : ' ↑↓ 选择 · Enter 确认 · Esc 保持规划'}
+      </Text>
+    </Box>
   )
 }
 

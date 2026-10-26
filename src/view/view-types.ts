@@ -44,8 +44,7 @@ export interface InputHandlers {
 }
 
 /** One question the agent asks the user (the terminal's structural mirror of
- *  the upstream AskUserQuestionItem; intent is dropped — the terminal renders
- *  the generic option flow, never the plan-review specialty). */
+ *  the upstream AskUserQuestionItem, intent included). */
 export interface QuestionItem {
   /** Stable caller-provided question id, echoed in the answer. */
   id: string
@@ -59,6 +58,33 @@ export interface QuestionItem {
   options?: readonly { label: string; description?: string }[]
   /** Whether more than one option may be selected; defaults to single-select. */
   multiSelect?: boolean
+  /** A caller-declared presentation intent; the terminal renders `plan-review`
+   *  as its dedicated plan-review overlay and every other kind generically. */
+  intent?: {
+    kind: string
+    approve: string
+    /** The logged tool invocation whose arguments contain the reviewed plan;
+     *  when its `exit_plan_mode` frame is on screen the transcript renders the
+     *  durable plan document from there instead of the transient overlay copy. */
+    callId?: string
+  }
+}
+
+/** A question batch narrowed to a plan review: everything the plan-review
+ *  surfaces answer with. Mirrors the web client's PlanReview — the labels are
+ *  the asker's own options (an answer must carry one verbatim) while the
+ *  rendered display copy is the terminal's own fixed text. */
+export interface PlanReviewNarrowed {
+  /** The reviewed question's id, echoed in the answer. */
+  id: string
+  /** The plan markdown under review. */
+  plan: string
+  /** The logged invocation carrying the reviewed plan; see QuestionItem.intent. */
+  callId?: string
+  /** The option label that approves the plan. */
+  approveLabel: string
+  /** The option label that keeps planning; absent when the asker offered none. */
+  declineLabel?: string
 }
 
 /** The answer to one question: selected option labels, optionally custom text.

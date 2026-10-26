@@ -27,7 +27,7 @@ import {
   scrollStatesReducer,
   transcriptMarginTop,
 } from './terminal.ts'
-import type { InputHandlers, Overlay, QuestionAnswerItem, QuestionDraft, QuestionItem, RenderView, TuiRenderer } from './view-types.ts'
+import type { InputHandlers, Overlay, PlanReviewNarrowed, QuestionAnswerItem, QuestionDraft, QuestionItem, RenderView, TuiRenderer } from './view-types.ts'
 import {
   ApprovalPanel,
   COMPLETED_BOARD_LINGER_MS,
@@ -35,11 +35,13 @@ import {
   HeartbeatLine,
   PendingUserEchoes,
   PlanPanel,
+  PlanReviewPanel,
+  planReviewOf,
   QuestionPanel,
   WelcomeBlock,
 } from './chrome.tsx'
 import { JobDetail, JobsPanel, SubagentPanel, TeamPanel, WorkflowPanel } from './panels.tsx'
-import { FrameRow, frameKey } from './transcript.tsx'
+import { FrameRow, frameKey, PlanDocument, planMarkdownOf } from './transcript.tsx'
 import { InputBar, READ_ONLY_CHILD_NOTE } from './input-bar.tsx'
 import { useTerminalSize } from './use-terminal.ts'
 
@@ -200,6 +202,14 @@ export function TuiApp({
   // The Submit step's own ↑↓ selection: 0 = submit the batch, 1 = cancel.
   const [questionSubmitSelected, setQuestionSubmitSelected] = useState(0)
   const questionQuestions = questionOverlay?.questions
+  // A plan-review question narrows to its dedicated overlay: the plan renders
+  // in the transcript window (top-anchored, scrollable) and the control bar
+  // asks Yes / Tell-DSH-what-to-change, where the second row is itself the
+  // feedback input — no separate opened state, the ❯ landing on it goes live.
+  // The generic wizard stays untouched when the batch doesn't narrow.
+  const planReview = questionQuestions === undefined ? undefined : planReviewOf(questionQuestions)
+  const [planSelected, setPlanSelected] = useState(0)
+  const [planFeedback, setPlanFeedback] = useState('')
   const questionKey = questionOverlay === undefined ? '' : questionOverlay.questions.map(q => q.id).join('|')
   const lastQuestionKeyRef = React.useRef('')
   if (lastQuestionKeyRef.current !== questionKey) {
@@ -209,6 +219,8 @@ export function TuiApp({
       optionSelected: 0, multiSelected: [], text: '', confirmed: false, confirmedIndex: undefined,
     })))
     setQuestionSubmitSelected(0)
+    setPlanSelected(0)
+    setPlanFeedback('')
   }
   const questionCount = questionQuestions?.length ?? 0
   const questionOnSubmit = questionIndex >= questionCount
@@ -298,6 +310,49 @@ export function TuiApp({
       answers: questionQuestions.map(question => ({ id: question.id, selected: [] })),
     })
   }
+  // ---- Plan-review decision closures ---------------------------------
+  // The overlay reuses the InputBar's question key routing; this simpler
+  // single-question flow owns the approve/keep-planning decision. The second
+  // row is a live input while the ❯ sits on it (the arrows still navigate
+  // away from it, the reference radio-list reading), so there is no separate
+  // feedback mode — the selection is the mode.
+  const planAnswerCount = planReview === undefined ? 0 : (planReview.declineLabel === undefined ? 1 : 2)
+  const onPlanSelect = (delta: number): void => {
+    setPlanSelected(current => Math.min(planAnswerCount - 1, Math.max(0, current + delta)))
+  }
+  const submitKeepPlanning = (feedback: string): void => {
+    if (planReview === undefined) return
+    const trimmed = feedback.trim()
+    handlers.onQuestionAnswer({
+      answers: [{
+        id: planReview.id,
+        // No decline option offered: answer empty with the custom feedback —
+        // anything but the approve label keeps planning upstream.
+        selected: planReview.declineLabel === undefined ? [] : [planReview.declineLabel],
+        ...(trimmed === '' ? {} : { custom: trimmed }),
+      }],
+    })
+  }
+  const onPlanConfirm = (): void => {
+    if (planReview === undefined) return
+    if (planSelected === 0) {
+      handlers.onQuestionAnswer({ answers: [{ id: planReview.id, selected: [planReview.approveLabel] }] })
+      return
+    }
+    // Enter on the input row submits the keep-planning answer with the typed
+    // feedback; an empty draft refuses Enter — the reference input-row
+    // reading, nothing submits and the caret stays where it is.
+    if (planFeedback.trim() === '') return
+    submitKeepPlanning(planFeedback)
+  }
+  const onPlanSkip = (): void => {
+    if (planReview === undefined) return
+    // Esc keeps planning without feedback from any row — the reference's
+    // cancel reading: the upstream tool call resolves with the keep-planning
+    // message ("the user wants to speak instead"), dropping any typed draft.
+    submitKeepPlanning('')
+  }
+  const onPlanTextChange = (text: string): void => { setPlanFeedback(text) }
   // The all-completed team board's hide flag lives here, not in TeamPanel:
   // TeamPanel unmounts while an approval question owns the screen bottom, and
   // the hide must survive that round trip — the linger timer keeps running
@@ -438,7 +493,7 @@ export function TuiApp({
   // centered from frame one instead of flashing above center until measured.
   const welcomeChromeRows = 3 + (view?.status !== undefined ? (view.status.mode !== undefined ? 2 : 1) + 1 : 0)
   const welcomeWindowRows = scroll.windowRows > 0 ? scroll.windowRows : Math.max(3, rows - welcomeChromeRows)
-  const transcript = opened === undefined ? (
+  const baseTranscript = opened === undefined ? (
     showWelcome ? (
       <Box
         flexDirection="column"
@@ -466,6 +521,30 @@ export function TuiApp({
           <FrameRow frame={frame} expandedOutput={expandedOutput} approvalCallId={approvalOverlay?.callId} />
         </Box>
       ))}
+    </>
+  )
+  // The plan-review document sits in the transcript window under its "Here is
+  // DSH's plan:" card (headings, bold, code, tables as light markdown), the
+  // inline plan block pattern. The durable source is the exit_plan_mode
+  // frame the review names — while that frame is on screen its ToolRow renders
+  // the document itself, and it stays there after the answer (once settled
+  // approved it collapses into the `● User approved DSH's plan` verdict card;
+  // across a resume the fold replays the same arguments either way). Only when
+  // the review names no such frame (an ask without a logged plan call) does a
+  // transient copy append at the live bottom, disappearing once answered.
+  const planInTranscript = planReview !== undefined && frames.some(frame => {
+    if (frame.kind !== 'tool') return false
+    const plan = planMarkdownOf(frame)
+    if (plan === undefined) return false
+    // The named call is authoritative (the web client reopens the logged plan
+    // by callId); without a callId, a frame carrying the same text is the same
+    // document, so the transient copy would only duplicate it on screen.
+    return planReview.callId === undefined ? plan === planReview.plan : frame.callId === planReview.callId
+  })
+  const transcript = planReview === undefined || planInTranscript ? baseTranscript : (
+    <>
+      {baseTranscript}
+      <PlanDocument plan={planReview.plan} />
     </>
   )
 
@@ -545,15 +624,18 @@ export function TuiApp({
             : {})}
           jobDetailOpen={openJob !== undefined}
           questionPending={questionOverlay !== undefined}
-          questionHasOptions={(currentQuestion?.options?.length ?? 0) > 0}
-          questionMultiSelect={currentQuestion?.multiSelect === true}
-          questionTextDraft={currentDraft?.text ?? ''}
-          onQuestionSelect={onQuestionSelect}
+          // The plan review's input row owns the keys the moment the ❯ lands
+          // on it: typing flows to the feedback draft while selected there,
+          // and the approve row swallows type like any option row.
+          questionHasOptions={planReview !== undefined ? planSelected === 0 : (currentQuestion?.options?.length ?? 0) > 0}
+          questionMultiSelect={planReview !== undefined ? false : currentQuestion?.multiSelect === true}
+          questionTextDraft={planReview !== undefined ? planFeedback : (currentDraft?.text ?? '')}
+          onQuestionSelect={planReview !== undefined ? onPlanSelect : onQuestionSelect}
           onQuestionToggle={onQuestionToggle}
-          onQuestionConfirm={onQuestionConfirm}
-          onQuestionSkip={onQuestionSkip}
-          onQuestionStep={onQuestionStep}
-          onQuestionTextChange={onQuestionTextChange}
+          onQuestionConfirm={planReview !== undefined ? onPlanConfirm : onQuestionConfirm}
+          onQuestionSkip={planReview !== undefined ? onPlanSkip : onQuestionSkip}
+          onQuestionStep={planReview !== undefined ? () => {} : onQuestionStep}
+          onQuestionTextChange={planReview !== undefined ? onPlanTextChange : onQuestionTextChange}
           panelAvailable={subagents.length > 0 || (view?.team?.members.length ?? 0) > 0 || workflowVisible || jobsVisible}
           commands={view?.commands ?? []}
           {...(view?.status === undefined ? {} : { status: view.status })}
@@ -569,6 +651,18 @@ export function TuiApp({
           /* The question owns the screen bottom: the bar above rendered
              nothing, and the side panels and child header wait it out. */
           <ApprovalPanel key={approvalKey(approvalOverlay)} overlay={approvalOverlay} selected={approvalIndex} width={columns} />
+        ) : planReview !== undefined ? (
+          /* A plan-review question takes over: the plan markdown renders in
+             the transcript window above, and this control bar asks the
+             approve / feedback decision — the second row is a live input
+             while the ❯ sits on it, no separate opened state. */
+          <PlanReviewPanel
+            key={questionKey}
+            review={planReview}
+            selected={planSelected}
+            feedback={planFeedback}
+            width={columns}
+          />
         ) : questionOverlay !== undefined ? (
           /* The ask_user_question batch owns the screen bottom the same way:
              the step bar walks the whole batch (plus the Submit step), one

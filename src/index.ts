@@ -1237,8 +1237,9 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
   ctx.on('user-questions/request', (request, next) => {
     if (request.agent !== undefined && request.agent.session.id !== agent.session.id) return next()
     // Strip the upstream item to the terminal's structural mirror: the fields
-    // the QuestionPanel renders. `intent` (plan-review) is dropped — the
-    // terminal presents the generic option flow, never the specialty panel.
+    // the QuestionPanel renders. `intent` is kept (kind + approve) so the view
+    // can narrow a plan-review request to its dedicated plan-review overlay;
+    // every other intent kind renders through the generic option flow.
     const questions: QuestionItem[] = request.questions.map(question => ({
       id: question.id,
       question: question.question,
@@ -1251,6 +1252,17 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
           ...option.description === undefined ? {} : { description: option.description },
         })) },
       ...question.multiSelect === undefined ? {} : { multiSelect: question.multiSelect },
+      ...question.intent === undefined
+        ? {}
+        : {
+          intent: {
+            kind: question.intent.kind,
+            approve: question.intent.approve,
+            // The logged plan call: the transcript renders the durable plan
+            // document from that frame's arguments when it is on screen.
+            ...question.intent.callId === undefined ? {} : { callId: question.intent.callId },
+          },
+        },
     }))
     setOverlay({
       kind: 'question',

@@ -41,7 +41,7 @@ describe('ask_user_question answerer', () => {
     await test.ctx.fiber.dispose()
   })
 
-  it('strips upstream-only fields and carries the call id', async () => {
+  it('carries the call id and keeps the plan-review intent', async () => {
     const test = await bench({ afterPrompt: () => {} })
     const outcome = ask(test, {
       agent: test.agent,
@@ -52,10 +52,12 @@ describe('ask_user_question answerer', () => {
           question: 'Approve the plan?',
           detail: 'the plan markdown',
           header: 'Plan review',
-          options: [{ label: 'Approve', description: 'go ahead' }, { label: 'Decline' }],
+          options: [{ label: 'Approve', description: 'go ahead' }, { label: 'Keep planning' }],
           multiSelect: false,
-          // `intent` is upstream-only (plan-review specialty); the terminal drops it.
-          intent: { kind: 'plan-review', approve: 'Approve' },
+          // The intent survives the mirror so the view can narrow this to the
+          // dedicated plan-review overlay; its callId names the logged
+          // exit_plan_mode call whose arguments carry the reviewed plan.
+          intent: { kind: 'plan-review', approve: 'Approve', callId: 'call-plan' },
         },
       ],
     })
@@ -67,8 +69,9 @@ describe('ask_user_question answerer', () => {
         question: 'Approve the plan?',
         detail: 'the plan markdown',
         header: 'Plan review',
-        options: [{ label: 'Approve', description: 'go ahead' }, { label: 'Decline' }],
+        options: [{ label: 'Approve', description: 'go ahead' }, { label: 'Keep planning' }],
         multiSelect: false,
+        intent: { kind: 'plan-review', approve: 'Approve', callId: 'call-plan' },
       }],
     })
     test.handlers.onQuestionAnswer({ answers: [{ id: 'q1', selected: ['Approve'] }] })

@@ -183,10 +183,65 @@ function CommandRow({ frame }: { frame: Extract<Frame, { kind: 'command' }> }): 
 /** One tool call card: the pending call view, then the completed result view. */
 function ToolRow({ frame, expandedOutput, awaitingApproval }: { frame: Extract<Frame, { kind: 'tool' }>; expandedOutput: boolean; awaitingApproval: boolean }): React.JSX.Element {
   const completed = frame.result !== undefined || frame.resultContent !== undefined
+  // The reviewed plan is the exit_plan_mode call's own argument, so the frame
+  // renders the plan itself instead of the generic call line — the web
+  // client's submittedPlan() source, and the reason the plan survives the
+  // answered overlay (and a session resume: the fold replays the same args).
+  // Pending, it wears the review card ("Here is DSH's plan:"). Settled
+  // approved, it collapses to the reference verdict reading: one ● line, then
+  // the plan indented under the ⎿ connector, and the host's result text is
+  // suppressed — the verdict line replaces it. A decline (the host throws, so
+  // isError) keeps the review card with the red feedback result under it.
+  const plan = planMarkdownOf(frame)
+  if (plan !== undefined && completed && !frame.isError) {
+    return (
+      <Box flexDirection="column">
+        <Text><Text color="#51cf66">●</Text> User approved DSH's plan</Text>
+        {assistantContent(plan.split('\n'), '  ⎿  ', '     ')}
+      </Box>
+    )
+  }
   return (
     <Box flexDirection="column">
-      <ToolCallView frame={frame} expandedOutput={expandedOutput} awaitingApproval={awaitingApproval} />
+      {plan === undefined
+        ? <ToolCallView frame={frame} expandedOutput={expandedOutput} awaitingApproval={awaitingApproval} />
+        : <PlanDocument plan={plan} />}
       {completed ? <ToolResultView frame={frame} expandedOutput={expandedOutput} /> : null}
+    </Box>
+  )
+}
+
+/**
+ * Read a reviewed plan from untrusted logged call arguments — the terminal's
+ * submittedPlan(): the frame is an `exit_plan_mode` invocation and its parsed
+ * arguments carry the plan markdown. The web client additionally requires a
+ * `# heading` (its card needs a title); the terminal renders the document
+ * as-is, so a headingless plan still renders.
+ * @param frame - the tool frame to inspect.
+ * @returns the plan markdown, or undefined for any other call.
+ */
+export function planMarkdownOf(frame: Extract<Frame, { kind: 'tool' }>): string | undefined {
+  if (frame.name !== 'exit_plan_mode') return undefined
+  const args: unknown = frame.args
+  if (typeof args !== 'object' || args === null) return undefined
+  const plan = (args as Record<string, unknown>).plan
+  return typeof plan === 'string' && plan !== '' ? plan : undefined
+}
+
+/**
+ * The plan-review document card: a full-width rule, the "Here is DSH's plan:"
+ * lead, one breathing row, then the plan markdown rendered as light assistant
+ * content. The approve/keep-planning decision lives in the bottom control bar,
+ * never here.
+ */
+export function PlanDocument({ plan }: { plan: string }): React.JSX.Element {
+  const width = useTerminalWidth()
+  return (
+    <Box flexDirection="column">
+      <Text color="#a5d8ff">{'─'.repeat(width)}</Text>
+      <Text> Here is DSH's plan:</Text>
+      <Text> </Text>
+      {assistantContent(plan.split('\n'), '  ')}
     </Box>
   )
 }
@@ -435,8 +490,11 @@ function renderTable(tableLines: readonly string[]): string[] {
  * Render the visible lines of an assistant message. Consecutive `|`-led lines
  * that form a markdown table are grouped and drawn as one bordered block; every
  * other line renders as before. The first visible line carries the `●` marker.
+ * `marker` swaps that leading glyph (the plan-review card renders the plan
+ * document with a plain two-space lead, or the approved plan with a `⎿`
+ * connector whose `continuation` indent the later lines align under).
  */
-function assistantContent(lines: readonly string[]): React.JSX.Element[] {
+export function assistantContent(lines: readonly string[], marker = '● ', continuation = '  '): React.JSX.Element[] {
   const elements: React.JSX.Element[] = []
   let markedFirst = false
   let i = 0
@@ -447,7 +505,7 @@ function assistantContent(lines: readonly string[]): React.JSX.Element[] {
       const tableRows = renderTable(lines.slice(i, end))
       tableRows.forEach((row, r) => {
         const isFirst = !markedFirst && r === 0
-        elements.push(<Text key={`table-${i}-${r}`}>{isFirst ? '● ' : '  '}{row}</Text>)
+        elements.push(<Text key={`table-${i}-${r}`}>{isFirst ? marker : continuation}{row}</Text>)
       })
       markedFirst = true
       i = end
@@ -458,7 +516,7 @@ function assistantContent(lines: readonly string[]): React.JSX.Element[] {
     const content = heading ?? line
     elements.push(
       <Text key={`line-${i}`}>
-        {markedFirst ? '  ' : '● '}
+        {markedFirst ? continuation : marker}
         {heading !== undefined
           ? <Text bold>{content}</Text>
           : inlineSegments(content).map((segment, s) => segment.bold
