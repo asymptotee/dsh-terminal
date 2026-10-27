@@ -15,4 +15,3 @@ export type { Agent, AgentSetup, AssistantStreamFrame, ModelSelectionRef } from 
 export type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval'
 export type { SubagentListEntry } from '@deepseek-ai/dsh-subagent'
 export type { CommandDescriptor, default as CommandRuntime } from '@deepseek-ai/dsh-commands'
-export type { InvariantInstaller } from '@deepseek-ai/dsh-invariants'
