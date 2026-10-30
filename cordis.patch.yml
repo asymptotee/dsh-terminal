@@ -6,8 +6,12 @@
 
 - id: system-prompt
   config:
-    persona: >-
-      You are a coding agent powered by the {{model}} model. Your working directory is {{cwd}}.
+    # rc.3 renamed the persona key and dropped the {{cwd}} template variable
+    # (unresolved references fail prompt assembly); the working directory now
+    # reaches the model as the working-directory service's user context. The
+    # fixed harness identity opener stays on (includeHarnessIdentity default).
+    personaPrefix: >-
+      You are a coding agent powered by the {{model}} model.
 
 # The shared module-reload HMR row stays off; there is no user patch layer
 # to keep live in this composition.
@@ -19,11 +23,12 @@
     mode: !!js process.env.DSH_TOOLS_MODE
 
 - insert:
-    # Official experimental Agent Teams: durable peer mailbox, shared task DAG,
-    # and roster (runtime) plus the model-facing tools. Replaces the prior
-    # custom star-topology team plugin; dsh-terminal now renders team state
-    # (members/tasks/messages) from the agentTeam projection instead of
-    # providing its own relay tools.
+    # Official experimental Agent Teams: direct peer messaging into target
+    # inboxes (the rc.2 durable mailbox is retired), shared task DAG, and
+    # roster (runtime) plus the model-facing tools. Replaces the prior custom
+    # star-topology team plugin; dsh-terminal renders the roster and task
+    # board from the agentTeam projection, while peer messages reach the
+    # transcript as relay-form user/message frames.
     - id: agent-team
       name: '@deepseek-ai/dsh-experimental-agent-team'
     - id: tool-agent-team

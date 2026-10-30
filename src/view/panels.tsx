@@ -290,8 +290,10 @@ export function JobsPanel({
       {visible.map((row, index) => {
         const rowIndex = start + index
         const isCursor = rowIndex + 1 === selected
-        // The cursor row stays bright; the rest dim entirely.
-        const id = truncateToWidth(row.id, 12)
+        // The cursor row stays bright; the rest dim entirely. The id budget
+        // fits the rc.3 registry format `<kind>-<16 hex>` (21 columns); the
+        // rc.2 `<kind>-N` monotonics simply render shorter.
+        const id = truncateToWidth(row.id, 22)
         const label = truncateToWidth(row.label, Math.max(4, Math.floor(width * 0.35)))
         // The producer's live progress while running, its terminal detail
         // once settled — one line, clamped against the row's other columns.

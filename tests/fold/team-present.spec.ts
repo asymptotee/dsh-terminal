@@ -65,8 +65,16 @@ describe('send_message', () => {
     expect(title.startsWith('→ lead: ')).toBe(true)
     expect(title.endsWith('…')).toBe(true)
   })
-  it('renders the delivery status', () => {
+  it('renders the legacy delivery status', () => {
+    // The rc.2 mailbox envelope — still read, so a resumed rc.2-era log
+    // replays its send results as before.
     expect(resultText(present.presentResult!({}, jsonResult({ messageId: 'm1', status: 'queued' })))).toBe('queued')
+  })
+  it('renders the rc.3 direct-delivery report', () => {
+    expect(resultText(present.presentResult!({}, jsonResult({ sent: true })))).toBe('sent')
+  })
+  it('falls back when neither result shape matches', () => {
+    expect(present.presentResult!({}, jsonResult({ other: 1 }))).toBeUndefined()
   })
 })
 

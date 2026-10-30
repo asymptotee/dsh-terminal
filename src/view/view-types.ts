@@ -299,7 +299,7 @@ export type JobStatus = 'running' | 'stopping' | 'completed' | 'killed' | 'faile
 
 /** One background job as a panel row. */
 export interface JobRow {
-  /** The registry-issued id (`<kind>-N`). */
+  /** The registry-issued id (`<kind>-<short-uuid>`; rc.2 logs replay `<kind>-N`). */
   id: string
   /** The producer kind (bash, subagent, workflow, …); shown as the row's dim tag. */
   kind: string

@@ -131,7 +131,13 @@ const sendMessage: ToolPresentation = {
     return call(preview === '' ? `→ ${target}` : `→ ${target}: ${preview}`)
   },
   presentResult(_args, result) {
-    const status = asString(asRecord(resultValue(result))?.status)
+    const value = asRecord(resultValue(result))
+    // rc.3 retired the durable mailbox: a send reports the direct inbox
+    // delivery as `{sent: true}` instead of the rc.2 `{messageId, status}`
+    // envelope. The status branch stays — resuming an rc.2-era session log
+    // replays results in the old shape.
+    if (value?.sent === true) return lines('sent')
+    const status = asString(value?.status)
     return status === undefined ? undefined : lines(status)
   },
 }

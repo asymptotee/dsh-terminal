@@ -37,6 +37,18 @@ describe('jobs panel', () => {
     expect(line).toContain('12s')
   })
 
+  it('renders the rc.3 long registry id untruncated', () => {
+    // `<kind>-<16 hex>` is 21 columns; the rc.2 `<kind>-N` monotonics stay
+    // shorter — both fit the id column whole.
+    const longId = 'bash-a1b2c3d4e5f60718'
+    const { lastFrame } = renderApp(<TuiApp
+      state={state([])}
+      handlers={noopHandlers()}
+      view={{ jobs: { rows: [job({ id: longId })] } }}
+    />)
+    expect(lastFrame()).toContain(longId)
+  })
+
   it('shows the terminal detail on settled rows', () => {
     const { lastFrame } = renderApp(<TuiApp
       state={state([])}

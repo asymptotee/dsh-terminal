@@ -313,7 +313,8 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
    *  until the owner is disposed, so without a tombstone a retired row would
    *  be re-added on the next tick with a fresh settle stamp — a revive loop
    *  that pins it to the panel forever. Ids are unique for the process life
-   *  (`<kind>-N` monotonics), so this set can only grow with real jobs. */
+   *  (`<kind>-<short-uuid>` registry issues), so this set can only grow with
+   *  real jobs. */
   const jobsRetired = new Set<string>()
   /** The job whose live output is expanded; its read cursor and buffer. */
   let jobsOpen: string | undefined
