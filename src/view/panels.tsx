@@ -59,7 +59,6 @@ export function SubagentPanel({
   const hiddenAfter = rows.length - start - visible.length
   return (
     <Box flexDirection="column">
-      <Text dimColor>{'─'.repeat(width)}</Text>
       {start > 0 ? <Text dimColor>  … {start} more</Text> : null}
       {[undefined, ...visible].map((row, index) => {
         const isMain = row === undefined
