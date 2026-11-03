@@ -577,7 +577,7 @@ describe('TuiApp rendering', () => {
     expect(lastFrame()).toContain('⠋ Working… (0s · ↓ 3.4k tokens)')
   })
 
-  it('pins the heartbeat above the plan and keeps the label while a tool is pending', () => {
+  it('pins the heartbeat below the plan and keeps the label while a tool is pending', () => {
     const plan = [{ content: 'task one', status: 'in_progress' as const }]
     const thinking: FrameState = {
       ...state([], plan),
@@ -585,7 +585,7 @@ describe('TuiApp rendering', () => {
     }
     const { lastFrame } = renderApp(<TuiApp state={thinking} handlers={noopHandlers()} />)
     const frame = lastFrame() ?? ''
-    expect(frame.indexOf('Working…')).toBeLessThan(frame.indexOf('Todos · 1'))
+    expect(frame.indexOf('Todos · 1')).toBeLessThan(frame.indexOf('Working…'))
     // A step covers the model call and its tool executions: the heartbeat
     // stays up — and keeps its single label — while a tool runs.
     const busy: FrameState = { ...thinking, pendingTools: new Map([['c1', 0]]) }

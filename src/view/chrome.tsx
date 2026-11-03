@@ -549,10 +549,11 @@ function goalStateGlyph(goal: GoalPanelInfo): React.JSX.Element {
   return <Text color="green">✔</Text>
 }
 
-/** The standing goal as a two-row strip right above the input bar: a header
- *  carrying the fused state word, its glyph, and the round progress, then the
- *  objective on a `⎿` connector. Blocked goals add a reason row. Purely
- *  display — the goal strip takes no keys and never joins panel navigation. */
+/** The standing goal as a two-row strip below the plan board and above the
+ *  heartbeat: a header carrying the fused state word, its glyph, and the round
+ *  progress, then the objective on a `⎿` connector. Blocked goals add a reason
+ *  row. Purely display — the goal strip takes no keys and never joins panel
+ *  navigation. */
 export function GoalPanel({ goal }: { goal: GoalPanelInfo }): React.JSX.Element {
   return (
     // Same two-column lead as the plan: the goal header joins the panels'

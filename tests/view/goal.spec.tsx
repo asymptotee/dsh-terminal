@@ -67,16 +67,16 @@ describe('goal strip', () => {
     expect(app.lastFrame() ?? '').toContain('Goal · ongoing')
   })
 
-  it('renders below the heartbeat and hides while absent or under an approval', () => {
+  it('renders between the plan and the heartbeat and hides while absent or under an approval', () => {
     const plan = [{ content: 'task one', status: 'in_progress' as const }]
-    // A live turn clocks the heartbeat; the goal strip sits directly below
-    // it, above the plan.
+    // A live turn clocks the heartbeat; the goal strip sits below the plan,
+    // above the heartbeat.
     const working: FrameState = { ...state([], plan), turnStartedAt: Date.now() }
     const { lastFrame } = renderApp(<TuiApp state={working} handlers={noopHandlers()} view={{ goal: goal() }} />)
     const frame = lastFrame() ?? ''
-    expect(frame.indexOf('Working…')).toBeLessThan(frame.indexOf('Goal · ongoing'))
-    // The goal strip leads the pinned chrome, above the plan.
-    expect(frame.indexOf('Goal · ongoing')).toBeLessThan(frame.indexOf('Todos · 1'))
+    expect(frame.indexOf('Todos · 1')).toBeLessThan(frame.indexOf('Goal · ongoing'))
+    // The heartbeat hugs the input bar, below the goal strip.
+    expect(frame.indexOf('Goal · ongoing')).toBeLessThan(frame.indexOf('Working…'))
     // No goal in the view: nothing renders.
     const bare = renderApp(<TuiApp state={state([])} handlers={noopHandlers()} />)
     expect(bare.lastFrame() ?? '').not.toContain('Goal ·')

@@ -586,19 +586,20 @@ export function TuiApp({
         {view?.overlay?.kind === 'notice'
           ? <Text color="red" key="notice">{view.overlay.text}</Text>
           : null}
-        {/* The step heartbeat leads the pinned chrome: shown throughout a
-            step — its tool executions included — while no overlay waits on
+        {/* The standing plan leads the pinned chrome; it follows the active
+            transcript (main session or opened child). */}
+        {activePlan !== undefined ? <PlanPanel todos={activePlan} /> : null}
+        {/* The standing goal strip sits below the plan: it is the
+            session-level objective the plan and panels serve, and unlike the
+            plan it follows the main session, never the opened child. */}
+        {goalVisible && view?.goal !== undefined ? <GoalPanel goal={view.goal} /> : null}
+        {/* The step heartbeat hugs the input bar — the eye's progress
+            checkpoint while a long plan board stands above: shown throughout
+            a step (its tool executions included) while no overlay waits on
             the user; it tracks the active transcript's turn. */}
         {view?.overlay === undefined && activeTurn.turnStartedAt !== undefined
           ? <HeartbeatLine startedAt={activeTurn.turnStartedAt} tokens={activeTurn.turnTokens} />
           : null}
-        {/* The standing goal strip sits directly below the heartbeat: it is
-            the session-level objective the plan and panels serve, and unlike
-            the plan it follows the main session, never the opened child. */}
-        {goalVisible && view?.goal !== undefined ? <GoalPanel goal={view.goal} /> : null}
-        {/* The standing plan sits below the goal strip, above the input bar;
-            it follows the active transcript (main session or opened child). */}
-        {activePlan !== undefined ? <PlanPanel todos={activePlan} /> : null}
         {/* The input bar stays mounted in every focus mode — it owns the single
             stdin listener; a read-only child view routes only Esc back, while a
             continuable child borrows the editor for its own prompts. */}
