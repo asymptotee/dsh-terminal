@@ -4,9 +4,9 @@
  * usage errors leave the consumer pending.
  */
 
-import { mkdtempSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { mkdtempSync, realpathSync, writeFileSync } from 'node:fs'
+import { homedir, tmpdir } from 'node:os'
+import { join, relative } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
@@ -124,6 +124,53 @@ describe('tui command-line provider', () => {
     expect(observed.out).toContain('unknown option')
     expect(startup).toBeUndefined()
     expect(observed.runnerConfig).toBeUndefined()
+    expect(observed.exits).toEqual([1])
+  })
+
+  it('publishes an absolute --cwd without changing the process directory', async () => {
+    // The rc.3-native seam: the value rides into the session header and the
+    // working-directory service takes it over from there — the launch process
+    // directory itself must stay untouched.
+    const target = mkdtempSync(join(tmpdir(), 'dsh-terminal-cwd-'))
+    const before = process.cwd()
+    const { startup, observed } = await bootStartup(['--cwd', target])
+    expect(startup).toEqual({ resume: undefined, continueLatest: false, cwd: realpathSync(target) })
+    expect(observed.exits).toEqual([])
+    expect(process.cwd()).toBe(before)
+  })
+
+  it('resolves a relative --cwd against the launch directory', async () => {
+    const target = mkdtempSync(join(tmpdir(), 'dsh-terminal-cwd-'))
+    const rel = relative(process.cwd(), target)
+    const { startup, observed } = await bootStartup(['--cwd', rel, '-c'])
+    expect(startup).toEqual({ resume: undefined, continueLatest: true, cwd: realpathSync(target) })
+    expect(observed.exits).toEqual([])
+  })
+
+  it('rejects a missing --cwd directory and leaves the runner pending', async () => {
+    const { startup, observed } = await bootStartup(['--cwd', join(tmpdir(), 'dsh-terminal-no-such-dir')])
+    expect(observed.out).toContain('no such directory')
+    expect(startup).toBeUndefined()
+    expect(observed.runnerConfig).toBeUndefined()
+    expect(observed.exits).toEqual([1])
+  })
+
+  it('expands a leading ~ in --cwd like the shell would', async () => {
+    // A quoted '~/x' reaches the parser literally; the error must name the
+    // home-expanded path, proving the expansion ran (no home-dir fixture
+    // needed — the miss happens after expansion).
+    const { observed } = await bootStartup(['--cwd', '~/dsh-terminal-no-such-dir'])
+    expect(observed.out).toContain(join(homedir(), 'dsh-terminal-no-such-dir'))
+    expect(observed.exits).toEqual([1])
+  })
+
+  it('rejects a --cwd that names a file and leaves the runner pending', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-terminal-cwd-'))
+    const file = join(dir, 'not-a-dir')
+    writeFileSync(file, '')
+    const { startup, observed } = await bootStartup(['--cwd', file])
+    expect(observed.out).toContain('not a directory')
+    expect(startup).toBeUndefined()
     expect(observed.exits).toEqual([1])
   })
 })

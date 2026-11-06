@@ -40,11 +40,16 @@ export interface Config {
   resume?: string
   /** Resume this working directory's most recent session (`-c`/`--continue`). */
   continueLatest?: boolean
+  /** Resolved absolute `--cwd` target: the fresh session's project directory
+   *  and the `-c` lookup scope; undefined keeps the launch directory. An
+   *  explicit `resume` ignores it — that session carries its own. */
+  cwd?: string
 }
 
 export const Config: z<Config> = z.object({
   resume: z.string(),
   continueLatest: z.boolean(),
+  cwd: z.string(),
 })
 
 /** The header facts `--continue` needs from one stored-session snapshot. The
@@ -60,21 +65,21 @@ interface StoredSessionSnapshot {
 }
 
 /**
- * This working directory's most recent top-level session id, or undefined
- * when the store holds none. Subagent children are not user conversations,
- * and other directories' sessions belong to their own workspaces.
+ * One directory's most recent top-level session id, or undefined when the
+ * store holds none. Subagent children are not user conversations, and other
+ * directories' sessions belong to their own workspaces.
  * @param ctx - plugin context carrying the host's persistence service.
+ * @param dir - the directory whose sessions count (`--cwd` or the launch one).
  */
-async function latestWorkspaceSessionId(ctx: Context): Promise<string | undefined> {
+async function latestWorkspaceSessionId(ctx: Context, dir: string): Promise<string | undefined> {
   const persistence = ctx.get('sessionPersistence') as
     | { list(): Promise<readonly StoredSessionSnapshot[]> }
     | undefined
   if (persistence === undefined) return undefined
-  const cwd = process.cwd()
   let latest: StoredSessionSnapshot | undefined
   for (const snapshot of await persistence.list()) {
     const header = snapshot.header
-    if (header.cwd !== cwd || header.origin === 'subagent') continue
+    if (header.cwd !== dir || header.origin === 'subagent') continue
     if (latest === undefined || header.createdAt > latest.header.createdAt) latest = snapshot
   }
   return latest?.header.id
@@ -259,17 +264,24 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
     installModelSelection(agentCtx, selected)
   }
   const agentOptions = { provider: selection.provider, model: selection.model }
-  // `-c` resolves this directory's most recent stored session; an explicit
-  // --resume id always wins. A --continue with nothing to resume falls back to
-  // a fresh session with a notice, rather than failing the launch.
+  // The session's project directory: the resolved --cwd target, else the
+  // launch directory. A fresh session records it in the header, and the rc.3
+  // working-directory service seeds the session's effective directory from
+  // that header — so tools, the model's `Current working directory:` context,
+  // and the status bar below all follow it without the process cwd changing.
+  const projectDir = config.cwd ?? process.cwd()
+  // `-c` resolves that directory's most recent stored session; an explicit
+  // --resume id always wins (that session carries its own recorded directory,
+  // which --cwd never overrides). A --continue with nothing to resume falls
+  // back to a fresh session with a notice, rather than failing the launch.
   const resumeId = config.resume ?? (config.continueLatest === true
-    ? await latestWorkspaceSessionId(ctx)
+    ? await latestWorkspaceSessionId(ctx, projectDir)
     : undefined)
   const continueMissed = config.resume === undefined && config.continueLatest === true && resumeId === undefined
   const handle = resumeId === undefined
     ? await agents.create({
       sessionId: SessionId(`session-${randomUUID()}`),
-      meta: { cwd: process.cwd() },
+      meta: { cwd: projectDir },
       agentOptions,
       setup,
     })
@@ -363,6 +375,14 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
   const permissionPresets = ctx.get('permissionPresets') as
     | { current(session: unknown): string }
     | undefined
+  // The session's effective working directory: the rc.3 working-directory
+  // service seeds it from the header's project (--cwd or the launch dir) and
+  // owns every committed change afterwards (a model directory switch, an SDK
+  // set). The status bar reads it live instead of snapshotting the launch
+  // directory. Structural read, the sandboxPolicy pattern — no upstream import.
+  const workingDirectory = ctx.get('workingDirectory') as
+    | { get(session: unknown): string }
+    | undefined
   // The continuation seam for opened child transcripts: one human message
   // addressed to a continuable direct child. Structural read, the same
   // pattern as sandboxPolicy — no upstream import. The requestId is minted by
@@ -399,7 +419,9 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
   let view: RenderView = {
     status: {
       model: selection.model,
-      cwd: process.cwd(),
+      // The effective directory: the service's committed value (a resumed
+      // session may carry changes past its header), else the project target.
+      cwd: workingDirectory?.get(agent.session) ?? projectDir,
       ...sandboxMode === undefined ? {} : { mode: sandboxMode },
       ...selection.reasoningEffort === undefined ? {} : { effort: selection.reasoningEffort },
     },
@@ -1021,6 +1043,15 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
       if (typeof mode === 'string') view = { ...view, status: { ...view.status, mode } }
     }
   }
+  // The status bar's directory follows the service's committed value: a model
+  // directory switch lands as a `working-directory/change` event, re-read here.
+  const refreshWorkingDirectory = (): void => {
+    if (view.status === undefined) return
+    const current = workingDirectory?.get(agent.session)
+    if (current !== undefined && current !== view.status.cwd) {
+      view = { ...view, status: { ...view.status, cwd: current } }
+    }
+  }
   // Fold the replay without per-event renders: the intermediate states are
   // not interactable, painting each one wastes time on large logs, and an
   // early paint of the still-empty stream would flash the fresh-session
@@ -1092,6 +1123,9 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
     // A team event moves the authoritative agentTeam projection, so re-read it
     // before the render below to keep the team panel current.
     if ((event.type as string).startsWith('team/')) refreshTeam()
+    // A committed working-directory change moves the session's effective
+    // directory, so the status bar re-reads it before the render below.
+    if ((event.type as string) === 'working-directory/change') refreshWorkingDirectory()
     // A goal event moves the goal projection's durable half (phase, objective,
     // the round budget), so re-read it before the render below. The round
     // counter itself advances on the goal-sourced user/message below, not here.

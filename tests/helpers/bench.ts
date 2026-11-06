@@ -22,6 +22,8 @@ export interface Script {
   resumeId?: string
   /** When set, the driver config carries continueLatest (`-c`). */
   continueLatest?: boolean
+  /** When set, the driver config carries the resolved `--cwd` target. */
+  cwd?: string
   /** Registered before the driver reads the tools registry. */
   tools?: unknown
   /** Registered before the driver reads the commands registry. */
@@ -81,6 +83,8 @@ export interface BenchHandle {
   exited: Promise<number>
   /** The session id the factory resumed, when the script asked for one. */
   resumedId: string | undefined
+  /** The create meta the driver handed the factory (fresh session only). */
+  createdMeta: { cwd?: string } | undefined
 }
 
 /** Mount the real registries around a small scripted Agent factory and drive run(). */
@@ -90,6 +94,7 @@ export async function bench(script: Script): Promise<BenchHandle> {
   await ctx.plugin(AgentRegistry)
   await ctx.plugin(AgentDefaultModelConfig, { provider: 'test-provider', model: 'test-model' })
   let resumedId: string | undefined
+  let createdMeta: { cwd?: string } | undefined
   let agentRef: Agent | undefined
   const buildAgent = async (
     ownerCtx: Context,
@@ -133,6 +138,7 @@ export async function bench(script: Script): Promise<BenchHandle> {
   }
   ctx.agents.setFactory({
     async createAgent(ownerCtx: Context, options: CreateAgentOptions): Promise<AgentHandle> {
+      createdMeta = options.meta as { cwd?: string } | undefined
       return buildAgent(ownerCtx, options.sessionId, options.agentOptions, options.setup)
     },
     async resume(ownerCtx: Context, options: ResumeAgentOptions): Promise<AgentHandle> {
@@ -185,11 +191,12 @@ export async function bench(script: Script): Promise<BenchHandle> {
       stderr: { write: () => true },
       exit: (code: number) => { order.push('exit'); resolve(code) },
     }
-    const config: { resume?: string; continueLatest?: boolean } = {}
+    const config: { resume?: string; continueLatest?: boolean; cwd?: string } = {}
     if (script.resumeId !== undefined) config.resume = script.resumeId
     if (script.continueLatest !== undefined) config.continueLatest = script.continueLatest
+    if (script.cwd !== undefined) config.cwd = script.cwd
     void run(ctx, config, io, renderer)
   })
   await bound
-  return { ctx, agent: agentRef!, handlers, states, views, exited, resumedId }
+  return { ctx, agent: agentRef!, handlers, states, views, exited, resumedId, createdMeta }
 }

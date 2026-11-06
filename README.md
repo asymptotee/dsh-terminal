@@ -24,6 +24,8 @@ dsh plugin --profile dsh-terminal add ./dsh-terminal-<版本>.tgz
 dsh --profile dsh-terminal              # 启动新会话
 dsh --profile dsh-terminal --resume <id>  # 恢复指定持久化会话
 dsh --profile dsh-terminal -c           # 恢复当前工作目录最近创建的会话（--continue 同义）
+dsh --profile dsh-terminal --cwd <dir>  # 以 <dir> 为会话工作目录启动（相对路径按启动目录解析；工具执行、模型上下文与状态栏都跟随会话目录，不改启动进程）
+dsh --profile dsh-terminal --cwd <dir> -c  # 组合：<dir> 的最近会话（--resume 显式指定时会话自带目录，--cwd 让位）
 node bin/dsh-terminal.js                # 或经本包 bin 直通（profile 未初始化时自动引导）
 ```
 

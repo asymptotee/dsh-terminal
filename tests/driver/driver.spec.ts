@@ -293,6 +293,49 @@ describe('tui driver', () => {
     await test.ctx.fiber.dispose()
   })
 
+  it('records the --cwd target as the fresh session project and badges it', async () => {
+    const test = await bench({ cwd: '/tmp/dsh-cwd-target', afterPrompt: () => {} })
+    // The create meta carries the target — the rc.3 working-directory service
+    // seeds the session's effective directory from this header value; the
+    // process cwd itself is never touched.
+    expect(test.createdMeta).toEqual({ cwd: '/tmp/dsh-cwd-target' })
+    // Without the working-directory service (the bench mounts none) the status
+    // bar falls back to the same target.
+    expect(test.views.at(-1)?.status?.cwd).toBe('/tmp/dsh-cwd-target')
+    expect(process.cwd()).not.toBe('/tmp/dsh-cwd-target')
+    await test.ctx.fiber.dispose()
+  })
+
+  it('scopes the continueLatest lookup to the --cwd target', async () => {
+    const test = await bench({
+      cwd: '/tmp/dsh-cwd-target',
+      continueLatest: true,
+      sessionPersistence: {
+        list: async () => [
+          { header: { id: 'launch-dir', createdAt: 9_000, cwd: process.cwd(), isSeeded: false } },
+          { header: { id: 'target', createdAt: 1_000, cwd: '/tmp/dsh-cwd-target', isSeeded: false } },
+        ],
+      },
+      afterPrompt: () => {},
+    })
+    // The launch directory's newer session loses: -c scopes to the target.
+    expect(test.resumedId).toBe('target')
+    await test.ctx.fiber.dispose()
+  })
+
+  it('lets an explicit resume win over --cwd', async () => {
+    const test = await bench({
+      cwd: '/tmp/dsh-cwd-target',
+      resumeId: 'session-explicit',
+      afterPrompt: () => {},
+    })
+    // The resumed session carries its own recorded directory; no fresh create
+    // happens, so no meta is handed over.
+    expect(test.resumedId).toBe('session-explicit')
+    expect(test.createdMeta).toBeUndefined()
+    await test.ctx.fiber.dispose()
+  })
+
   it('rebuilds the display from the persisted log on resume before live events attach', async () => {
     const test = await bench({
       resumeId: 'session-abc',

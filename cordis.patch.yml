@@ -62,3 +62,4 @@
       config:
         resume: !!js ctx.tuiStartup.resume
         continueLatest: !!js ctx.tuiStartup.continueLatest === true
+        cwd: !!js ctx.tuiStartup.cwd
