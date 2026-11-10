@@ -592,6 +592,18 @@ describe('TuiApp rendering', () => {
     expect(renderApp(<TuiApp state={busy} handlers={noopHandlers()} />).lastFrame()).toContain('Working…')
   })
 
+  it('renders the completed-turn summary as one dim line', () => {
+    const frames: Frame[] = [
+      { kind: 'assistant', seq: 1, turn: 1, step: 1, text: 'done', streaming: false },
+      { kind: 'completed', seq: 2, durationMs: 110_000, completedAt: 1_760_000_000_000 },
+    ]
+    const { lastFrame } = renderApp(<TuiApp state={state(frames)} handlers={noopHandlers()} />)
+    const frame = lastFrame() ?? ''
+    expect(frame).toContain('Worked for 1m 50s · done')
+    // The summary follows the turn's last frame, closing it out.
+    expect(frame.indexOf('● done')).toBeLessThan(frame.indexOf('Worked for'))
+  })
+
   it('renders a failed generic tool result bare, without the console fence', () => {
     const fenced = '```console\nError: the user rejected escalating\n```'
     const frames: Frame[] = [{

@@ -27,8 +27,11 @@ describe('tui driver', () => {
     expect(last.frames).toMatchObject([
       { kind: 'user', text: 'first' },
       { kind: 'assistant', text: 'answer', streaming: false },
+      // Every cleanly completed turn closes with its summary frame.
+      { kind: 'completed' },
       { kind: 'user', text: 'second' },
       { kind: 'assistant', text: 'answer', streaming: false },
+      { kind: 'completed' },
     ])
     await test.ctx.fiber.dispose()
   })
@@ -84,7 +87,8 @@ describe('tui driver', () => {
     test.handlers.onExit()
     await test.exited
     const last = test.states.at(-1)!
-    expect(last.frames.at(-1)).toMatchObject({ kind: 'assistant', text: 'Hello', streaming: false })
+    expect(last.frames.at(-2)).toMatchObject({ kind: 'assistant', text: 'Hello', streaming: false })
+    expect(last.frames.at(-1)).toMatchObject({ kind: 'completed' })
     await test.ctx.fiber.dispose()
   })
 
@@ -152,12 +156,13 @@ describe('tui driver', () => {
     test.handlers.onExit()
     await test.exited
     const last = test.states.at(-1)!
-    expect(last.frames.at(-1)).toMatchObject({
+    expect(last.frames.at(-2)).toMatchObject({
       kind: 'tool',
       name: 'bash',
       call: { card: 'terminal', title: 'ls' },
       result: { card: 'terminal', output: 'a.txt\n', exitCode: 0 },
     })
+    expect(last.frames.at(-1)).toMatchObject({ kind: 'completed' })
     await test.ctx.fiber.dispose()
   })
 
@@ -255,6 +260,7 @@ describe('tui driver', () => {
     expect(test.states.at(-1)!.frames).toMatchObject([
       { kind: 'user', text: 'again' },
       { kind: 'assistant', text: 'continued' },
+      { kind: 'completed' },
     ])
     await test.ctx.fiber.dispose()
   })

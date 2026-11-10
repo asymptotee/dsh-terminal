@@ -11,6 +11,7 @@ import type { ContentBlock, MessageSource, SessionEvent, StreamChunk, TodoItem, 
 import {
   contentToText,
   renderCommandLine,
+  renderCompletedLine,
   renderErrorLine,
   renderInterruptedLine,
   renderNoticeLines,
@@ -74,6 +75,16 @@ export type Frame =
     /** The user-interruption marker appended at a user-cancelled turn end. */
     kind: 'interrupted'
     seq: number
+  }
+  | {
+    /** The turn-completion summary: how long the turn worked and when it
+     *  landed, rendered as one dim line after the turn's last frame. */
+    kind: 'completed'
+    seq: number
+    /** Wall time from turn/start to turn/end. */
+    durationMs: number
+    /** The turn/end wall time. */
+    completedAt: number
   }
   | {
     /** The main-agent turn-failure marker, appended when the turn ended in error. */
@@ -668,21 +679,38 @@ export function foldEvent(state: FrameState, event: SessionEvent, deps: FoldDeps
       const errorFrame = reason.kind === 'error'
         ? { kind: 'error' as const, seq: event.seq, message: readableFailureMessage(reason.error.message), code: reason.error.code }
         : undefined
+      // A cleanly completed turn closes with the Claude Code-style summary:
+      // how long it worked and when it landed. Aborted and failed turns carry
+      // their own markers instead, and a turn whose start was never seen
+      // (mid-log replay edges) has no duration to state.
+      const completedFrame = reason.kind === 'completed' && state.turnStartedAt !== undefined
+        ? {
+          kind: 'completed' as const,
+          seq: event.seq,
+          durationMs: Math.max(0, event.time - state.turnStartedAt),
+          completedAt: event.time,
+        }
+        : undefined
+      const markerFrame = byUser
+        ? { kind: 'interrupted' as const, seq: event.seq }
+        : errorFrame ?? completedFrame
       return {
         state: {
           ...state,
           ...closed,
-          frames: settled,
+          frames: markerFrame === undefined ? settled : [...settled, markerFrame],
           pendingTools: new Map(),
           pendingCommands: new Map(),
           activeStep: undefined,
           turnStartedAt: undefined,
-          ...byUser ? { frames: [...settled, { kind: 'interrupted' as const, seq: event.seq }] } : {},
-          ...errorFrame !== undefined ? { frames: [...settled, errorFrame] } : {},
         },
         lines: byUser
           ? [renderInterruptedLine()]
-          : errorFrame !== undefined ? [renderErrorLine(errorFrame)] : [],
+          : errorFrame !== undefined
+            ? [renderErrorLine(errorFrame)]
+            : completedFrame !== undefined
+              ? [renderCompletedLine(completedFrame.durationMs, completedFrame.completedAt)]
+              : [],
       }
     }
     default:

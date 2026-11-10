@@ -136,6 +136,27 @@ export function renderInterruptedLine(): string {
 }
 
 /**
+ * The completed-turn summary line. The formatting mirrors the ink transcript's
+ * dim row (text-helpers' formatElapsed/formatClock); this module keeps its own
+ * pure copies so the fold layer never reaches into the view.
+ * @param durationMs - wall time from turn/start to turn/end.
+ * @param completedAt - the turn/end wall time.
+ * @returns the newline-terminated summary line.
+ */
+export function renderCompletedLine(durationMs: number, completedAt: number): string {
+  const seconds = Math.max(0, Math.round(durationMs / 1000))
+  const elapsed = seconds < 60
+    ? `${seconds}s`
+    : seconds < 3600
+      ? `${Math.floor(seconds / 60)}m ${seconds % 60}s`
+      : `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`
+  const at = new Date(completedAt)
+  const hours = at.getHours()
+  const clock = `${hours % 12 || 12}:${String(at.getMinutes()).padStart(2, '0')} ${hours < 12 ? 'AM' : 'PM'}`
+  return `Worked for ${elapsed} · done ${clock}\n`
+}
+
+/**
  * The main-agent turn-failure marker as one plain-text line.
  * @param frame - the error frame carrying the readable message and code.
  * @returns the newline-terminated error line.

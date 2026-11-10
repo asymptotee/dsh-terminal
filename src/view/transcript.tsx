@@ -15,7 +15,7 @@ import { Box, Text } from 'ink'
 import stringWidth from 'string-width'
 import type { Frame } from '../fold/frames.ts'
 import { contentToText, stripOuterCodeFence } from '../fold/render.ts'
-import { foldInvocationLine, inlineDiffLines, padToWidth, toolLabel, trimNewline, truncateToWidth } from './text-helpers.ts'
+import { foldInvocationLine, formatClock, formatElapsed, inlineDiffLines, padToWidth, toolLabel, trimNewline, truncateToWidth } from './text-helpers.ts'
 import { useTerminalWidth } from './use-terminal.ts'
 
 /** Fraction of the terminal width a tool call line may occupy before its
@@ -38,6 +38,7 @@ export function frameKey(frame: Frame): string {
     case 'assistant':
     case 'notice':
     case 'interrupted':
+    case 'completed':
     case 'error':
       return `${frame.kind}:${frame.seq}`
     case 'tool':
@@ -119,6 +120,10 @@ export function FrameRow({ frame, expandedOutput, approvalCallId }: { frame: Fra
       return <CommandRow frame={frame} />
     case 'interrupted':
       return <Text color="#ffd43b">● Interrupted · What should dsh do instead?</Text>
+    case 'completed':
+      // The Claude Code completion summary: one dim line stating how long the
+      // turn worked and when it landed, closing out the turn's frames.
+      return <Text dimColor>  Worked for {formatElapsed(frame.durationMs)} · done {formatClock(frame.completedAt)}</Text>
     case 'error':
       return (
         <Text>

@@ -752,6 +752,29 @@ describe('fold: interruption marker', () => {
     const done = replay([ev('turn/end', { turn: 1, reason: { kind: 'completed' } })])
     expect(done.state.frames).toEqual([])
   })
+
+  it('summarizes a completed turn with its duration and landing time', () => {
+    const start = { ...ev('turn/start', { turn: 1 }), time: 0 }
+    const end = { ...ev('turn/end', { turn: 1, reason: { kind: 'completed' } }), time: 110_000 }
+    const { lines, state } = replay([start, end])
+    expect(state.frames.at(-1)).toEqual({ kind: 'completed', seq: 2, durationMs: 110_000, completedAt: 110_000 })
+    // The clock segment is locale-dependent; the shape is fixed.
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toMatch(/^Worked for 1m 50s · done \d{1,2}:\d{2} (AM|PM)\n$/)
+  })
+
+  it('keeps the interrupted and error markers exclusive of the completion summary', () => {
+    const aborted = replay([
+      { ...ev('turn/start', { turn: 1 }), time: 0 },
+      { ...ev('turn/end', { turn: 1, reason: { kind: 'aborted', reason: { kind: 'user' } } }), time: 5_000 },
+    ])
+    expect(aborted.state.frames.map(frame => frame.kind)).toEqual(['interrupted'])
+    const failed = replay([
+      { ...ev('turn/start', { turn: 1 }), time: 0 },
+      { ...ev('turn/end', { turn: 1, reason: { kind: 'error', error: { message: 'boom', code: 'BOOM' } } }), time: 5_000 },
+    ])
+    expect(failed.state.frames.map(frame => frame.kind)).toEqual(['error'])
+  })
 })
 
 describe('fold: active step', () => {

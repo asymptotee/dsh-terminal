@@ -144,6 +144,13 @@ export function formatTokenCount(tokens: number): string {
   return tokens < 1000 ? String(tokens) : `${(tokens / 1000).toFixed(1)}k`
 }
 
+/** A wall-clock time in the Claude Code completion-summary style: `5:45 PM`. */
+export function formatClock(time: number): string {
+  const at = new Date(time)
+  const hours = at.getHours()
+  return `${hours % 12 || 12}:${String(at.getMinutes()).padStart(2, '0')} ${hours < 12 ? 'AM' : 'PM'}`
+}
+
 /** The tool's display label, capitalized like Claude Code's tool names. */
 export function toolLabel(name: string): string {
   return `${name.charAt(0).toUpperCase()}${name.slice(1)}`
