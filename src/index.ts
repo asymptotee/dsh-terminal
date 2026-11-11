@@ -15,7 +15,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import type { AgentSetup, ApprovalOutcome, AssistantStreamFrame, CommandDescriptor, CommandRuntime, Context, ModelSelectionRef, SessionEvent } from './dsh-adapter/types.ts'
+import type { AgentSetup, AgentTeamProjectionState, ApprovalOutcome, AssistantStreamFrame, CommandDescriptor, CommandRuntime, Context, GoalProjectionState, ModelSelection, SessionEvent } from './dsh-adapter/types.ts'
 import { createUserMessage, installModelSelection, SessionId, z } from './dsh-adapter/services.ts'
 import './dsh-adapter/effects.ts'
 import { createFrameState, foldAssistantStreamChunk, foldEvent, readableFailureMessage } from './fold/frames.ts'
@@ -257,13 +257,6 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
   if (agents === undefined || defaultModel === undefined || sessions === undefined) return
 
   const selection = defaultModel.currentSelection()
-  // This bundle composes no preset roster, so the model-facing rows sit in the
-  // host plane and the agent reads them from the global layer.
-  const setup: AgentSetup = (agentCtx) => {
-    const selected: ModelSelectionRef = { current: selection, assembled: undefined }
-    installModelSelection(agentCtx, selected)
-  }
-  const agentOptions = { provider: selection.provider, model: selection.model }
   // The session's project directory: the resolved --cwd target, else the
   // launch directory. A fresh session records it in the header, and the rc.3
   // working-directory service seeds the session's effective directory from
@@ -278,6 +271,26 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
     ? await latestWorkspaceSessionId(ctx, projectDir)
     : undefined)
   const continueMissed = config.resume === undefined && config.continueLatest === true && resumeId === undefined
+  // This bundle composes no preset roster, so the model-facing rows sit in the
+  // host plane and the agent reads them from the global layer. Selection is
+  // agent-owned since the 0.2.2 line: the configured route rides agentOptions
+  // for a fresh session, and a resume re-records it — keeping the durable
+  // effort when the config omits one — before the scoped switch notices are
+  // installed (the dsh-headless wiring pattern).
+  const setup: AgentSetup = (agentCtx, agent) => {
+    if (resumeId !== undefined) {
+      const previous = agent.model.current()
+      const configured: ModelSelection = { ...selection }
+      if (configured.reasoningEffort === undefined && previous !== undefined
+        && previous.provider === configured.provider && previous.model === configured.model
+        && previous.reasoningEffort !== undefined) {
+        configured.reasoningEffort = previous.reasoningEffort
+      }
+      agent.model.select(configured)
+    }
+    installModelSelection(agentCtx)
+  }
+  const agentOptions = { ...selection }
   const handle = resumeId === undefined
     ? await agents.create({
       sessionId: SessionId(`session-${randomUUID()}`),
@@ -588,13 +601,15 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
    */
   let teamBase: { members: { id: string; name: string; description: string; phase: string }[]; tasks: TeamTaskRow[] } | undefined
   function refreshTeam(): void {
-    const team = sessionProjections?.stateOf(agent.session, 'agentTeam')
-    const activeTasks = team === undefined ? [] : team.tasks.filter(task => task.status !== 'deleted')
+    // The 0.2.2 registry's stateOf is untyped (the StateMap augmentations are
+    // gone); the team state's face comes from the adapter's structural type.
+    const team = sessionProjections?.stateOf(agent.session, 'agentTeam') as AgentTeamProjectionState | null | undefined
+    const activeTasks = team == null ? [] : team.tasks.filter(task => task.status !== 'deleted')
     // The panel shows while the team holds any roster OR any task: a lead
     // plans tasks before spawning workers (team_task_create with an empty
     // roster), and the members-only guard used to blank the board exactly
     // then — hiding the very tasks the lead had just written.
-    if (team === undefined || (team.members.length === 0 && activeTasks.length === 0)) {
+    if (team == null || (team.members.length === 0 && activeTasks.length === 0)) {
       teamBase = undefined
       return
     }
@@ -652,10 +667,12 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
   let goalActivation: 'armed' | 'disarmed' = 'disarmed'
   function refreshGoal(): void {
     // Read the durable goal off the same projection the runtime owns (the
-    // agentTeam pattern) rather than folding goal/change ourselves; the
-    // StateMap cell carries a strict-replay failure we must not render past.
-    const cell = sessionProjections?.stateOf(agent.session, 'goal')
-    const current = cell === undefined || cell.failure !== null ? null : cell.current
+    // agentTeam pattern) rather than folding goal/change ourselves; the cell
+    // carries a strict-replay failure we must not render past. The 0.2.2
+    // registry's stateOf is untyped, so the cell's face is the adapter's
+    // GoalProjectionState re-export.
+    const cell = sessionProjections?.stateOf(agent.session, 'goal') as GoalProjectionState | null | undefined
+    const current = cell == null || cell.failure !== null ? null : cell.current
     if (current === null) {
       goalBase = undefined
       return
@@ -1335,8 +1352,10 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
             kind: question.intent.kind,
             approve: question.intent.approve,
             // The logged plan call: the transcript renders the durable plan
-            // document from that frame's arguments when it is on screen.
-            ...question.intent.callId === undefined ? {} : { callId: question.intent.callId },
+            // document from that frame's arguments when it is on screen. The
+            // 0.2.2 approval intent kind carries no callId, so probe for the
+            // member that owns one.
+            ...('callId' in question.intent && question.intent.callId !== undefined ? { callId: question.intent.callId } : {}),
           },
         },
     }))

@@ -11,6 +11,7 @@ import type { Agent, AgentHandle, CreateAgentOptions, Inbox, ResumeAgentOptions 
 import AgentDefaultModelConfig from '@deepseek-ai/dsh-agent-default-model'
 import { createAssistantMessage } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import type { Session, UserMessage } from '@deepseek-ai/dsh-session'
 import { run } from '../../src/index.ts'
 import type { TuiRenderer } from '../../src/index.ts'
@@ -91,6 +92,18 @@ export interface BenchHandle {
 export async function bench(script: Script): Promise<BenchHandle> {
   const ctx = new Context()
   await ctx.plugin(SessionStore)
+  // The 0.2.2 AgentRegistry injects sessionProjections at construction (its
+  // init registers the turn-boundary projection on it), so the registry must
+  // exist before the agents mount — the real one, or the script's fake
+  // extended with a register stub the init can await.
+  if (script.sessionProjections !== undefined) {
+    ctx.provide('sessionProjections', {
+      ...(script.sessionProjections as object),
+      register: () => Promise.resolve({ stateOf: () => undefined, dispose: () => {} }),
+    } as never)
+  } else {
+    await ctx.plugin(SessionProjectionRegistry)
+  }
   await ctx.plugin(AgentRegistry)
   await ctx.plugin(AgentDefaultModelConfig, { provider: 'test-provider', model: 'test-model' })
   let resumedId: string | undefined
@@ -119,6 +132,9 @@ export async function bench(script: Script): Promise<BenchHandle> {
       cancel: () => {},
       runMaintenance: () => Promise.reject(new Error('not used')),
       send: () => {},
+      // The 0.2.2 agent owns its model choice; the scripted agent keeps the
+      // choice stateless (the driver's setup re-selects on resume).
+      model: { current: () => undefined, select: () => {} },
       followup: (message: UserMessage) => {
         agent.inbox.append('next-turn', message)
         idle = Promise.resolve().then(() => script.afterPrompt(ctx, session, message, ++turn))
@@ -154,7 +170,6 @@ export async function bench(script: Script): Promise<BenchHandle> {
   if (script.sessionPersistence !== undefined) ctx.provide('sessionPersistence', script.sessionPersistence as never)
   if (script.permissionPresets !== undefined) ctx.provide('permissionPresets', script.permissionPresets as never)
   if (script.subagents !== undefined) ctx.provide('subagents', script.subagents as never)
-  if (script.sessionProjections !== undefined) ctx.provide('sessionProjections', script.sessionProjections as never)
   if (script.jobs !== undefined) ctx.provide('jobs', script.jobs as never)
   const states: FrameState[] = []
   const views: (RenderView | undefined)[] = []
