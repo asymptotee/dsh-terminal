@@ -349,8 +349,10 @@ const ABANDONED_RESULT_TEXT = '(turn ended — no result)'
  * ended turn abandoned never receives its result; leaving the frame mutable
  * forever would pin it — and every later frame — in the renderer's live region
  * (they could never settle into the append-only scrollback). The marker text
- * shows the abandoned state; a result arriving after the settlement is ignored
- * as an orphan by the existing tool/result and command/done guards.
+ * shows the abandoned state; a tool result arriving after the settlement is
+ * ignored as an orphan by the existing guard. Commands differ: the boundary
+ * never clears their registry, so a command/done landing after the marker
+ * replaces it with the real result.
  */
 function closeAbandonedPendings(
   frames: readonly Frame[],
@@ -645,18 +647,22 @@ export function foldEvent(state: FrameState, event: SessionEvent, deps: FoldDeps
     case 'turn/start': {
       // Turn-scoped plan lifetime: the standing list clears on the next turn.
       // turnStartedAt clocks the heartbeat across the whole turn; turnTokens
-      // resets so the per-turn output count starts fresh. Pendings abandoned
+      // resets so the per-turn output count starts fresh. Tool calls abandoned
       // by a turn that never logged its end (crash, replayed resume) settle
-      // here as the boundary insurance.
+      // here as the boundary insurance. Commands are NOT turn-scoped and stay
+      // untouched: /plan's handler steers its argument, so the turn it kicks
+      // off logs turn/start before the command's own command/done lands —
+      // settling here would mark a live command abandoned and orphan its real
+      // result. The command's own settlement (or the turn/end insurance) owns it.
       const closed = closeOpenAssistant(state, event.time)
-      const settled = closeAbandonedPendings(closed.frames, state.pendingTools, state.pendingCommands)
+      const settled = closeAbandonedPendings(closed.frames, state.pendingTools, new Map())
       return {
         state: {
           ...state,
           ...closed,
           frames: settled,
           pendingTools: new Map(),
-          pendingCommands: new Map(),
+          pendingCommands: state.pendingCommands,
           plan: undefined,
           turnStartedAt: event.time,
           turnTokens: 0,
@@ -669,6 +675,9 @@ export function foldEvent(state: FrameState, event: SessionEvent, deps: FoldDeps
       // Calls the ended turn abandoned settle with a marker: their frames stop
       // being mutable, so the renderer can move them (and everything after)
       // into the append-only scrollback instead of pinning them live forever.
+      // The command registry survives the boundary anyway: a handler slower
+      // than the turn appends its command/done afterwards, and that case
+      // replaces the marker with the real result.
       const settled = closeAbandonedPendings(closed.frames, state.pendingTools, state.pendingCommands)
       const reason = event.data.reason
       // Only a user-initiated cancel leaves a visible marker; disposal and
@@ -700,7 +709,7 @@ export function foldEvent(state: FrameState, event: SessionEvent, deps: FoldDeps
           ...closed,
           frames: markerFrame === undefined ? settled : [...settled, markerFrame],
           pendingTools: new Map(),
-          pendingCommands: new Map(),
+          pendingCommands: state.pendingCommands,
           activeStep: undefined,
           turnStartedAt: undefined,
         },

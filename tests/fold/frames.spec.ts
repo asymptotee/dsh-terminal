@@ -979,14 +979,38 @@ describe('fold: abandoned pendings settle at turn boundaries', () => {
     expect(frame.resultContent).toEqual([{ type: 'text', text: '(turn ended — no result)' }])
   })
 
-  it('settles a pending command with a marker on turn/end', () => {
+  it('marks a pending command on turn/end but keeps the registry for its late done', () => {
     const run = ev('command/run', { commandId: CommandId('c1'), name: 'quit', args: '', source: { kind: 'user' } })
     const { state } = replay([run])
     expect(state.pendingCommands.size).toBe(1)
     const ended = foldEvent(state, ev('turn/end', { turn: 1, reason: { kind: 'completed' } }), deps())
-    expect(ended.state.pendingCommands.size).toBe(0)
+    // The marker shows the abandoned state, but a handler slower than the turn
+    // still appends its command/done — the surviving entry lets it replace the
+    // marker with the real result instead of being orphaned.
+    expect(ended.state.pendingCommands.size).toBe(1)
     const frame = ended.state.frames[0] as Extract<Frame, { kind: 'command' }>
     expect(frame.done).toEqual({ kind: 'success', text: '(turn ended — no result)' })
+    const done = ev('command/done', { commandId: CommandId('c1'), kind: 'success', text: 'compacted' })
+    const after = foldEvent(ended.state, done, deps())
+    const settled = after.state.frames[0] as Extract<Frame, { kind: 'command' }>
+    expect(settled.done).toEqual({ kind: 'success', text: 'compacted' })
+    expect(after.state.pendingCommands.size).toBe(0)
+  })
+
+  it('leaves a pending command alone at turn/start — /plan settles after the turn it kicks off', () => {
+    // /plan's handler steers its argument as a user message and returns, so
+    // the event order is command/run, turn/start, command/done: the boundary
+    // belongs to the turn the command itself started and must not fabricate
+    // an abandoned result for the live command.
+    const run = ev('command/run', { commandId: CommandId('c1'), name: 'plan', args: ' 延时10秒', source: { kind: 'user' } })
+    const started = foldEvent(replay([run]).state, ev('turn/start', { turn: 1 }), deps())
+    expect(started.state.pendingCommands.size).toBe(1)
+    const pending = started.state.frames[0] as Extract<Frame, { kind: 'command' }>
+    expect(pending.done).toBeUndefined()
+    const done = ev('command/done', { commandId: CommandId('c1'), kind: 'success', text: 'Plan mode on. Use /plan off to leave.' })
+    const after = foldEvent(started.state, done, deps())
+    const settled = after.state.frames[0] as Extract<Frame, { kind: 'command' }>
+    expect(settled.done).toEqual({ kind: 'success', text: 'Plan mode on. Use /plan off to leave.' })
   })
 
   it('ignores a late tool result after the turn settled the pending call', () => {
