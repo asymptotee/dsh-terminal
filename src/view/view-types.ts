@@ -41,6 +41,8 @@ export interface InputHandlers {
   /** Answer the pending ask_user_question batch, resolving the answerer
    *  waterfall that the tool call blocks on. */
   onQuestionAnswer(answer: QuestionAnswer): void
+  /** ⇧Tab: cycle the session's permission preset to the next catalog entry. */
+  onCyclePermission(): void
 }
 
 /** One question the agent asks the user (the terminal's structural mirror of

@@ -111,6 +111,7 @@ export function createInkRenderer(): TuiRenderer {
     onPanelMove: () => {},
     onPanelEnter: () => {},
     onPanelBack: () => {},
+    onCyclePermission: () => {},
     onChildPrompt: () => {},
     onJobKill: () => {},
     onQuestionAnswer: () => {},

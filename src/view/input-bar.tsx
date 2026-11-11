@@ -276,6 +276,13 @@ export function InputBar({
       else if (key.escape) handlers.onPanelBack()
       return
     }
+    // ⇧Tab cycles the session's permission preset — the Claude Code gesture —
+    // ahead of the slash menu so plain Tab keeps completing and the cycle
+    // stays available mid-typing.
+    if (key.tab && key.shift) {
+      handlers.onCyclePermission()
+      return
+    }
     // The open slash menu owns the arrows, Tab/Enter (complete, never commit —
     // executing takes a second Enter on the completed line), and Esc (dismiss
     // the menu only; the buffer stays and the turn is not interrupted). Every

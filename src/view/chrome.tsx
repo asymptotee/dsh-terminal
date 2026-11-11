@@ -18,6 +18,17 @@ import { formatContext, formatElapsed, formatTokenCount, shortenCwd, toolLabel, 
  *  whole section disappears at once — enough time to read the final state. */
 export const COMPLETED_BOARD_LINGER_MS = 5_000
 
+/** The permission indicator's per-preset color: restrictive gray, the
+ *  working-mode blue, the reviewer-backed auto green, the never-ask full
+ *  access red, and the derived custom yellow. An unknown mode stays default. */
+const PERMISSION_MODE_COLORS: Record<string, string> = {
+  'read-only': '#adb5bd',
+  'workspace-write': '#a5d8ff',
+  auto: '#51cf66',
+  'danger-full-access': '#ff6b6b',
+  custom: '#ffd43b',
+}
+
 /** The fixed footer: model, session, working state, context usage, and scrollback hint. */
 export function StatusBar({
   status,
@@ -47,10 +58,21 @@ export function StatusBar({
       </Box>
       {status.mode !== undefined || hint !== undefined
         ? (
-          <Text dimColor>
-            {status.mode ?? ''}
-            {status.mode !== undefined && hint !== undefined ? ' · ' : ''}
-            {hint !== undefined ? `(${hint})` : ''}
+          // No dimColor on the row itself: ANSI dim would inherit into the
+          // colored mode segment and mute its preset color. The mode wears
+          // full brightness; the cycle affordance and the panel hints dim
+          // individually.
+          <Text>
+            {status.mode !== undefined
+              ? (
+                <>
+                  <Text color={PERMISSION_MODE_COLORS[status.mode]}>⏵⏵ {status.mode} mode on</Text>
+                  <Text dimColor> (shift+tab to cycle)</Text>
+                </>
+              )
+              : null}
+            {status.mode !== undefined && hint !== undefined ? <Text dimColor> · </Text> : null}
+            {hint !== undefined ? <Text dimColor>({hint})</Text> : null}
           </Text>
         )
         : null}

@@ -222,7 +222,7 @@ describe('workflow panel', () => {
     // Main view under workflow navigation: the hint rides the permission row.
     const main = renderApp(<TuiApp state={state([])} handlers={noopHandlers()} view={runView([run], { workflowSelected: 1, status })} />)
     const frame = main.lastFrame() ?? ''
-    expect(frame).toContain('workspace-write · (↑↓ 选择 · Enter 打开 · Esc 返回)')
+    expect(frame).toContain('⏵⏵ workspace-write mode on (shift+tab to cycle) · (↑↓ 选择 · Enter 打开 · Esc 返回)')
     // The run header stays clean — the hints no longer live up there.
     expect(frame).toContain('Workflow (r) · 1 成员')
     const headerRow = frame.split('\n').find(row => row.includes('Workflow (r)')) ?? ''
@@ -237,7 +237,7 @@ describe('workflow panel', () => {
         status,
       })}
     />)
-    expect(child.lastFrame() ?? '').toContain('workspace-write · (↑↓ 选择 · Enter 打开 · Esc 返回)')
+    expect(child.lastFrame() ?? '').toContain('⏵⏵ workspace-write mode on (shift+tab to cycle) · (↑↓ 选择 · Enter 打开 · Esc 返回)')
     // Without workflow navigation the footer carries no hint.
     const idle = renderApp(<TuiApp state={state([])} handlers={noopHandlers()} view={runView([run], { status })} />)
     expect(idle.lastFrame() ?? '').not.toContain('Esc 返回')

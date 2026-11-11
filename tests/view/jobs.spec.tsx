@@ -192,6 +192,6 @@ describe('jobs panel', () => {
       handlers={noopHandlers()}
       view={{ jobs: { rows: [job()] }, jobsSelected: 1, status }}
     />)
-    expect(lastFrame()).toContain('workspace-write · (↑↓ 选择 · Enter 详情 · Esc 返回)')
+    expect(lastFrame()).toContain('⏵⏵ workspace-write mode on (shift+tab to cycle) · (↑↓ 选择 · Enter 详情 · Esc 返回)')
   })
 })

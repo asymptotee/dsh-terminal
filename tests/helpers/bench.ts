@@ -168,6 +168,7 @@ export async function bench(script: Script): Promise<BenchHandle> {
     onPanelMove: () => {},
     onPanelEnter: () => {},
     onPanelBack: () => {},
+    onCyclePermission: () => {},
     onChildPrompt: () => {},
     onJobKill: () => {},
     onQuestionAnswer: () => {},

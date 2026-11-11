@@ -189,7 +189,7 @@ describe('subagent panel', () => {
     const frame = lastFrame() ?? ''
     // The hint only renders while the team panel holds focus — on the
     // status bar's permission row, exactly like the workflow panel's.
-    expect(frame).toContain('workspace-write · (↑↓ 选择 · Enter 打开 · Esc 返回)')
+    expect(frame).toContain('⏵⏵ workspace-write mode on (shift+tab to cycle) · (↑↓ 选择 · Enter 打开 · Esc 返回)')
     expect(frame).toContain('researcher')
     expect(frame).toContain('writer')
   })

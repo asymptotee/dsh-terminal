@@ -373,7 +373,11 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
   // hiding the reviewer that guards its open sandbox. Structural read, the
   // same pattern as sandboxPolicy — no upstream import.
   const permissionPresets = ctx.get('permissionPresets') as
-    | { current(session: unknown): string }
+    | {
+      current(session: unknown): string
+      catalog(): { options: readonly { value: string; name: string }[] }
+      set(session: unknown, name: string): void
+    }
     | undefined
   // The session's effective working directory: the rc.3 working-directory
   // service seeds it from the header's project (--cwd or the launch dir) and
@@ -973,6 +977,25 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
       : { ...view, overlay }
     scheduleRender(true)
   }
+  // ⇧Tab cycles the session's permission preset through the catalog order —
+  // the Claude Code gesture — switching instantly; the knob events land
+  // through the session bus and refresh the badge on their own.
+  const cyclePermission = (): void => {
+    if (permissionPresets === undefined) return
+    const options = permissionPresets.catalog().options
+    if (options.length === 0) return
+    const current = permissionPresets.current(agent.session)
+    // A derived `custom` value matches no option: the cycle starts over from
+    // the first catalog entry.
+    const index = options.findIndex(option => option.value === current)
+    const next = options[(index + 1) % options.length]
+    if (next === undefined) return
+    try {
+      permissionPresets.set(agent.session, next.value)
+    } catch (error) {
+      setOverlay({ kind: 'notice', text: `permission switch failed: ${error instanceof Error ? error.message : String(error)}` })
+    }
+  }
   // Fold one direct child's event into its own frame state for the panel and
   // the child transcript view.
   const foldChildEvent = (childId: string, event: SessionEvent): void => {
@@ -1042,6 +1065,24 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
       const mode = (event.data as { mode?: unknown }).mode
       if (typeof mode === 'string') view = { ...view, status: { ...view.status, mode } }
     }
+  }
+  // A preset switch appends its identity event and each changed knob event in
+  // one synchronous burst; re-reading the badge per event would paint an
+  // in-between derivation — leaving `auto`, the knobs (full sandbox + ask)
+  // match no configured preset for one frame, flashing `custom`. Coalesce the
+  // burst into one read after set() returns; intermediate event renders keep
+  // the previous badge, which is exactly the pre-switch value.
+  let permissionBadgeQueued = false
+  let lastPermissionKnobEvent: SessionEvent | undefined
+  const queuePermissionBadge = (event: SessionEvent): void => {
+    lastPermissionKnobEvent = event
+    if (permissionBadgeQueued) return
+    permissionBadgeQueued = true
+    queueMicrotask(() => {
+      permissionBadgeQueued = false
+      refreshPermissionBadge(lastPermissionKnobEvent)
+      scheduleRender(true)
+    })
   }
   // The status bar's directory follows the service's committed value: a model
   // directory switch lands as a `working-directory/change` event, re-read here.
@@ -1119,7 +1160,7 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
       return
     }
     trackUsage(event)
-    if (PERMISSION_KNOB_EVENTS.has(event.type as string)) refreshPermissionBadge(event)
+    if (PERMISSION_KNOB_EVENTS.has(event.type as string)) queuePermissionBadge(event)
     // A team event moves the authoritative agentTeam projection, so re-read it
     // before the render below to keep the team panel current.
     if ((event.type as string).startsWith('team/')) refreshTeam()
@@ -1447,6 +1488,10 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
     onQuestionAnswer: (answer: QuestionAnswer) => {
       if (exiting) return
       pendingQuestion?.(answer)
+    },
+    onCyclePermission: () => {
+      if (exiting) return
+      cyclePermission()
     },
     onPanelOpen: () => {
       if (exiting) return
