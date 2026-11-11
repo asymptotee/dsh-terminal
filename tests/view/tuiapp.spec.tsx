@@ -754,14 +754,21 @@ describe('TuiApp rendering', () => {
         name: 'bogus',
         done: { kind: 'error', text: 'no such file' },
       },
+      // A silent success: the echo alone, no connector and no blank line.
+      { kind: 'command', seq: 9, commandId: 'c4', name: 'clear', done: { kind: 'success' } },
     ]
     const { lastFrame } = renderApp(<TuiApp state={state(frames)} handlers={noopHandlers()} />)
     const frame = lastFrame() ?? ''
-    expect(frame).toContain('/quit')
-    expect(frame).toContain('/compact -1')
-    expect(frame).toContain('compacted')
-    expect(frame).toContain('/bogus')
-    expect(frame).toContain('no such file')
+    // The echo line is the user-submission treatment: the ❯ marker leads the
+    // command (the band background is ANSI, stripped by the harness).
+    expect(frame).toContain('❯ /quit')
+    expect(frame).toContain('❯ /compact -1')
+    expect(frame).toContain('❯ /bogus')
+    expect(frame).toContain('❯ /clear')
+    // Settled outcomes hang under the shared ⎿ output block.
+    expect(frame).toContain('⎿  compacted')
+    expect(frame).toContain('⎿  no such file')
+    expect((frame.match(/⎿/g) ?? []).length).toBe(2)
   })
 
   it('renders a notice overlay above the input bar', () => {

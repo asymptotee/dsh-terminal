@@ -50,8 +50,8 @@ export function frameKey(frame: Frame): string {
 
 /** One transcript frame, dispatched to its kind's view. */
 export function FrameRow({ frame, expandedOutput, approvalCallId }: { frame: Frame; expandedOutput: boolean; approvalCallId: string | undefined }): React.JSX.Element {
-  // The user echo pads each line to the full terminal width so its background
-  // spans the row; every other frame renders its natural width.
+  // The user and command echoes pad each line to the full terminal width so
+  // their background spans the row; every other frame renders its natural width.
   const width = useTerminalWidth()
   switch (frame.kind) {
     case 'user': {
@@ -117,7 +117,7 @@ export function FrameRow({ frame, expandedOutput, approvalCallId }: { frame: Fra
     case 'tool':
       return <ToolRow frame={frame} expandedOutput={expandedOutput} awaitingApproval={frame.callId === approvalCallId} />
     case 'command':
-      return <CommandRow frame={frame} />
+      return <CommandRow frame={frame} expandedOutput={expandedOutput} width={width} />
     case 'interrupted':
       return <Text color="#ffd43b">● Interrupted · What should dsh do instead?</Text>
     case 'completed':
@@ -171,15 +171,27 @@ function ThinkingBlock({
   )
 }
 
-/** One slash-command invocation: the line, then the settled outcome. */
-function CommandRow({ frame }: { frame: Extract<Frame, { kind: 'command' }> }): React.JSX.Element {
+/** One slash-command invocation: the Claude Code style echo line — the `❯`
+ *  marker and the full-width background band, the command's own submission —
+ *  then the settled outcome under the shared `⎿` output block. A silent
+ *  success (no text) renders the echo alone. */
+function CommandRow({ frame, expandedOutput, width }: {
+  frame: Extract<Frame, { kind: 'command' }>
+  expandedOutput: boolean
+  width: number
+}): React.JSX.Element {
+  const done = frame.done
   return (
     <Box flexDirection="column">
-      <Text><Text color="magenta">/</Text>{frame.name}{frame.args ?? ''}</Text>
-      {frame.done !== undefined
-        ? <Text color={frame.done.kind === 'error' ? 'red' : 'dim'}>
-          {frame.done.text ?? (frame.done.kind === 'error' ? 'command failed' : '')}
-        </Text>
+      <Text backgroundColor="#3a3a3a">
+        {padToWidth(`❯ /${frame.name}${frame.args ?? ''}`, width)}
+      </Text>
+      {done !== undefined && (done.kind === 'error' || done.text !== undefined)
+        ? <IndentedBlock
+          text={done.text ?? 'command failed'}
+          expanded={expandedOutput}
+          {...(done.kind === 'error' ? { error: true } : {})}
+        />
         : null}
     </Box>
   )
