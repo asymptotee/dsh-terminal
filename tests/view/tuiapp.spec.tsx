@@ -35,16 +35,17 @@ describe('TuiApp rendering', () => {
     // the same one-row-margin wrapper the transcript list uses.
     const expanded = (frame: Frame) => (
       <Box flexDirection="column" marginBottom={1}>
-        <FrameRow frame={frame} expandedOutput={false} approvalCallId={undefined} thinkingExpanded={true} />
+        <FrameRow frame={frame} expandedOutput={false} approvalCallId={undefined} thinkingExpanded={true} thinkingHovered={false} />
       </Box>
     )
-    // Thinking + text: one breathing row between the box border and the text.
+    // Thinking + text: one breathing row between the reasoning and the text.
     const first = renderApp(expanded({ kind: 'assistant', seq: 1, turn: 1, step: 1, text: 'Here we go', streaming: false, thinking }))
     let lines = (first.lastFrame() ?? '').split('\n')
-    let border = lines.findIndex(line => line.includes('╯'))
+    // The open block is the reasoning alone (no header); it fits one line.
+    let border = lines.findIndex(line => line.includes('reasoning prose'))
     let next = lines.findIndex(line => line.includes('● Here we go'))
     expect(next - border).toBe(2)
-    // Thinking without text: the box ends the frame, and only the frame
+    // Thinking without text: the reasoning ends the frame, and only the frame
     // wrapper's margin separates it from the next call — not margin doubled.
     const second = renderApp(
       <Box flexDirection="column">
@@ -53,7 +54,7 @@ describe('TuiApp rendering', () => {
       </Box>,
     )
     lines = (second.lastFrame() ?? '').split('\n')
-    border = lines.findIndex(line => line.includes('╯'))
+    border = lines.findIndex(line => line.includes('reasoning prose'))
     next = lines.findIndex(line => line.includes('● Bash(ls)'))
     expect(next - border).toBe(2)
   })
@@ -287,20 +288,28 @@ describe('TuiApp rendering', () => {
     }
   }
   function expandedRow(frame: Frame) {
-    return <FrameRow frame={frame} expandedOutput={false} approvalCallId={undefined} thinkingExpanded={true} />
+    return <FrameRow frame={frame} expandedOutput={false} approvalCallId={undefined} thinkingExpanded={true} thinkingHovered={false} />
   }
 
   it('collapses settled thinking to the dim Thought-for line alone', () => {
     const { lastFrame } = renderApp(<TuiApp state={state([thinkingFrame('first idea\nsecond idea')])} handlers={noopHandlers()} />)
     const frame = lastFrame() ?? ''
-    // The collapsed row carries no dot and no reasoning; it still precedes the
-    // visible text, mirroring the model's order.
-    expect(frame).toContain('Thought for 4s')
+    // The collapsed row carries no dot and no reasoning, sits on the body
+    // text's column (two in, where the live dot's label was), and still
+    // precedes the visible text, mirroring the model's order.
+    expect(frame).toContain('  Thought for 4s')
     expect(frame.indexOf('Thought for 4s')).toBeLessThan(frame.indexOf('● answer'))
     expect(frame).not.toContain('● Thought')
     expect(frame).not.toContain('first idea')
     expect(frame).not.toContain('second idea')
-    expect(frame).not.toContain('╭')
+    expect(frame).not.toContain('⎿')
+  })
+
+  it('registers the thinking block element through the ref for hit-testing', () => {
+    const ref = vi.fn()
+    renderApp(<FrameRow frame={thinkingFrame('reasoning prose')} expandedOutput={false} approvalCallId={undefined} thinkingExpanded={false} thinkingHovered={false} thinkingRef={ref} />)
+    expect(ref).toHaveBeenCalled()
+    expect(ref.mock.calls.some(call => call[0] != null)).toBe(true)
   })
 
   it('keeps the live reasoning fully visible with the blinking dot', () => {
@@ -308,32 +317,70 @@ describe('TuiApp rendering', () => {
     const { lastFrame } = renderApp(<TuiApp state={state(frames)} handlers={noopHandlers()} />)
     const frame = lastFrame() ?? ''
     expect(frame).toContain('● Thought for 1s')
-    expect(frame).toContain('╭')
-    expect(frame).toContain('live idea')
+    // The live window hangs on a rule aligned to the header's text column.
+    expect(frame).toContain('  │ live idea')
   })
 
-  it('shows a fixed window of the latest reasoning lines when expanded', () => {
+  it('windows the live reasoning box to the latest lines', () => {
     const text = Array.from({ length: 10 }, (_, i) => `idea ${i + 1}`).join('\n')
-    const { lastFrame } = renderApp(expandedRow(thinkingFrame(text)))
+    const frames: Frame[] = [thinkingFrame(text, { streaming: true, text: '', thinking: { text, startedAt: 0, seconds: 4 } })]
+    const { lastFrame } = renderApp(<TuiApp state={state(frames)} handlers={noopHandlers()} />)
     const frame = lastFrame() ?? ''
-    expect(frame).toContain('╭')
+    // The streaming box is fixed-height: the latest rows scroll through it.
     expect(frame).toContain('idea 6')
     expect(frame).toContain('idea 10')
     expect(frame).not.toContain('idea 1\n')
     expect(frame).not.toContain('idea 5')
   })
 
+  it('shows the whole reasoning when the settled block is expanded', () => {
+    const text = Array.from({ length: 10 }, (_, i) => `idea ${i + 1}`).join('\n')
+    const { lastFrame } = renderApp(expandedRow(thinkingFrame(text)))
+    const frame = lastFrame() ?? ''
+    // The open block is the reasoning alone — the header stays collapsed —
+    // and it is the reasoning in full: the live window scrolled past more
+    // than it held, so the deliberate expand must not hand back less.
+    expect(frame).not.toContain('Thought for')
+    expect(frame).toContain('idea 1\n')
+    expect(frame).toContain('idea 5')
+    expect(frame).toContain('idea 10')
+  })
+
+  it('keeps an empty reasoning paragraph occupying its row when expanded', () => {
+    const { lastFrame } = renderApp(expandedRow(thinkingFrame('para one\n\npara two')))
+    const lines = (lastFrame() ?? '').split('\n')
+    const first = lines.findIndex(line => line.includes('para one'))
+    const second = lines.findIndex(line => line.includes('para two'))
+    // The blank paragraph between them keeps its row: a collapsed empty Text
+    // would drop the break AND desynchronize the toggle's height prediction
+    // (the real-machine flash this guards against).
+    expect(second - first).toBe(2)
+  })
+
+  it('wraps wide CJK reasoning by display width, never past the rule', () => {
+    const cjk = '思'.repeat(60) // 120 display columns at two per character
+    const frames: Frame[] = [thinkingFrame(cjk, { streaming: true, text: '', thinking: { text: cjk, startedAt: 0, seconds: 1 } })]
+    const { lastFrame } = renderApp(<TuiApp state={state(frames)} handlers={noopHandlers()} />)
+    const rows = (lastFrame() ?? '').split('\n').filter(line => line.includes('思'))
+    // 120 columns at the 96-column live budget wrap into exactly two rows,
+    // each led by the rule: a char-count wrap would overflow the budget and
+    // ink's own re-wrap would strand the excess on the rule's column.
+    expect(rows).toHaveLength(2)
+    expect(rows.every(row => row.trimStart().startsWith('│'))).toBe(true)
+  })
+
   it('wraps long reasoning lines into full-width rows without clipping', () => {
     const long = 'x'.repeat(200)
     const { lastFrame } = renderApp(expandedRow(thinkingFrame(long, { thinking: { text: long, startedAt: 0, seconds: 1 } })))
     const frame = lastFrame() ?? ''
-    // 200 columns at the 78-wide content box wrap into three physical rows,
-    // the whole text visible, no clip marker.
+    // 200 columns at the width-minus-2 content column (the body's own
+    // indent) wrap into three physical rows, the whole text visible, no clip
+    // marker.
     const inside = frame.split('\n').filter(line => line.includes('x'))
     expect(inside).toHaveLength(3)
     expect(frame).not.toContain('…')
-    expect(frame).toContain('x'.repeat(78))
-    expect(frame).toContain('x'.repeat(44))
+    expect(frame).toContain('x'.repeat(98))
+    expect(frame).toContain('x'.repeat(4))
   })
 
   it('sizes the thought window to the reasoning length below the cap', () => {
@@ -345,7 +392,7 @@ describe('TuiApp rendering', () => {
   it('shows the whole reasoning when it fits the window', () => {
     const { lastFrame } = renderApp(expandedRow(thinkingFrame('first idea\nsecond idea')))
     const frame = lastFrame() ?? ''
-    expect(frame).toContain('Thought for 4s')
+    expect(frame).not.toContain('Thought for')
     expect(frame).toContain('first idea')
     expect(frame).toContain('second idea')
   })

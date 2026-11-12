@@ -10,7 +10,7 @@ import React, { useState } from 'react'
 import { Box, Text, useInput, usePaste } from 'ink'
 import stringWidth from 'string-width'
 import type { ScrollAction } from './terminal.ts'
-import { clickFromInput, containsMouseReport, wheelDeltaFromInput } from './terminal.ts'
+import { clickFromInput, containsMouseReport, moveFromInput, wheelDeltaFromInput } from './terminal.ts'
 import type { ClickPosition } from './terminal.ts'
 import type { CommandInfo, InputHandlers, StatusInfo } from './view-types.ts'
 import { padToWidth, truncateToWidth } from './text-helpers.ts'
@@ -35,6 +35,7 @@ export function InputBar({
   onApprovalSelect,
   onScroll,
   onClick,
+  onHover,
   onFirstInput,
   history = [],
   focusMode = 'input',
@@ -92,6 +93,9 @@ export function InputBar({
   /** A left click inside the transcript window, in 1-based SGR viewport
    *  coordinates; the caller hit-tests it against the measured frames. */
   onClick?: (position: ClickPosition) => void
+  /** The pointer moved, in the same viewport coordinates; the caller tracks
+   *  its hover affordances off it. */
+  onHover?: (position: ClickPosition) => void
   /** Fired once when the buffer first becomes non-empty (typing or paste). */
   onFirstInput?: () => void
   /** The session's submitted lines; the arrows browse them (log-restored on resume). */
@@ -182,9 +186,15 @@ export function InputBar({
         return
       }
       // No wheel notch: a left press goes to the transcript's click-to-expand
-      // hit-test; every other report (releases, other buttons) is swallowed.
+      // hit-test, a motion report to its hover tracking; every other report
+      // (releases, other buttons) is swallowed.
       const click = clickFromInput(input)
-      if (click !== undefined) onClick?.(click)
+      if (click !== undefined) {
+        onClick?.(click)
+        return
+      }
+      const move = moveFromInput(input)
+      if (move !== undefined) onHover?.(move)
       return
     }
     if (key.pageUp) {

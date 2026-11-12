@@ -29,6 +29,7 @@ import {
   scrollStatesReducer,
   transcriptMarginTop,
 } from './terminal.ts'
+import type { ClickPosition } from './terminal.ts'
 import type { InputHandlers, Overlay, PlanReviewNarrowed, QuestionAnswerItem, QuestionDraft, QuestionItem, RenderView, TuiRenderer } from './view-types.ts'
 import {
   ApprovalPanel,
@@ -44,6 +45,7 @@ import {
 } from './chrome.tsx'
 import { JobDetail, JobsPanel, SubagentPanel, TeamPanel, WorkflowPanel } from './panels.tsx'
 import { FrameRow, frameKey, PlanDocument, planMarkdownOf } from './transcript.tsx'
+import { wrapToWidth } from './text-helpers.ts'
 import { InputBar, READ_ONLY_CHILD_NOTE } from './input-bar.tsx'
 import { useTerminalSize } from './use-terminal.ts'
 
@@ -468,6 +470,24 @@ export function TuiApp({
   // carries its remembered measurements.
   if (scrollStates.active !== transcriptKey) dispatch({ type: 'switch', key: transcriptKey })
   const scroll = scrollStates.entries[scrollStates.active] ?? createScrollState()
+  // The content-height delta a pending thinking toggle will produce, applied
+  // to the scroll state during the toggle's own render (right below).
+  const pendingScrollDelta = useRef(0)
+  // A thinking toggle changes the content height by an exactly computable
+  // delta (the reasoning's physical rows against the one header row — the
+  // same numbers the post-commit measure pass will land on). Applying it
+  // here, during the toggle's own render, follows the view switch's pattern:
+  // React re-runs the component before committing, so the toggle and the
+  // corrected anchoring land in ONE frame — the rows below the block never
+  // get an intermediate geometry to jump in, whatever the reconciler's
+  // batching makes of the two separate updates. The resize transition (not
+  // measure) rides the borrowed offset along when scrolled up, so a collapse
+  // pays back exactly what the expansion borrowed.
+  if (pendingScrollDelta.current !== 0 && scroll.contentRows > 0) {
+    const delta = pendingScrollDelta.current
+    pendingScrollDelta.current = 0
+    dispatch({ type: 'resize', delta })
+  }
 
   // ---- Click-to-expand settled thinking --------------------------------
   // A settled `Thought for Ns` row toggles its reasoning box back on a left
@@ -475,44 +495,87 @@ export function TuiApp({
   // don't-estimate discipline as the scroll model — keyed per transcript view
   // so a child's frames never collide with the main session's.
   const [thinkingExpanded, setThinkingExpanded] = useState<ReadonlySet<string>>(() => new Set())
+  // The settled thinking header the pointer rests on: it drops its dim until
+  // the pointer leaves. Identity-stable updates — motion reports arrive in
+  // floods and only an actual enter/leave may re-render. Hover is motion-
+  // driven alone: a click never sets it, so a terminal that reports no motion
+  // can never strand the row white after a toggle.
+  const [hoveredThinking, setHoveredThinking] = useState<string | undefined>(undefined)
   const frameEls = useRef(new Map<string, any>())
   const frameHeights = useRef(new Map<string, number>())
+  // The thinking blocks' own elements and heights: the interactive unit spans
+  // the header plus the open box, so the hit-test needs the block's measured
+  // extent inside its frame (clicking the answer text below must not toggle).
+  const thinkingEls = useRef(new Map<string, any>())
+  const thinkingHeights = useRef(new Map<string, number>())
   const frameElCallbacks = useRef(new Map<string, (el: any) => void>())
-  const frameElRef = (key: string): ((el: any) => void) => {
+  const thinkingElCallbacks = useRef(new Map<string, (el: any) => void>())
+  const stableRef = (
+    key: string,
+    callbacks: Map<string, (el: any) => void>,
+    els: Map<string, any>,
+  ): ((el: any) => void) => {
     // Identity-stable callbacks per key: React detaches a changed callback
     // every render, which would delete-and-re-add each mounted element.
-    let callback = frameElCallbacks.current.get(key)
+    let callback = callbacks.get(key)
     if (callback === undefined) {
       callback = (el: any): void => {
-        if (el === null) frameEls.current.delete(key)
-        else frameEls.current.set(key, el)
+        if (el === null) els.delete(key)
+        else els.set(key, el)
       }
-      frameElCallbacks.current.set(key, callback)
+      callbacks.set(key, callback)
     }
     return callback
   }
+  const frameElRef = (key: string): ((el: any) => void) => stableRef(key, frameElCallbacks.current, frameEls.current)
+  const thinkingElRef = (key: string): ((el: any) => void) => stableRef(key, thinkingElCallbacks.current, thinkingEls.current)
   const scopedFrameKey = (frame: Frame): string => `${transcriptKey}:${frameKey(frame)}`
-  const handleTranscriptClick = (position: { x: number; y: number }): void => {
+  /** The settled thinking block under a viewport point, or undefined: the
+   *  hit-test both the click toggle and the pointer hover share. The target
+   *  spans the block's measured rows — the header while collapsed, the
+   *  reasoning rows while open — so clicking the reasoning collapses it
+   *  again while the answer text below stays inert. */
+  const thinkingRowAt = (position: ClickPosition): { key: string; frame: Extract<Frame, { kind: 'assistant' }> } | undefined => {
     const windowed = opened === undefined ? mainWindowed : childWindowed
-    if (windowed === undefined) return
+    if (windowed === undefined) return undefined
     const row = clickRowInContent(scroll, position.y)
-    if (row === undefined) return
+    if (row === undefined) return undefined
     const visible = windowed.visible
     const heights = visible.map(frame => frameHeights.current.get(scopedFrameKey(frame)) ?? 0)
     // With elided earlier frames a one-row notice leads the content column.
     const hit = hitFrameRow(heights, row, windowed.hidden > 0 ? 1 : 0)
-    if (hit === undefined || hit.rowInFrame !== 0) return
+    if (hit === undefined) return undefined
     const frame = visible[hit.index]
-    if (frame === undefined || frame.kind !== 'assistant' || frame.thinking === undefined) return
-    // The live block always shows its body; the toggle only moves settled ones.
-    if (frame.streaming && frame.text === '') return
+    if (frame === undefined || frame.kind !== 'assistant' || frame.thinking === undefined) return undefined
+    // The live block always shows its body; toggle and hover serve settled ones.
+    if (frame.streaming && frame.text === '') return undefined
     const key = scopedFrameKey(frame)
+    // Before the block's first measurement the header row alone is the target.
+    const blockRows = thinkingHeights.current.get(key) ?? 1
+    return hit.rowInFrame < blockRows ? { key, frame } : undefined
+  }
+  const handleTranscriptClick = (position: ClickPosition): void => {
+    const hit = thinkingRowAt(position)
+    if (hit === undefined) return
+    const { key, frame } = hit
+    // Stage the toggle's exact content-height delta for the render-phase
+    // scroll correction: the reasoning's physical rows against the one
+    // header row.
+    if (frame.thinking !== undefined) {
+      const physicalRows = wrapToWidth(frame.thinking.text, Math.max(1, columns - 2)).length
+      const staged = thinkingExpanded.has(key) ? 1 - physicalRows : physicalRows - 1
+      pendingScrollDelta.current += staged
+    }
     setThinkingExpanded(current => {
       const next = new Set(current)
       if (next.has(key)) next.delete(key)
       else next.add(key)
       return next
     })
+  }
+  const handleTranscriptHover = (position: ClickPosition): void => {
+    const key = thinkingRowAt(position)?.key
+    setHoveredThinking(current => (current === key ? current : key))
   }
 
   // Measure the laid-out window and content after every commit and adopt the
@@ -533,6 +596,10 @@ export function TuiApp({
     for (const [key, el] of frameEls.current) {
       const measured = measureElement(el)
       if (frameHeights.current.get(key) !== measured.height) frameHeights.current.set(key, measured.height)
+    }
+    for (const [key, el] of thinkingEls.current) {
+      const measured = measureElement(el)
+      if (thinkingHeights.current.get(key) !== measured.height) thinkingHeights.current.set(key, measured.height)
     }
   })
 
@@ -562,7 +629,7 @@ export function TuiApp({
         {mainWindowed.hidden > 0 ? <Text dimColor>… {mainWindowed.hidden} earlier frames</Text> : null}
         {mainWindowed.visible.map(frame => (
           <Box key={frameKey(frame)} ref={frameElRef(scopedFrameKey(frame))} flexDirection="column" marginBottom={1}>
-            <FrameRow frame={frame} expandedOutput={expandedOutput} approvalCallId={approvalOverlay?.callId} thinkingExpanded={thinkingExpanded.has(scopedFrameKey(frame))} />
+            <FrameRow frame={frame} expandedOutput={expandedOutput} approvalCallId={approvalOverlay?.callId} thinkingExpanded={thinkingExpanded.has(scopedFrameKey(frame))} thinkingHovered={hoveredThinking === scopedFrameKey(frame)} thinkingRef={thinkingElRef(scopedFrameKey(frame))} />
           </Box>
         ))}
       </>
@@ -572,7 +639,7 @@ export function TuiApp({
       {(childWindowed?.hidden ?? 0) > 0 ? <Text dimColor>… {childWindowed?.hidden} earlier frames</Text> : null}
       {(childWindowed?.visible ?? []).map(frame => (
         <Box key={frameKey(frame)} ref={frameElRef(scopedFrameKey(frame))} flexDirection="column" marginBottom={1}>
-          <FrameRow frame={frame} expandedOutput={expandedOutput} approvalCallId={approvalOverlay?.callId} thinkingExpanded={thinkingExpanded.has(scopedFrameKey(frame))} />
+          <FrameRow frame={frame} expandedOutput={expandedOutput} approvalCallId={approvalOverlay?.callId} thinkingExpanded={thinkingExpanded.has(scopedFrameKey(frame))} thinkingHovered={hoveredThinking === scopedFrameKey(frame)} thinkingRef={thinkingElRef(scopedFrameKey(frame))} />
         </Box>
       ))}
     </>
@@ -665,6 +732,7 @@ export function TuiApp({
           onApprovalSelect={onApprovalSelect}
           onScroll={dispatch}
           onClick={handleTranscriptClick}
+          onHover={handleTranscriptHover}
           onFirstInput={() => { setWelcomeDismissed(true) }}
           history={history}
           focusMode={focusMode}

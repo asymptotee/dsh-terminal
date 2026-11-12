@@ -5,6 +5,7 @@ import {
   clickFromInput,
   clickRowInContent,
   containsMouseReport,
+  moveFromInput,
   createScrollState,
   createScrollStates,
   hitFrameRow,
@@ -84,6 +85,28 @@ describe('clickFromInput', () => {
   })
 })
 
+describe('moveFromInput', () => {
+  it('decodes motion reports, button held or not', () => {
+    expect(moveFromInput('[<35;12;3M')).toEqual({ x: 12, y: 3 }) // no button held
+    expect(moveFromInput('[<32;4;9M')).toEqual({ x: 4, y: 9 }) // left drag
+  })
+
+  it('masks modifier bits so shifted motion still reports', () => {
+    expect(moveFromInput('[<39;7;8M')).toEqual({ x: 7, y: 8 }) // shift + motion
+  })
+
+  it('ignores presses, releases, and wheel notches', () => {
+    expect(moveFromInput('[<0;5;5M')).toBeUndefined() // press
+    expect(moveFromInput('[<3;5;5m')).toBeUndefined() // release
+    expect(moveFromInput('[<64;5;5M')).toBeUndefined() // wheel
+    expect(moveFromInput('hello')).toBeUndefined()
+  })
+
+  it('keeps the last position of a batched motion chunk', () => {
+    expect(moveFromInput('[<35;1;1M\x1b[<35;2;2M\x1b[<35;3;4M')).toEqual({ x: 3, y: 4 })
+  })
+})
+
 describe('mouseEnabled', () => {
   it('defaults on and honors the opt-out', () => {
     expect(mouseEnabled({})).toBe(true)
@@ -157,6 +180,36 @@ describe('scrollReducer', () => {
   it('resets on view switch', () => {
     const up = scrollReducer(measured, { type: 'wheel', delta: 20 })
     expect(scrollReducer(up, { type: 'reset' })).toEqual(createScrollState())
+  })
+})
+
+describe('resize (thinking toggle)', () => {
+  const measured: ScrollState = { offset: 0, contentRows: 100, windowRows: 30 }
+
+  it('stays sticky at the live bottom in both directions', () => {
+    const grown = scrollReducer(measured, { type: 'resize', delta: 8 })
+    expect(grown).toEqual({ offset: 0, contentRows: 108, windowRows: 30 })
+    expect(scrollReducer(grown, { type: 'resize', delta: -8 })).toEqual(measured)
+  })
+
+  it('borrows and repays the offset when scrolled up, round-tripping exactly', () => {
+    const up = scrollReducer(measured, { type: 'wheel', delta: 20 })
+    const grown = scrollReducer(up, { type: 'resize', delta: 8 })
+    expect(grown.contentRows).toBe(108)
+    expect(grown.offset).toBe(28) // the reading position holds
+    const shrunk = scrollReducer(grown, { type: 'resize', delta: -8 })
+    expect(shrunk).toEqual(up) // collapse lands back exactly
+  })
+
+  it('clamps the repaid offset at the top and the live bottom', () => {
+    const nearTop = scrollReducer(measured, { type: 'wheel', delta: 3 })
+    const shrunk = scrollReducer(nearTop, { type: 'resize', delta: -10 })
+    expect(shrunk.offset).toBe(0)
+    expect(shrunk.contentRows).toBe(90)
+  })
+
+  it('is identity-stable for a zero delta', () => {
+    expect(scrollReducer(measured, { type: 'resize', delta: 0 })).toBe(measured)
   })
 })
 

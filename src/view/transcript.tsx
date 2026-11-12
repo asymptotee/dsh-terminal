@@ -15,7 +15,7 @@ import { Box, Text } from 'ink'
 import stringWidth from 'string-width'
 import type { Frame } from '../fold/frames.ts'
 import { contentToText, stripOuterCodeFence } from '../fold/render.ts'
-import { foldInvocationLine, formatClock, formatElapsed, inlineDiffLines, padToWidth, toolLabel, trimNewline, truncateToWidth } from './text-helpers.ts'
+import { foldInvocationLine, formatClock, formatElapsed, inlineDiffLines, padToWidth, toolLabel, trimNewline, truncateToWidth, wrapToWidth } from './text-helpers.ts'
 import { useTerminalWidth } from './use-terminal.ts'
 
 /** Fraction of the terminal width a tool call line may occupy before its
@@ -49,12 +49,17 @@ export function frameKey(frame: Frame): string {
 }
 
 /** One transcript frame, dispatched to its kind's view. */
-export function FrameRow({ frame, expandedOutput, approvalCallId, thinkingExpanded }: {
+export function FrameRow({ frame, expandedOutput, approvalCallId, thinkingExpanded, thinkingHovered, thinkingRef }: {
   frame: Frame
   expandedOutput: boolean
   approvalCallId: string | undefined
   /** This frame's settled thinking block was clicked back open. */
   thinkingExpanded: boolean
+  /** The pointer rests on this frame's settled thinking header. */
+  thinkingHovered: boolean
+  /** Registers the thinking block's element for the renderer's hit-test
+   *  measurements; frames without thinking never call it. */
+  thinkingRef?: (el: unknown) => void
 }): React.JSX.Element {
   // The user and command echoes pad each line to the full terminal width so
   // their background spans the row; every other frame renders its natural width.
@@ -110,7 +115,7 @@ export function FrameRow({ frame, expandedOutput, approvalCallId, thinkingExpand
           {/* The reasoning is live while the frame still streams and no visible
               text has arrived — the first text delta ends the thinking span. */}
           {frame.thinking !== undefined
-            ? <ThinkingBlock thinking={frame.thinking} live={frame.streaming && frame.text === ''} expanded={thinkingExpanded} />
+            ? <ThinkingBlock thinking={frame.thinking} live={frame.streaming && frame.text === ''} expanded={thinkingExpanded} hovered={thinkingHovered} blockRef={thinkingRef} />
             : null}
           {/* The breathing row belongs to the box-text pair: with no text in
               the frame the box ends it, and the frame wrapper's own margin is
@@ -139,48 +144,70 @@ export function FrameRow({ frame, expandedOutput, approvalCallId, thinkingExpand
   }
 }
 
-/** Wrap a line into physical rows of at most `width` columns; short lines pass through. */
-function wrapLine(line: string, width: number): readonly string[] {
-  if (line.length <= width) return [line]
-  const rows: string[] = []
-  for (let offset = 0; offset < line.length; offset += width) {
-    rows.push(line.slice(offset, offset + width))
-  }
-  return rows
-}
-
-/** The reasoning window. Live, the header dot blinks dim and the bordered
- *  box scrolls over the latest rows. Once thinking ends the block collapses
- *  to the one dim `Thought for Ns` row (no dot): a click on that row — hit-
- *  tested in the renderer — toggles the box back. */
+/** The reasoning window. Live, the header dot blinks dim above a `│` rule —
+ *  aligned onto the header's text column — carrying the window over the
+ *  latest rows. Once thinking ends the block collapses to the
+ *  one dim `Thought for Ns` row (no dot, indented onto the body text's column
+ *  — where the live dot's label sat), lifting out of the dim under the
+ *  pointer's hover; a click swaps the row for the reasoning in full — the
+ *  open block is content alone, no header — and a click on the content
+ *  collapses it back. Toggle and hover both hit-test in the renderer. */
 function ThinkingBlock({
   thinking,
   live,
   expanded,
+  hovered,
+  blockRef,
 }: {
   thinking: Extract<Frame, { kind: 'assistant' }>['thinking'] & object
   /** The reasoning stream is still open: the header dot blinks until it ends. */
   live: boolean
-  /** A settled block the click toggled back open. */
+  /** A settled block the click swapped open: the content replaces the header. */
   expanded: boolean
+  /** The pointer rests on the collapsed header row: it drops the dim. */
+  hovered: boolean
+  /** Registers the whole block's element so the renderer can measure its
+   *  height — the click target is the collapsed header or the open content. */
+  blockRef?: ((el: unknown) => void) | undefined
 }): React.JSX.Element {
   const showBody = live || expanded
   // Reasoning lines are long prose; each wraps into full-width physical rows
-  // (never clipped), and the window scrolls over those rows so the border
-  // height stays at the cap instead of growing with the reasoning.
-  // The row budget: left margin (2) plus border (2) plus inner padding (2).
-  const contentWidth = Math.max(1, useTerminalWidth() - 6)
-  const physical = showBody ? thinking.text.split('\n').flatMap(line => wrapLine(line, contentWidth)) : []
-  const windowed = physical.slice(-THOUGHT_WINDOW_LINES)
+  // (never clipped). The live box is a fixed-height window scrolling over the
+  // latest rows so the streaming surface stays compact; the settled block the
+  // user clicked open shows the reasoning in full — the live window always
+  // scrolled past more than it held, and the deliberate expand should not
+  // hand back less than the stream showed.
+  // The row budget: the body's two-column indent, plus the live rule's own
+  // two columns (`│ `) riding inside the same indent. Wrapping is by display
+  // width (CJK rows occupy two columns) — a char-count wrap would overflow
+  // the budget and ink's own re-wrap would strand the excess on the rule's
+  // column, fusing content onto the line.
+  const contentWidth = Math.max(1, useTerminalWidth() - (live ? 4 : 2))
+  const physical = showBody ? wrapToWidth(thinking.text, contentWidth) : []
+  const windowed = live ? physical.slice(-THOUGHT_WINDOW_LINES) : physical
   return (
-    <Box flexDirection="column">
+    <Box flexDirection="column" {...(blockRef === undefined ? {} : { ref: blockRef })}>
+      {/* The open block is the reasoning alone: the header only leads the
+          collapsed row and the live stream. */}
       {live
         ? <Text><BlinkingDot /> Thought for {thinking.seconds}s</Text>
-        : <Text dimColor>Thought for {thinking.seconds}s</Text>}
+        : expanded
+          ? null
+          : hovered
+            ? <Text>  Thought for {thinking.seconds}s</Text>
+            : <Text dimColor>  Thought for {thinking.seconds}s</Text>}
       {showBody
         ? (
-          <Box flexDirection="column" marginLeft={2} borderStyle="round" borderColor="gray" paddingX={1}>
-            {windowed.map((line, index) => <Text key={index} dimColor>{line === '' ? ' ' : line}</Text>)}
+          /* The body indents two columns onto the header's text column; live,
+             a `│ ` rule leads each row there, marking the reasoning as an
+             in-flight stream. The settled block the click opens stays plain. */
+          <Box flexDirection="column" marginLeft={2}>
+            {/* An empty paragraph still occupies its row: a zero-width Text
+                collapses to zero height, which would both drop the paragraph
+                break and desynchronize the toggle's predicted height delta. */}
+            {windowed.map((line, index) => (
+              <Text key={index} dimColor>{live ? `│ ${line === '' ? ' ' : line}` : (line === '' ? ' ' : line)}</Text>
+            ))}
           </Box>
         )
         : null}

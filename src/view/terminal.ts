@@ -14,11 +14,12 @@ export const ENTER_FULLSCREEN = '\x1b[?1049h'
 /** Leave the alternate screen, restoring the terminal's previous content. */
 export const EXIT_FULLSCREEN = '\x1b[?1049l'
 
-/** Enable mouse button tracking (wheel included) with SGR extended reports. */
-export const MOUSE_ON = '\x1b[?1000h\x1b[?1006h'
+/** Enable mouse tracking with SGR extended reports: presses, releases, the
+ *  wheel, and pointer motion — motion feeds the thinking row's hover state. */
+export const MOUSE_ON = '\x1b[?1003h\x1b[?1006h'
 
 /** Disable mouse tracking, returning the wheel to the terminal emulator. */
-export const MOUSE_OFF = '\x1b[?1000l\x1b[?1006l'
+export const MOUSE_OFF = '\x1b[?1003l\x1b[?1006l'
 
 /** Hide the hardware cursor. Written raw at takeover: ink only hides it on
  *  its first flushed render, which a slow session resume defers for seconds —
@@ -83,6 +84,23 @@ const LEFT_BUTTON = 0
 export interface ClickPosition {
   readonly x: number
   readonly y: number
+}
+
+/**
+ * The pointer position carried by the motion reports of a useInput string,
+ * or undefined when it holds none. Motion reports carry the pressed button
+ * in bits 0-1 (3 = none) on top of the motion bit, which the modifier mask
+ * preserves; wheel notches sit above the motion band and stay excluded.
+ */
+export function moveFromInput(input: string): ClickPosition | undefined {
+  MOUSE_REPORT.lastIndex = 0
+  let match: RegExpExecArray | null
+  let move: ClickPosition | undefined
+  while ((match = MOUSE_REPORT.exec(input)) !== null) {
+    const base = Number(match[1]) & ~28
+    if (base >= 32 && base < 64 && match[4] === 'M') move = { x: Number(match[2]), y: Number(match[3]) }
+  }
+  return move
 }
 
 /**
@@ -156,6 +174,9 @@ export type ScrollAction =
   | { type: 'bottom' }
   /** Adopt freshly measured heights; growth while scrolled up re-anchors. */
   | { type: 'measure'; contentRows: number; windowRows: number }
+  /** A known content growth/shrinkage at a toggled block: the borrowed
+   *  offset rides along so an expand/collapse round trip lands back exactly. */
+  | { type: 'resize'; delta: number }
   /** Drop all state (view switch: main transcript ↔ child transcript). */
   | { type: 'reset' }
 
@@ -183,6 +204,18 @@ export function scrollReducer(state: ScrollState, action: ScrollAction): ScrollS
     }
     case 'bottom':
       return state.offset === 0 ? state : { ...state, offset: 0 }
+    case 'resize': {
+      if (action.delta === 0) return state
+      const contentRows = Math.max(0, state.contentRows + action.delta)
+      // Scrolled up, growth borrows offset to hold the reading position
+      // (measure's rule) and shrinkage pays it back — otherwise a collapsed
+      // block strands the borrowed rows and the view sits low afterwards.
+      // Sticky at the live bottom stays sticky either way.
+      const offset = state.offset === 0
+        ? 0
+        : Math.min(Math.max(0, state.offset + action.delta), Math.max(0, contentRows - state.windowRows))
+      return offset === state.offset && contentRows === state.contentRows ? state : { ...state, contentRows, offset }
+    }
     case 'measure': {
       // Equal measurements return the identical state so React bails out —
       // the measure effect re-runs on every render and must not re-render.
