@@ -14,12 +14,14 @@ import { Box, measureElement, render, Text } from 'ink'
 import type { Frame, FrameState } from '../fold/frames.ts'
 import { createFrameState } from '../fold/frames.ts'
 import {
+  clickRowInContent,
   createScrollState,
   createScrollStates,
   CURSOR_HIDE,
   CURSOR_SHOW,
   ENTER_FULLSCREEN,
   EXIT_FULLSCREEN,
+  hitFrameRow,
   MOUSE_OFF,
   MOUSE_ON,
   mouseEnabled,
@@ -467,11 +469,58 @@ export function TuiApp({
   if (scrollStates.active !== transcriptKey) dispatch({ type: 'switch', key: transcriptKey })
   const scroll = scrollStates.entries[scrollStates.active] ?? createScrollState()
 
+  // ---- Click-to-expand settled thinking --------------------------------
+  // A settled `Thought for Ns` row toggles its reasoning box back on a left
+  // click. The hit-test walks measured per-frame heights — the same measure-
+  // don't-estimate discipline as the scroll model — keyed per transcript view
+  // so a child's frames never collide with the main session's.
+  const [thinkingExpanded, setThinkingExpanded] = useState<ReadonlySet<string>>(() => new Set())
+  const frameEls = useRef(new Map<string, any>())
+  const frameHeights = useRef(new Map<string, number>())
+  const frameElCallbacks = useRef(new Map<string, (el: any) => void>())
+  const frameElRef = (key: string): ((el: any) => void) => {
+    // Identity-stable callbacks per key: React detaches a changed callback
+    // every render, which would delete-and-re-add each mounted element.
+    let callback = frameElCallbacks.current.get(key)
+    if (callback === undefined) {
+      callback = (el: any): void => {
+        if (el === null) frameEls.current.delete(key)
+        else frameEls.current.set(key, el)
+      }
+      frameElCallbacks.current.set(key, callback)
+    }
+    return callback
+  }
+  const scopedFrameKey = (frame: Frame): string => `${transcriptKey}:${frameKey(frame)}`
+  const handleTranscriptClick = (position: { x: number; y: number }): void => {
+    const windowed = opened === undefined ? mainWindowed : childWindowed
+    if (windowed === undefined) return
+    const row = clickRowInContent(scroll, position.y)
+    if (row === undefined) return
+    const visible = windowed.visible
+    const heights = visible.map(frame => frameHeights.current.get(scopedFrameKey(frame)) ?? 0)
+    // With elided earlier frames a one-row notice leads the content column.
+    const hit = hitFrameRow(heights, row, windowed.hidden > 0 ? 1 : 0)
+    if (hit === undefined || hit.rowInFrame !== 0) return
+    const frame = visible[hit.index]
+    if (frame === undefined || frame.kind !== 'assistant' || frame.thinking === undefined) return
+    // The live block always shows its body; the toggle only moves settled ones.
+    if (frame.streaming && frame.text === '') return
+    const key = scopedFrameKey(frame)
+    setThinkingExpanded(current => {
+      const next = new Set(current)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }
+
   // Measure the laid-out window and content after every commit and adopt the
   // heights when they changed. A layout effect (not a passive one) so the
   // corrective render converges in the same tick instead of flashing a
   // mis-anchored frame; the reducer returns identical state on equal
-  // measurements so this loop terminates.
+  // measurements so this loop terminates. The same pass refreshes the
+  // per-frame heights the thinking click's hit-test reads.
   useLayoutEffect(() => {
     const win = windowRef.current
     const content = contentRef.current
@@ -480,6 +529,10 @@ export function TuiApp({
     const measuredContent = measureElement(content)
     if (measuredContent.height !== scroll.contentRows || measuredWindow.height !== scroll.windowRows) {
       dispatch({ type: 'measure', contentRows: measuredContent.height, windowRows: measuredWindow.height })
+    }
+    for (const [key, el] of frameEls.current) {
+      const measured = measureElement(el)
+      if (frameHeights.current.get(key) !== measured.height) frameHeights.current.set(key, measured.height)
     }
   })
 
@@ -508,8 +561,8 @@ export function TuiApp({
       <>
         {mainWindowed.hidden > 0 ? <Text dimColor>… {mainWindowed.hidden} earlier frames</Text> : null}
         {mainWindowed.visible.map(frame => (
-          <Box key={frameKey(frame)} flexDirection="column" marginBottom={1}>
-            <FrameRow frame={frame} expandedOutput={expandedOutput} approvalCallId={approvalOverlay?.callId} />
+          <Box key={frameKey(frame)} ref={frameElRef(scopedFrameKey(frame))} flexDirection="column" marginBottom={1}>
+            <FrameRow frame={frame} expandedOutput={expandedOutput} approvalCallId={approvalOverlay?.callId} thinkingExpanded={thinkingExpanded.has(scopedFrameKey(frame))} />
           </Box>
         ))}
       </>
@@ -518,8 +571,8 @@ export function TuiApp({
     <>
       {(childWindowed?.hidden ?? 0) > 0 ? <Text dimColor>… {childWindowed?.hidden} earlier frames</Text> : null}
       {(childWindowed?.visible ?? []).map(frame => (
-        <Box key={frameKey(frame)} flexDirection="column" marginBottom={1}>
-          <FrameRow frame={frame} expandedOutput={expandedOutput} approvalCallId={approvalOverlay?.callId} />
+        <Box key={frameKey(frame)} ref={frameElRef(scopedFrameKey(frame))} flexDirection="column" marginBottom={1}>
+          <FrameRow frame={frame} expandedOutput={expandedOutput} approvalCallId={approvalOverlay?.callId} thinkingExpanded={thinkingExpanded.has(scopedFrameKey(frame))} />
         </Box>
       ))}
     </>
@@ -611,6 +664,7 @@ export function TuiApp({
           onToggleExpand={() => { setExpandedOutput(current => !current) }}
           onApprovalSelect={onApprovalSelect}
           onScroll={dispatch}
+          onClick={handleTranscriptClick}
           onFirstInput={() => { setWelcomeDismissed(true) }}
           history={history}
           focusMode={focusMode}

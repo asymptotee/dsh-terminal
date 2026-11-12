@@ -3,8 +3,10 @@
 import { describe, expect, it, vi } from 'vitest'
 import os from 'node:os'
 import stringWidth from 'string-width'
+import { Box } from 'ink'
 import { TuiApp, padToWidth, truncateToWidth } from '../../src/view/renderer.tsx'
 import type { RenderView } from '../../src/view/renderer.tsx'
+import { FrameRow } from '../../src/view/transcript.tsx'
 import type { Frame, FrameState } from '../../src/fold/frames.ts'
 import { noopHandlers, renderApp, settled, state } from '../helpers/render.tsx'
 
@@ -26,24 +28,30 @@ describe('TuiApp rendering', () => {
     expect(frame.indexOf('❯ hello')).toBeLessThan(frame.indexOf('● Hel'))
   })
 
-  it('keeps exactly one blank row around the thought box in both frame shapes', () => {
+  it('keeps exactly one blank row around the expanded thought box in both frame shapes', () => {
     const thinking = { text: 'reasoning prose', startedAt: Date.now(), seconds: 9 }
+    // The settled box only shows while the click toggle has it open, so the
+    // spacing invariant is asserted through FrameRow with the toggle on, in
+    // the same one-row-margin wrapper the transcript list uses.
+    const expanded = (frame: Frame) => (
+      <Box flexDirection="column" marginBottom={1}>
+        <FrameRow frame={frame} expandedOutput={false} approvalCallId={undefined} thinkingExpanded={true} />
+      </Box>
+    )
     // Thinking + text: one breathing row between the box border and the text.
-    const withText: Frame[] = [
-      { kind: 'assistant', seq: 1, turn: 1, step: 1, text: 'Here we go', streaming: false, thinking },
-    ]
-    const first = renderApp(<TuiApp state={state(withText)} handlers={noopHandlers()} />)
+    const first = renderApp(expanded({ kind: 'assistant', seq: 1, turn: 1, step: 1, text: 'Here we go', streaming: false, thinking }))
     let lines = (first.lastFrame() ?? '').split('\n')
     let border = lines.findIndex(line => line.includes('╯'))
     let next = lines.findIndex(line => line.includes('● Here we go'))
     expect(next - border).toBe(2)
     // Thinking without text: the box ends the frame, and only the frame
     // wrapper's margin separates it from the next call — not margin doubled.
-    const noText: Frame[] = [
-      { kind: 'assistant', seq: 1, turn: 1, step: 1, text: '', streaming: false, thinking },
-      { kind: 'tool', seq: 2, turn: 1, step: 1, callId: 'c1', name: 'bash', args: {}, call: { card: 'terminal', title: 'ls' } },
-    ]
-    const second = renderApp(<TuiApp state={state(noText)} handlers={noopHandlers()} />)
+    const second = renderApp(
+      <Box flexDirection="column">
+        {expanded({ kind: 'assistant', seq: 1, turn: 1, step: 1, text: '', streaming: false, thinking })}
+        {expanded({ kind: 'tool', seq: 2, turn: 1, step: 1, callId: 'c1', name: 'bash', args: {}, call: { card: 'terminal', title: 'ls' } })}
+      </Box>,
+    )
     lines = (second.lastFrame() ?? '').split('\n')
     border = lines.findIndex(line => line.includes('╯'))
     next = lines.findIndex(line => line.includes('● Bash(ls)'))
@@ -263,9 +271,11 @@ describe('TuiApp rendering', () => {
     expect(lastFrame()).not.toContain('●')
   })
 
-  it('shows a fixed window of the latest reasoning lines behind the thought marker', () => {
-    const text = Array.from({ length: 10 }, (_, i) => `idea ${i + 1}`).join('\n')
-    const frames: Frame[] = [{
+  // Settled thinking collapses to the one dim line; the click-to-expand state
+  // is the renderer's, so the expanded body is asserted through FrameRow with
+  // the toggle on.
+  function thinkingFrame(text: string, over?: Partial<Extract<Frame, { kind: 'assistant' }>>): Frame {
+    return {
       kind: 'assistant',
       seq: 2,
       turn: 1,
@@ -273,11 +283,39 @@ describe('TuiApp rendering', () => {
       text: 'answer',
       streaming: false,
       thinking: { text, startedAt: 0, seconds: 4 },
-    }]
+      ...over,
+    }
+  }
+  function expandedRow(frame: Frame) {
+    return <FrameRow frame={frame} expandedOutput={false} approvalCallId={undefined} thinkingExpanded={true} />
+  }
+
+  it('collapses settled thinking to the dim Thought-for line alone', () => {
+    const { lastFrame } = renderApp(<TuiApp state={state([thinkingFrame('first idea\nsecond idea')])} handlers={noopHandlers()} />)
+    const frame = lastFrame() ?? ''
+    // The collapsed row carries no dot and no reasoning; it still precedes the
+    // visible text, mirroring the model's order.
+    expect(frame).toContain('Thought for 4s')
+    expect(frame.indexOf('Thought for 4s')).toBeLessThan(frame.indexOf('● answer'))
+    expect(frame).not.toContain('● Thought')
+    expect(frame).not.toContain('first idea')
+    expect(frame).not.toContain('second idea')
+    expect(frame).not.toContain('╭')
+  })
+
+  it('keeps the live reasoning fully visible with the blinking dot', () => {
+    const frames: Frame[] = [thinkingFrame('live idea', { streaming: true, text: '', thinking: { text: 'live idea', startedAt: 0, seconds: 1 } })]
     const { lastFrame } = renderApp(<TuiApp state={state(frames)} handlers={noopHandlers()} />)
     const frame = lastFrame() ?? ''
-    // Reasoning precedes the visible text, mirroring the model's order.
-    expect(frame.indexOf('● Thought for 4s')).toBeLessThan(frame.indexOf('● answer'))
+    expect(frame).toContain('● Thought for 1s')
+    expect(frame).toContain('╭')
+    expect(frame).toContain('live idea')
+  })
+
+  it('shows a fixed window of the latest reasoning lines when expanded', () => {
+    const text = Array.from({ length: 10 }, (_, i) => `idea ${i + 1}`).join('\n')
+    const { lastFrame } = renderApp(expandedRow(thinkingFrame(text)))
+    const frame = lastFrame() ?? ''
     expect(frame).toContain('╭')
     expect(frame).toContain('idea 6')
     expect(frame).toContain('idea 10')
@@ -287,16 +325,7 @@ describe('TuiApp rendering', () => {
 
   it('wraps long reasoning lines into full-width rows without clipping', () => {
     const long = 'x'.repeat(200)
-    const frames: Frame[] = [{
-      kind: 'assistant',
-      seq: 2,
-      turn: 1,
-      step: 1,
-      text: 'answer',
-      streaming: false,
-      thinking: { text: long, startedAt: 0, seconds: 1 },
-    }]
-    const { lastFrame } = renderApp(<TuiApp state={state(frames)} handlers={noopHandlers()} />)
+    const { lastFrame } = renderApp(expandedRow(thinkingFrame(long, { thinking: { text: long, startedAt: 0, seconds: 1 } })))
     const frame = lastFrame() ?? ''
     // 200 columns at the 78-wide content box wrap into three physical rows,
     // the whole text visible, no clip marker.
@@ -308,51 +337,25 @@ describe('TuiApp rendering', () => {
   })
 
   it('sizes the thought window to the reasoning length below the cap', () => {
-    const frames: Frame[] = [{
-      kind: 'assistant',
-      seq: 2,
-      turn: 1,
-      step: 1,
-      text: 'answer',
-      streaming: false,
-      thinking: { text: 'only two', startedAt: 0, seconds: 4 },
-    }]
-    const { lastFrame } = renderApp(<TuiApp state={state(frames)} handlers={noopHandlers()} />)
+    const { lastFrame } = renderApp(expandedRow(thinkingFrame('only two')))
     const inside = (lastFrame() ?? '').split('\n').filter(line => line.includes('only two'))
     expect(inside).toHaveLength(1)
   })
 
   it('shows the whole reasoning when it fits the window', () => {
-    const frames: Frame[] = [{
-      kind: 'assistant',
-      seq: 2,
-      turn: 1,
-      step: 1,
-      text: 'answer',
-      streaming: false,
-      thinking: { text: 'first idea\nsecond idea', startedAt: 0, seconds: 4 },
-    }]
-    const { lastFrame } = renderApp(<TuiApp state={state(frames)} handlers={noopHandlers()} />)
+    const { lastFrame } = renderApp(expandedRow(thinkingFrame('first idea\nsecond idea')))
     const frame = lastFrame() ?? ''
-    expect(frame).toContain('● Thought for 4s')
+    expect(frame).toContain('Thought for 4s')
     expect(frame).toContain('first idea')
     expect(frame).toContain('second idea')
   })
 
-  it('renders the thought window even when the visible text is empty', () => {
-    const frames: Frame[] = [{
-      kind: 'assistant',
-      seq: 2,
-      turn: 1,
-      step: 1,
-      text: '\n',
-      streaming: false,
-      thinking: { text: 'deep thought', startedAt: 0, seconds: 2 },
-    }]
+  it('keeps only the collapsed header when the visible text is empty', () => {
+    const frames: Frame[] = [thinkingFrame('deep thought', { text: '\n', thinking: { text: 'deep thought', startedAt: 0, seconds: 2 } })]
     const { lastFrame } = renderApp(<TuiApp state={state(frames)} handlers={noopHandlers()} />)
     const frame = lastFrame() ?? ''
-    expect(frame).toContain('● Thought for 2s')
-    expect(frame).toContain('deep thought')
+    expect(frame).toContain('Thought for 2s')
+    expect(frame).not.toContain('deep thought')
     expect(frame).not.toContain('●\n')
   })
 

@@ -49,7 +49,13 @@ export function frameKey(frame: Frame): string {
 }
 
 /** One transcript frame, dispatched to its kind's view. */
-export function FrameRow({ frame, expandedOutput, approvalCallId }: { frame: Frame; expandedOutput: boolean; approvalCallId: string | undefined }): React.JSX.Element {
+export function FrameRow({ frame, expandedOutput, approvalCallId, thinkingExpanded }: {
+  frame: Frame
+  expandedOutput: boolean
+  approvalCallId: string | undefined
+  /** This frame's settled thinking block was clicked back open. */
+  thinkingExpanded: boolean
+}): React.JSX.Element {
   // The user and command echoes pad each line to the full terminal width so
   // their background spans the row; every other frame renders its natural width.
   const width = useTerminalWidth()
@@ -104,7 +110,7 @@ export function FrameRow({ frame, expandedOutput, approvalCallId }: { frame: Fra
           {/* The reasoning is live while the frame still streams and no visible
               text has arrived — the first text delta ends the thinking span. */}
           {frame.thinking !== undefined
-            ? <ThinkingBlock thinking={frame.thinking} live={frame.streaming && frame.text === ''} />
+            ? <ThinkingBlock thinking={frame.thinking} live={frame.streaming && frame.text === ''} expanded={thinkingExpanded} />
             : null}
           {/* The breathing row belongs to the box-text pair: with no text in
               the frame the box ends it, and the frame wrapper's own margin is
@@ -143,30 +149,41 @@ function wrapLine(line: string, width: number): readonly string[] {
   return rows
 }
 
-/** The fixed reasoning window: `● Thought for Ns` — the dot blinks dim while
- *  the reasoning is still live — then a bordered box with the latest rows,
- *  kept after thinking ends. */
+/** The reasoning window. Live, the header dot blinks dim and the bordered
+ *  box scrolls over the latest rows. Once thinking ends the block collapses
+ *  to the one dim `Thought for Ns` row (no dot): a click on that row — hit-
+ *  tested in the renderer — toggles the box back. */
 function ThinkingBlock({
   thinking,
   live,
+  expanded,
 }: {
   thinking: Extract<Frame, { kind: 'assistant' }>['thinking'] & object
   /** The reasoning stream is still open: the header dot blinks until it ends. */
   live: boolean
+  /** A settled block the click toggled back open. */
+  expanded: boolean
 }): React.JSX.Element {
+  const showBody = live || expanded
   // Reasoning lines are long prose; each wraps into full-width physical rows
   // (never clipped), and the window scrolls over those rows so the border
   // height stays at the cap instead of growing with the reasoning.
   // The row budget: left margin (2) plus border (2) plus inner padding (2).
   const contentWidth = Math.max(1, useTerminalWidth() - 6)
-  const physical = thinking.text.split('\n').flatMap(line => wrapLine(line, contentWidth))
+  const physical = showBody ? thinking.text.split('\n').flatMap(line => wrapLine(line, contentWidth)) : []
   const windowed = physical.slice(-THOUGHT_WINDOW_LINES)
   return (
     <Box flexDirection="column">
-      <Text>{live ? <BlinkingDot /> : '●'} Thought for {thinking.seconds}s</Text>
-      <Box flexDirection="column" marginLeft={2} borderStyle="round" borderColor="gray" paddingX={1}>
-        {windowed.map((line, index) => <Text key={index} dimColor>{line === '' ? ' ' : line}</Text>)}
-      </Box>
+      {live
+        ? <Text><BlinkingDot /> Thought for {thinking.seconds}s</Text>
+        : <Text dimColor>Thought for {thinking.seconds}s</Text>}
+      {showBody
+        ? (
+          <Box flexDirection="column" marginLeft={2} borderStyle="round" borderColor="gray" paddingX={1}>
+            {windowed.map((line, index) => <Text key={index} dimColor>{line === '' ? ' ' : line}</Text>)}
+          </Box>
+        )
+        : null}
     </Box>
   )
 }

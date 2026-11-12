@@ -10,7 +10,8 @@ import React, { useState } from 'react'
 import { Box, Text, useInput, usePaste } from 'ink'
 import stringWidth from 'string-width'
 import type { ScrollAction } from './terminal.ts'
-import { containsMouseReport, wheelDeltaFromInput } from './terminal.ts'
+import { clickFromInput, containsMouseReport, wheelDeltaFromInput } from './terminal.ts'
+import type { ClickPosition } from './terminal.ts'
 import type { CommandInfo, InputHandlers, StatusInfo } from './view-types.ts'
 import { padToWidth, truncateToWidth } from './text-helpers.ts'
 import { useTerminalWidth } from './use-terminal.ts'
@@ -33,6 +34,7 @@ export function InputBar({
   onToggleExpand,
   onApprovalSelect,
   onScroll,
+  onClick,
   onFirstInput,
   history = [],
   focusMode = 'input',
@@ -87,6 +89,9 @@ export function InputBar({
   onQuestionTextChange?: (text: string) => void
   /** Scroll the transcript: wheel notches and PageUp/PageDown. */
   onScroll?: (action: ScrollAction) => void
+  /** A left click inside the transcript window, in 1-based SGR viewport
+   *  coordinates; the caller hit-tests it against the measured frames. */
+  onClick?: (position: ClickPosition) => void
   /** Fired once when the buffer first becomes non-empty (typing or paste). */
   onFirstInput?: () => void
   /** The session's submitted lines; the arrows browse them (log-restored on resume). */
@@ -172,7 +177,14 @@ export function InputBar({
     // before the approval/panel/child branches so scrolling works everywhere.
     if (containsMouseReport(input)) {
       const delta = wheelDeltaFromInput(input)
-      if (delta !== 0) onScroll?.({ type: 'wheel', delta })
+      if (delta !== 0) {
+        onScroll?.({ type: 'wheel', delta })
+        return
+      }
+      // No wheel notch: a left press goes to the transcript's click-to-expand
+      // hit-test; every other report (releases, other buttons) is swallowed.
+      const click = clickFromInput(input)
+      if (click !== undefined) onClick?.(click)
       return
     }
     if (key.pageUp) {

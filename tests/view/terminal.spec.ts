@@ -2,9 +2,12 @@
 
 import { describe, expect, it } from 'vitest'
 import {
+  clickFromInput,
+  clickRowInContent,
   containsMouseReport,
   createScrollState,
   createScrollStates,
+  hitFrameRow,
   maxOffset,
   mouseEnabled,
   scrollReducer,
@@ -56,6 +59,28 @@ describe('containsMouseReport', () => {
   it('passes ordinary typing through', () => {
     expect(containsMouseReport('ls -la')).toBe(false)
     expect(containsMouseReport('[not a report')).toBe(false)
+  })
+})
+
+describe('clickFromInput', () => {
+  it('decodes a left press with ink\'s leading ESC stripped', () => {
+    expect(clickFromInput('[<0;12;3M')).toEqual({ x: 12, y: 3 })
+    expect(clickFromInput('\x1b[<0;12;3M')).toEqual({ x: 12, y: 3 })
+  })
+
+  it('masks modifier bits so shifted clicks still land', () => {
+    expect(clickFromInput('[<4;7;8M')).toEqual({ x: 7, y: 8 }) // shift
+  })
+
+  it('ignores releases, other buttons, and wheel notches', () => {
+    expect(clickFromInput('[<0;5;5m')).toBeUndefined() // release
+    expect(clickFromInput('[<2;5;5M')).toBeUndefined() // right button
+    expect(clickFromInput('[<64;5;5M')).toBeUndefined() // wheel
+    expect(clickFromInput('hello')).toBeUndefined()
+  })
+
+  it('keeps the last press of a batched chunk', () => {
+    expect(clickFromInput('[<0;1;1M\x1b[<0;9;9M')).toEqual({ x: 9, y: 9 })
   })
 })
 
@@ -150,6 +175,50 @@ describe('transcriptMarginTop', () => {
   it('moves the content down while scrolled up', () => {
     const state: ScrollState = { offset: 10, contentRows: 100, windowRows: 30 }
     expect(transcriptMarginTop(state)).toBe(-60)
+  })
+})
+
+describe('clickRowInContent', () => {
+  const measured: ScrollState = { offset: 0, contentRows: 100, windowRows: 30 }
+
+  it('maps the viewport row into scrolled content coordinates', () => {
+    // Sticky at the live bottom: content rows 70..99 fill window rows 1..30.
+    expect(clickRowInContent(measured, 1)).toBe(70)
+    expect(clickRowInContent(measured, 30)).toBe(99)
+    const scrolled = scrollReducer(measured, { type: 'wheel', delta: 10 })
+    // Scrolled ten rows up: content rows 60..89 are on screen.
+    expect(clickRowInContent(scrolled, 1)).toBe(60)
+  })
+
+  it('rejects clicks outside the window or before measurement', () => {
+    expect(clickRowInContent(measured, 31)).toBeUndefined() // the chrome band
+    expect(clickRowInContent(measured, 0)).toBeUndefined()
+    expect(clickRowInContent(createScrollState(), 5)).toBeUndefined()
+  })
+
+  it('ignores rows below the content edge of a short transcript', () => {
+    const short: ScrollState = { offset: 0, contentRows: 5, windowRows: 30 }
+    // The content occupies the bottom five window rows (26..30).
+    expect(clickRowInContent(short, 25)).toBeUndefined()
+    expect(clickRowInContent(short, 26)).toBe(0)
+    expect(clickRowInContent(short, 30)).toBe(4)
+  })
+})
+
+describe('hitFrameRow', () => {
+  it('walks measured frame heights with their one-row margins', () => {
+    // Frames of 2 and 3 rows: rows 0-1 frame 0, row 2 the margin, 3-5 frame 1.
+    expect(hitFrameRow([2, 3], 0, 0)).toEqual({ index: 0, rowInFrame: 0 })
+    expect(hitFrameRow([2, 3], 1, 0)).toEqual({ index: 0, rowInFrame: 1 })
+    expect(hitFrameRow([2, 3], 2, 0)).toBeUndefined() // the margin gap
+    expect(hitFrameRow([2, 3], 3, 0)).toEqual({ index: 1, rowInFrame: 0 })
+    expect(hitFrameRow([2, 3], 5, 0)).toEqual({ index: 1, rowInFrame: 2 })
+    expect(hitFrameRow([2, 3], 6, 0)).toBeUndefined() // past the last frame
+  })
+
+  it('skips the leading elided-frames notice row', () => {
+    expect(hitFrameRow([2], 0, 1)).toBeUndefined() // the notice itself
+    expect(hitFrameRow([2], 1, 1)).toEqual({ index: 0, rowInFrame: 0 })
   })
 })
 

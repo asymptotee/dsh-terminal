@@ -76,6 +76,66 @@ export function wheelDeltaFromInput(input: string): number {
   return delta
 }
 
+/** SGR left-button code, after masking the modifier bits. */
+const LEFT_BUTTON = 0
+
+/** One left click in 1-based SGR viewport coordinates. */
+export interface ClickPosition {
+  readonly x: number
+  readonly y: number
+}
+
+/**
+ * The left-press position a useInput string carries, or undefined for any
+ * other report. Only the press counts (the uppercase `M` suffix; releases
+ * report the same button with `m`), and modifier bits are masked so shifted
+ * or alted clicks still land. Wheel notches and other buttons are ignored.
+ */
+export function clickFromInput(input: string): ClickPosition | undefined {
+  MOUSE_REPORT.lastIndex = 0
+  let match: RegExpExecArray | null
+  let click: ClickPosition | undefined
+  while ((match = MOUSE_REPORT.exec(input)) !== null) {
+    const base = Number(match[1]) & ~28
+    if (base === LEFT_BUTTON && match[4] === 'M') click = { x: Number(match[2]), y: Number(match[3]) }
+  }
+  return click
+}
+
+/**
+ * The content row a viewport click lands on: the click's row translated into
+ * the scrolled content's own coordinates, or undefined when it falls outside
+ * the transcript window — the chrome band below, or past the content's edges
+ * (including the pre-measurement parking, where nothing is on screen yet).
+ */
+export function clickRowInContent(state: ScrollState, y: number): number | undefined {
+  if (state.windowRows === 0 || state.contentRows === 0) return undefined
+  if (y < 1 || y > state.windowRows) return undefined
+  const row = y - 1 - transcriptMarginTop(state)
+  return row >= 0 && row < state.contentRows ? row : undefined
+}
+
+/**
+ * The frame a content row falls inside: `heights` are the measured rows of
+ * the visible frames in order, each followed by its wrapper's one-row bottom
+ * margin, walked after the `leading` extra content rows (the elided-earlier
+ * frames notice). Rows landing in a margin gap report no frame.
+ */
+export function hitFrameRow(
+  heights: readonly number[],
+  row: number,
+  leading: number,
+): { index: number; rowInFrame: number } | undefined {
+  let start = leading
+  for (let index = 0; index < heights.length; index++) {
+    const height = heights[index]
+    // A row before the first frame is the leading notice itself, not a frame.
+    if (row < start + height) return row >= start ? { index, rowInFrame: row - start } : undefined
+    start += height + 1
+  }
+  return undefined
+}
+
 /**
  * The transcript scroll position: rows above the live bottom (0 = sticky at
  * the bottom, auto-following new output) plus the measured content and window
