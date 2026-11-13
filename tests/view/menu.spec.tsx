@@ -130,7 +130,7 @@ describe('slash command completion menu', () => {
     expect(lastFrame() ?? '').not.toContain('Set the reasoning effort')
   })
 
-  it('hides the status bar while the menu is open and restores it after completion', async () => {
+  it('opens above the input box while the status bar keeps standing below', async () => {
     const { lastFrame, stdin } = renderApp(<TuiApp
       state={state([])}
       handlers={spyHandlers()}
@@ -140,13 +140,91 @@ describe('slash command completion menu', () => {
     stdin.write('/')
     await settled()
     await settled()
-    // The menu occupies the chrome band; the status bar yields its rows.
-    expect(lastFrame() ?? '').not.toContain('test-model')
+    const frame = lastFrame() ?? ''
+    // The footer holds its rows while the menu is up, and the menu's name
+    // rows sit above the editor box, which stays above the footer.
+    expect(frame).toContain('test-model')
+    const rows = frame.split('\n')
+    const menuRow = rows.findIndex(row => row.includes('/effort'))
+    const editorRow = rows.findIndex(row => row.includes('/█'))
+    const statusRow = rows.findIndex(row => row.includes('test-model'))
+    expect(menuRow).toBeGreaterThan(-1)
+    expect(editorRow).toBeGreaterThan(menuRow)
+    expect(statusRow).toBeGreaterThan(editorRow)
     stdin.write('\t')
     await settled()
     await settled()
-    // Completion closes the menu; the status bar comes back.
-    expect(lastFrame() ?? '').toContain('test-model')
+    // Completion closes the menu (descriptions exist only in menu rows); the
+    // box and footer never moved.
+    const closed = lastFrame() ?? ''
+    expect(closed).not.toContain('Set the reasoning effort')
+    expect(closed).toContain('❯ /effort █')
+    expect(closed).toContain('test-model')
+  })
+
+  /** An overflowing transcript: every frame one row, live bottom on screen. */
+  function overflowingFrames(): Frame[] {
+    return Array.from({ length: 40 }, (_, i) => (
+      { kind: 'assistant', seq: i + 1, turn: 1, step: 1, text: `line ${i + 1}`, streaming: false }
+    ))
+  }
+
+  it('paints over the transcript bottom rows instead of reflowing them', async () => {
+    const { lastFrame, stdin } = renderApp(
+      <TuiApp state={state(overflowingFrames())} handlers={spyHandlers()} view={commandView} />,
+    )
+    await settled(60)
+    const before = (lastFrame() ?? '').split('\n')
+    expect(lastFrame() ?? '').toContain('line 40')
+    stdin.write('/')
+    await settled()
+    await settled()
+    const frame = lastFrame() ?? ''
+    const after = frame.split('\n')
+    // The screen geometry is untouched: the same rows, and the rows above the
+    // overlay are identical — the transcript never scrolled or re-anchored.
+    expect(after.length).toBe(before.length)
+    expect(after[0]).toBe(before[0])
+    expect(after[1]).toBe(before[1])
+    // The overlay's five rows (the clear row, the light-blue cap rule, the
+    // three menu rows) replaced the bottom transcript rows — the live bottom
+    // 'line 40' and 'line 39' hidden under it, full-width erase with no
+    // leftover text on any overlay row — and everything above stands.
+    expect(frame).toContain('/effort')
+    expect(frame).not.toContain('line 40')
+    expect(frame).not.toContain('line 39')
+    expect(frame).toContain('line 38')
+    // The cap rule sits directly above the first menu row, and the cleared
+    // transcript row above it renders blank.
+    const menuRow = after.findIndex(row => row.includes('/effort'))
+    expect(menuRow).toBeGreaterThan(1)
+    expect(/^─+$/.test(after[menuRow - 1])).toBe(true)
+    expect(after[menuRow - 2]).toBe('')
+  })
+
+  it('swallows transcript clicks while the menu overlays them', async () => {
+    const { lastFrame, stdin } = renderApp(
+      <TuiApp state={state(overflowingFrames())} handlers={spyHandlers()} view={commandView} />,
+    )
+    await settled(60)
+    stdin.write('\x1b[<64;3;3M') // one wheel notch up pops the pill
+    await settled(40)
+    const rows = (lastFrame() ?? '').split('\n')
+    const pillRow = rows.findIndex(row => row.includes('Back to bottom'))
+    expect(pillRow).toBeGreaterThan(-1)
+    const pillX = rows[pillRow].indexOf('Back') + 3
+    stdin.write('/')
+    await settled()
+    await settled()
+    const covered = lastFrame() ?? ''
+    // The menu paints over the pill's row (full-width erase).
+    expect(covered).toContain('/effort')
+    expect(covered).not.toContain('Back to bottom')
+    // A click where the pill used to be is swallowed: no fall-through jump to
+    // the bottom, the frame stays exactly as the menu left it.
+    stdin.write(`\x1b[<0;${pillX};${pillRow + 1}M`)
+    await settled(40)
+    expect(lastFrame() ?? '').toBe(covered)
   })
 })
 

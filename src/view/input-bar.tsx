@@ -126,7 +126,8 @@ export function InputBar({
   panelAvailable?: boolean
   /** The registered slash commands; a leading-`/` buffer opens the completion menu. */
   commands?: readonly CommandInfo[]
-  /** The footer facts; while the completion menu is open it takes this slot. */
+  /** The footer facts; the completion menu opens above the box and never
+   *  displaces them. */
   status?: StatusInfo
   /** Panel key hints trailing the permission row of the footer (the workflow
    *  panel's navigation keys, shown in the main and child views alike). */
@@ -195,7 +196,10 @@ export function InputBar({
       // (releases, other buttons) is swallowed.
       const click = clickFromInput(input)
       if (click !== undefined) {
-        onClick?.(click)
+        // While the completion menu overlays the transcript's bottom rows, a
+        // click must not fall through to the content (or the pill) hidden
+        // beneath it: the menu is keyboard-driven, so the press is swallowed.
+        if (commandMatchesFor(bufferRef.current.value).length === 0 || menuHiddenRef.current) onClick?.(click)
         return
       }
       const move = moveFromInput(input)
@@ -511,6 +515,11 @@ export function InputBar({
   const caretCell = <Text>█</Text>
   return (
     <Box flexDirection="column">
+      {/* The completion menu floats above the box, Claude Code style: an
+          absolute overlay painted over the transcript's bottom rows, so the
+          transcript content, the input box, and the footer all hold their
+          rows — opening the menu never reflows anything. */}
+      {menuOpen ? <CommandMenu items={menuMatches} selected={menuSelected} width={width} /> : null}
       {rule}
       {showPlaceholder
         ? (
@@ -538,13 +547,7 @@ export function InputBar({
           )
         })}
       {rule}
-      {/* The completion menu and the status bar share one slot below the box:
-          they swap in a single render, so opening the menu never paints an
-          intermediate frame where both stack (the chrome band overshooting
-          made the input box visibly jump before settling). */}
-      {menuOpen
-        ? <CommandMenu items={menuMatches} selected={menuSelected} width={width} />
-        : <StatusBar status={status} {...(statusHint === undefined ? {} : { hint: statusHint })} />}
+      <StatusBar status={status} {...(statusHint === undefined ? {} : { hint: statusHint })} />
     </Box>
   )
 }
@@ -555,12 +558,20 @@ function commandLabel(item: CommandInfo): string {
 }
 
 /**
- * The `/` completion menu below the input bar (between the box and the status
- * bar): prefix-filtered commands with name, hint, and description, discovery-
- * menu styling — no marker column; the arrow-selected row turns the shared
- * highlight tint (#a5d8ff) in its entirety, every other row stays dim. Rows
- * beyond the cap window around the selection. No closing rule: the status
- * bar hides while the menu is up, so the rows simply end the chrome band.
+ * The `/` completion menu floating above the input bar: an absolute overlay
+ * whose negative `top` equals its own row count, so its bottom edge lands on
+ * the box's top rule and its rows stack upward over the transcript's bottom
+ * rows. It stays out of flow — the chrome band's height never changes, the
+ * transcript never re-measures or re-anchors, and the footer holds its rows.
+ * The overlay leads with one erased row — hiding the transcript line the
+ * menu's arrival would otherwise crowd — and a light-blue rule (#a5d8ff)
+ * capping the menu rows. Every row pads to the full terminal width: ink
+ * paints writes per cell, and only the padded spaces erase the transcript
+ * text underneath (without them it would dangle to the right of the narrower
+ * menu rows). Contents: prefix-filtered commands with name, hint, and
+ * description, discovery-menu styling — no marker column; the arrow-selected
+ * row turns the shared highlight tint (#a5d8ff) in its entirety, every other
+ * row stays dim. Rows beyond the cap window around the selection.
  */
 function CommandMenu({
   items,
@@ -583,27 +594,37 @@ function CommandMenu({
   // shifts the column), then the fixed gap follows.
   const nameCol = items.reduce((max, item) => Math.max(max, stringWidth(commandLabel(item))), 0)
   const descriptionBudget = Math.max(0, width - 2 - nameCol - MENU_DESCRIPTION_GAP)
-  // The status bar's marginBottom={1} is what keeps the chrome band off the
-  // very bottom row; the menu replaces the status bar while open, so it owns
-  // the same bottom gap.
+  // The overlay's negative `top` is its own row count: the bottom edge lands
+  // on the input box's top rule and the rows stack upward out of flow — two
+  // extra rows for the clear row and the light-blue cap rule above the menu.
+  const rowCount = visible.length + (hiddenBefore > 0 ? 1 : 0) + (hiddenAfter > 0 ? 1 : 0) + 2
   return (
-    <Box flexDirection="column" marginBottom={1}>
-      {hiddenBefore > 0 ? <Text dimColor>  … {hiddenBefore} more</Text> : null}
+    <Box position="absolute" top={-rowCount} left={0} right={0} flexDirection="column">
+      {/* One erased row hides the transcript line the overlay would otherwise
+          crowd, and the light-blue rule caps the menu (both full-width, so
+          the cells underneath are overwritten clean). */}
+      <Text>{' '.repeat(width)}</Text>
+      <Text color="#a5d8ff">{'─'.repeat(width)}</Text>
+      {hiddenBefore > 0 ? <Text dimColor>{padToWidth(`  … ${hiddenBefore} more`, width)}</Text> : null}
       {visible.map((item, index) => {
         const isSelected = start + index === selected
         const label = padToWidth(commandLabel(item), nameCol)
         const description = item.description === undefined ? '' : truncateToWidth(item.description, descriptionBudget)
+        // Trailing spaces to the full width: the per-cell overwrite that
+        // erases the transcript row underneath (ink trims them away again
+        // when serializing the row, so the frame text stays clean).
+        const pad = Math.max(0, width - 2 - nameCol - MENU_DESCRIPTION_GAP - stringWidth(description))
         return isSelected ? (
           <Text key={item.name} color="#a5d8ff">
-            <Text bold>  {label}</Text>{' '.repeat(MENU_DESCRIPTION_GAP)}{description}
+            <Text bold>  {label}</Text>{' '.repeat(MENU_DESCRIPTION_GAP)}{description}{' '.repeat(pad)}
           </Text>
         ) : (
           <Text key={item.name} dimColor>
-            {'  '}{label}{' '.repeat(MENU_DESCRIPTION_GAP)}{description}
+            {'  '}{label}{' '.repeat(MENU_DESCRIPTION_GAP)}{description}{' '.repeat(pad)}
           </Text>
         )
       })}
-      {hiddenAfter > 0 ? <Text dimColor>  … {hiddenAfter} more</Text> : null}
+      {hiddenAfter > 0 ? <Text dimColor>{padToWidth(`  … ${hiddenAfter} more`, width)}</Text> : null}
     </Box>
   )
 }
