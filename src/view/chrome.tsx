@@ -29,6 +29,10 @@ const PERMISSION_MODE_COLORS: Record<string, string> = {
   custom: '#ffd43b',
 }
 
+/** The plan-mode segment's hue: OpenColor violet-3, unused by any preset, so
+ *  the collaboration state reads apart from the permission cycle it trails. */
+const PLAN_MODE_COLOR = '#b197fc'
+
 /** The fixed footer: model, session, working state, context usage, and scrollback hint. */
 export function StatusBar({
   status,
@@ -56,7 +60,7 @@ export function StatusBar({
           </Text>
         </Box>
       </Box>
-      {status.mode !== undefined || hint !== undefined
+      {status.mode !== undefined || status.planMode === true || hint !== undefined
         ? (
           // No dimColor on the row itself: ANSI dim would inherit into the
           // colored mode segment and mute its preset color. The mode wears
@@ -71,7 +75,19 @@ export function StatusBar({
                 </>
               )
               : null}
-            {status.mode !== undefined && hint !== undefined ? <Text dimColor> · </Text> : null}
+            {/* Plan mode trails the preset segment, separated like the panel
+                hints: the two axes hold at once, both worth seeing. */}
+            {status.planMode === true
+              ? (
+                <>
+                  {status.mode !== undefined ? <Text dimColor> · </Text> : null}
+                  <Text color={PLAN_MODE_COLOR}>plan mode</Text>
+                </>
+              )
+              : null}
+            {(status.mode !== undefined || status.planMode === true) && hint !== undefined
+              ? <Text dimColor> · </Text>
+              : null}
             {hint !== undefined ? <Text dimColor>({hint})</Text> : null}
           </Text>
         )

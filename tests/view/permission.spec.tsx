@@ -24,6 +24,26 @@ describe('permission cycle indicator', () => {
     expect(lastFrame() ?? '').toContain('⏵⏵ workspace-write mode on (shift+tab to cycle)')
   })
 
+  it('trails the preset segment with the plan badge while plan mode is on', () => {
+    const { lastFrame } = renderApp(<TuiApp
+      state={state([])}
+      handlers={noopHandlers()}
+      view={statusView({ status: { ...STATUS, planMode: true } })}
+    />)
+    expect(lastFrame() ?? '').toContain('⏵⏵ workspace-write mode on (shift+tab to cycle) · plan mode')
+  })
+
+  it('shows the plan badge alone when no permission preset is known', () => {
+    const { lastFrame } = renderApp(<TuiApp
+      state={state([])}
+      handlers={noopHandlers()}
+      view={{ status: { model: 'test-model', cwd: '/tmp', planMode: true } }}
+    />)
+    const frame = lastFrame() ?? ''
+    expect(frame).toContain('plan mode')
+    expect(frame).not.toContain('shift+tab')
+  })
+
   it('routes ⇧Tab to the cycle handler', async () => {
     const onCyclePermission = vi.fn()
     const { stdin } = renderApp(<TuiApp

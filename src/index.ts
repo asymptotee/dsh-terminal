@@ -1071,6 +1071,9 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
   // service composed the badge falls back to the raw sandbox/mode payload,
   // the pre-preset behavior.
   const PERMISSION_KNOB_EVENTS: ReadonlySet<string> = new Set(['permission/preset', 'sandbox/mode', 'approval/policy'])
+  /** The plan projection's movers: the logged mode switch and the /plan
+   *  command lifecycle (a selection pends until its step is accepted). */
+  const PLAN_BADGE_EVENTS: ReadonlySet<string> = new Set(['plan/mode', 'command/run', 'command/done'])
   const refreshPermissionBadge = (event?: SessionEvent): void => {
     if (view.status === undefined) return
     const current = permissionPresets?.current(agent.session)
@@ -1081,6 +1084,24 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
     if (event !== undefined && (event.type as string) === 'sandbox/mode') {
       const mode = (event.data as { mode?: unknown }).mode
       if (typeof mode === 'string') view = { ...view, status: { ...view.status, mode } }
+    }
+  }
+  // The plan badge follows the `plan` projection's `{ active, pending }`
+  // view: pending marks a logged /plan selection targeting the opposite
+  // state until the accepting step lands, and the badge shows that target
+  // immediately, so /plan lights the row without waiting a step. Plan mode
+  // rides the session log, so the initial seed restores it on resume/fork.
+  // Structural read, the permissionPresets pattern — no upstream import.
+  const refreshPlanBadge = (): void => {
+    if (view.status === undefined) return
+    const plan = sessionProjections?.stateOf(agent.session, 'plan') as
+      | { active: boolean; pending: boolean }
+      | null
+      | undefined
+    if (plan === null || plan === undefined) return
+    const planMode = plan.pending ? !plan.active : plan.active
+    if ((view.status.planMode ?? false) !== planMode) {
+      view = { ...view, status: { ...view.status, planMode } }
     }
   }
   // A preset switch appends its identity event and each changed knob event in
@@ -1127,6 +1148,8 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
   // Seed the permission badge from the folded projection before the first
   // render: a resumed session's last /permission switch lives in the log.
   refreshPermissionBadge()
+  // Seed the plan badge from the log projection the same way.
+  refreshPlanBadge()
   // Seed the goal strip from the durable log too: a resumed session with a
   // current goal shows its objective and round progress immediately, starting
   // disarmed until an activation event says otherwise.
@@ -1178,6 +1201,7 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
     }
     trackUsage(event)
     if (PERMISSION_KNOB_EVENTS.has(event.type as string)) queuePermissionBadge(event)
+    if (PLAN_BADGE_EVENTS.has(event.type as string)) refreshPlanBadge()
     // A team event moves the authoritative agentTeam projection, so re-read it
     // before the render below to keep the team panel current.
     if ((event.type as string).startsWith('team/')) refreshTeam()

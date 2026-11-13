@@ -152,6 +152,10 @@ export interface StatusInfo {
   cwd: string
   /** The permission preset selection (`read-only`/`workspace-write`/`auto`/...), on its own row. */
   mode?: string
+  /** Plan mode is logged: the plan segment trails the preset segment. It is
+   *  a collaboration axis orthogonal to the presets (sandbox/approval never
+   *  read it), so it accompanies the badge instead of joining the cycle. */
+  planMode?: boolean
   /** Current context usage from the latest step's token report. */
   context?: { used: number; window: number }
   /** The reasoning effort, shown right-aligned with the `/effort` hint. */

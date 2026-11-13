@@ -138,3 +138,60 @@ describe('permission cycle driver', () => {
     await test.ctx.fiber.dispose()
   })
 })
+
+describe('plan mode badge driver', () => {
+  // The badge reads the `plan` session projection exactly like the goal
+  // strip reads its own; the events below only trigger a re-read, the cell
+  // carries the payload.
+  function planProjections(cell: { value: { active: boolean; pending: boolean } | undefined }): unknown {
+    return {
+      stateOf: (_session: unknown, key: string) => key === 'plan' ? cell.value : undefined,
+    }
+  }
+
+  it('badges the logged plan state and follows plan/mode events', async () => {
+    const cell = { value: { active: false, pending: false } as { active: boolean; pending: boolean } | undefined }
+    const test = await bench({ sessionProjections: planProjections(cell), afterPrompt: () => {} })
+    await settle()
+    // Off is the badge's absence: the property is only written once plan
+    // mode is entered (or left after having been on).
+    expect(test.views.at(-1)?.status?.planMode ?? false).toBe(false)
+    cell.value = { active: true, pending: false }
+    appendRaw(test.agent.session, 'plan/mode', { active: true })
+    await settle()
+    expect(test.views.at(-1)?.status?.planMode).toBe(true)
+    cell.value = { active: false, pending: false }
+    appendRaw(test.agent.session, 'plan/mode', { active: false })
+    await settle()
+    expect(test.views.at(-1)?.status?.planMode).toBe(false)
+    await test.ctx.fiber.dispose()
+  })
+
+  it('shows the pending selection target immediately, before the step lands', async () => {
+    // /plan while a turn is in flight: the selection pends until the next
+    // accepted step, but the badge lights the target at once.
+    const cell = { value: { active: false, pending: true } as { active: boolean; pending: boolean } | undefined }
+    const test = await bench({ sessionProjections: planProjections(cell), afterPrompt: () => {} })
+    await settle()
+    expect(test.views.at(-1)?.status?.planMode).toBe(true)
+    cell.value = { active: true, pending: false }
+    appendRaw(test.agent.session, 'plan/mode', { active: true })
+    await settle()
+    expect(test.views.at(-1)?.status?.planMode).toBe(true)
+    await test.ctx.fiber.dispose()
+  })
+
+  it('re-reads the badge when the /plan command lifecycle lands', async () => {
+    const cell = { value: { active: false, pending: false } as { active: boolean; pending: boolean } | undefined }
+    const test = await bench({ sessionProjections: planProjections(cell), afterPrompt: () => {} })
+    await settle()
+    expect(test.views.at(-1)?.status?.planMode ?? false).toBe(false)
+    // The selection flips the projection's pending half the moment its
+    // command/run lands; the badge refresh rides the same event.
+    cell.value = { active: false, pending: true }
+    appendRaw(test.agent.session, 'command/run', { commandId: 'c-plan-1', name: 'plan', args: '' })
+    await settle()
+    expect(test.views.at(-1)?.status?.planMode).toBe(true)
+    await test.ctx.fiber.dispose()
+  })
+})
