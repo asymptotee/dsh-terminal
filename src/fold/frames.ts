@@ -7,7 +7,7 @@
  * @module dsh-terminal/src/frames
  */
 
-import type { ContentBlock, MessageSource, SessionEvent, StreamChunk, TodoItem, ToolCallView, ToolResult, ToolResultView } from '../dsh-adapter/types.ts'
+import type { AssistantStreamRecord, ContentBlock, MessageSource, SessionEvent, StreamChunk, TodoItem, ToolCallView, ToolResult, ToolResultView } from '../dsh-adapter/types.ts'
 import {
   contentToText,
   renderCommandLine,
@@ -333,6 +333,27 @@ function noticeFrame(
   }
 }
 
+/**
+ * The time the first reasoning activity happened in a persisted stream
+ * record — the moment the live thinking clock started — or undefined when
+ * the record carries none (an old log without the embedded stream). Both the
+ * raw block-start chunk and the compacted reasoning run carry it; the
+ * earliest wins.
+ */
+function reasoningStartTime(records: readonly AssistantStreamRecord[] | undefined): number | undefined {
+  if (records === undefined) return undefined
+  let start: number | undefined
+  for (const record of records) {
+    const time = record.type === 'reasoning-chunks'
+      ? record.time0
+      : record.type === 'chunk' && record.chunk.type === 'block-start' && record.chunk.blockType === 'reasoning'
+        ? record.time
+        : undefined
+    if (time !== undefined) start = start === undefined ? time : Math.min(start, time)
+  }
+  return start
+}
+
 /** Join the reasoning blocks of a content sequence; other blocks are dropped. */
 function contentToThinking(content: readonly ContentBlock[]): string {
   return content
@@ -500,7 +521,18 @@ export function foldEvent(state: FrameState, event: SessionEvent, deps: FoldDeps
       const existing = index === undefined ? undefined : state.frames[index]
       if (index === undefined || existing === undefined || existing.kind !== 'assistant') {
         // No stream preceded this commit: print the committed text itself.
-        const thinking = thinkingText === '' ? undefined : { text: thinkingText, startedAt: event.time, seconds: 0 }
+        // A resumed session replays the durable message alone — recover the
+        // seconds the live path would have clocked (the commit time minus the
+        // first reasoning chunk of the embedded stream) so the settled block
+        // does not read `Thought for 0s`.
+        const reasoningStart = reasoningStartTime(event.data.stream)
+        const thinking = thinkingText === ''
+          ? undefined
+          : {
+            text: thinkingText,
+            startedAt: reasoningStart ?? event.time,
+            seconds: reasoningStart === undefined ? 0 : thinkingSeconds({ startedAt: reasoningStart }, event.time),
+          }
         const frame: Frame = {
           kind: 'assistant',
           seq: event.seq,

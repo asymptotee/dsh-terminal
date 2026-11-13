@@ -11,9 +11,9 @@ import type { FoldDeps, FoldResult, Frame, FrameState, ToolPresentation } from '
 
 let nextSeq = 0
 beforeEach(() => { nextSeq = 0 })
-function ev<T extends SessionEventType>(type: T, data: SessionEvent<T>['data']): SessionEvent<T> {
+function ev<T extends SessionEventType>(type: T, data: SessionEvent<T>['data'], time = 0): SessionEvent<T> {
   nextSeq += 1
-  return { type, seq: nextSeq, time: 0, data } as SessionEvent<T>
+  return { type, seq: nextSeq, time, data } as SessionEvent<T>
 }
 
 function deps(
@@ -586,6 +586,43 @@ describe('fold: assistant streaming', () => {
     } as unknown as SessionEvent<'assistant/message'>
     const { state } = replay([committed])
     expect(state.frames[0]).toMatchObject({ kind: 'assistant', text: 'answer', streaming: false, thinking: { text: 'why', seconds: 0 } })
+  })
+
+  it('recovers thinking seconds from the embedded stream on replay', () => {
+    // A resume replays the durable message alone — no live deltas — so the
+    // seconds come from the persisted stream timings: the commit time minus
+    // the first reasoning chunk (the live clock's exact formula).
+    const committed = ev('assistant/message', {
+      turn: 1,
+      step: 1,
+      stream: [
+        { type: 'chunk', time: 1000, chunk: { type: 'block-start', index: 0, blockType: 'reasoning' } },
+        { type: 'reasoning-chunks', time0: 1000, index: 0, dt: [10, 20], texts: ['wh', 'y'] },
+        { type: 'chunk', time: 2500, chunk: { type: 'block-start', index: 1, blockType: 'text' } },
+      ],
+      message: createAssistantMessage({
+        content: [{ type: 'reasoning', text: 'why' }, { type: 'text', text: 'answer' }],
+        source: { provider: 'p', model: 'm' },
+      }),
+    }, 4000)
+    const { state } = replay([committed])
+    expect(state.frames[0]).toMatchObject({ kind: 'assistant', text: 'answer', streaming: false, thinking: { text: 'why', startedAt: 1000, seconds: 3 } })
+  })
+
+  it('falls back to the compacted run start when no raw block-start is recorded', () => {
+    const committed = ev('assistant/message', {
+      turn: 1,
+      step: 1,
+      stream: [
+        { type: 'reasoning-chunks', time0: 2000, index: 0, dt: [10], texts: ['why'] },
+      ],
+      message: createAssistantMessage({
+        content: [{ type: 'reasoning', text: 'why' }, { type: 'text', text: 'answer' }],
+        source: { provider: 'p', model: 'm' },
+      }),
+    }, 5000)
+    const { state } = replay([committed])
+    expect(state.frames[0]).toMatchObject({ thinking: { text: 'why', startedAt: 2000, seconds: 3 } })
   })
 })
 

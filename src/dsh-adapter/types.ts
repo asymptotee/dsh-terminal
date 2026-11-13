@@ -7,7 +7,7 @@
  */
 
 export type { Context } from '@deepseek-ai/cordis'
-export type { ContentBlock, MessageSource, StreamChunk } from '@deepseek-ai/dsh-llm'
+export type { AssistantStreamRecord, ContentBlock, MessageSource, StreamChunk } from '@deepseek-ai/dsh-llm'
 export type { SessionEvent } from '@deepseek-ai/dsh-session'
 export type { TodoItem } from '@deepseek-ai/dsh-tool-todo'
 export type { ToolCallView, ToolResult, ToolResultView } from '@deepseek-ai/dsh-tools'
