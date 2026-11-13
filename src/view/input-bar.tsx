@@ -296,6 +296,8 @@ export function InputBar({
         }
         setBuffer({ value: '', cursor: 0 })
         handlers.onChildPrompt(text)
+        // The continuation follows the child's conversation the same way.
+        onScroll?.({ type: 'bottom' })
         return
       }
       if (key.ctrl && input === 'c') {
@@ -374,6 +376,10 @@ export function InputBar({
       setHistoryIndex(-1)
       setBuffer({ value: '', cursor: 0 })
       handlers.onCommit(text)
+      // A submission follows the conversation: snap to the live bottom so
+      // the echo and the answer it starts are on screen (a no-op when
+      // already there).
+      onScroll?.({ type: 'bottom' })
       return
     }
     if (input === '\n') {

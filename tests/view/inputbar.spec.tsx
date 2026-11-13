@@ -188,13 +188,16 @@ describe('back-to-bottom pill', () => {
     await settled(40)
     expect(onCommit).not.toHaveBeenCalled()
     expect(lastFrame()).not.toContain('Back to bottom')
-    // A typed buffer keeps its commit meaning even while scrolled up.
+    // A typed buffer keeps its commit meaning even while scrolled up — and
+    // the submission snaps the view back to the live bottom.
     stdin.write('\x1b[<64;3;3M')
     await settled(40)
+    expect(lastFrame()).toContain('Back to bottom')
     stdin.write('hi')
     stdin.write('\r')
     await settled(40)
     expect(onCommit).toHaveBeenCalledWith('hi')
+    expect(lastFrame()).not.toContain('Back to bottom')
   })
 
   it('keeps the editor End (cursor to buffer end) while at the bottom', async () => {
