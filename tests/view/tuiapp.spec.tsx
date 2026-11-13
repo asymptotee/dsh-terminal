@@ -829,6 +829,18 @@ describe('TuiApp rendering', () => {
     expect(frame.indexOf('unknown command: /x')).toBeLessThan(frame.indexOf('❯ █'))
   })
 
+  it('renders a warn-toned notice frame in the transcript stream', () => {
+    const frames: Frame[] = [
+      { kind: 'notice', seq: -1, summary: 'Unknown command: /bogus', tone: 'warn' },
+      { kind: 'user', seq: 1, text: 'later message' },
+    ]
+    const { lastFrame } = renderApp(<TuiApp state={state(frames)} handlers={noopHandlers()} />)
+    const frame = lastFrame() ?? ''
+    expect(frame).toContain('● Unknown command: /bogus')
+    // A stream frame like any other: later content lands below it.
+    expect(frame.indexOf('Unknown command')).toBeLessThan(frame.indexOf('later message'))
+  })
+
   it('renders the status bar with model, cwd, and mode', () => {
     const { lastFrame } = renderApp(
       <TuiApp

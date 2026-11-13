@@ -87,7 +87,9 @@ export function FrameRow({ frame, expandedOutput, approvalCallId, thinkingExpand
     case 'notice':
       return (
         <Box flexDirection="column">
-          <Text><Text color="#51cf66">●</Text> {frame.summary}</Text>
+          {frame.tone === 'warn'
+            ? <Text color="#ffd43b">● {frame.summary}</Text>
+            : <Text><Text color="#51cf66">●</Text> {frame.summary}</Text>}
           {frame.body === undefined ? null : <IndentedBlock text={trimNewline(frame.body)} expanded={expandedOutput} />}
           {frame.error === undefined ? null : (
             <Text>

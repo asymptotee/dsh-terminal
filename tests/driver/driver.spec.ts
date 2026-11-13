@@ -443,7 +443,12 @@ describe('tui driver', () => {
     test.handlers.onCommit('/bogus')
     await new Promise(resolve => setTimeout(resolve, 0))
     expect(steered).toEqual([])
-    expect(test.views.at(-1)?.overlay).toEqual({ kind: 'notice', text: 'unknown command: /bogus' })
+    // The slip is a transcript frame, not a chrome overlay: a local notice
+    // with a negative seq, rendered in the stream like body content.
+    const notice = test.states.at(-1)!.frames.at(-1)
+    expect(notice).toMatchObject({ kind: 'notice', summary: 'Unknown command: /bogus', tone: 'warn' })
+    expect(notice!.seq).toBeLessThan(0)
+    expect(test.views.at(-1)?.overlay).toBeUndefined()
     await test.ctx.fiber.dispose()
   })
 
@@ -602,18 +607,36 @@ describe('tui driver', () => {
     await test.ctx.fiber.dispose()
   })
 
-  it('clears a notice on the next submission', async () => {
+  it('keeps the unknown-command notice in the transcript across the next submission', async () => {
     const test = await bench({
       commands: { execute: () => Promise.resolve(undefined) },
       afterPrompt(_ctx, session, message, turn) { appendTurn(session, turn, message, 'answer') },
     })
     test.handlers.onCommit('/bogus')
     await new Promise(resolve => setTimeout(resolve, 0))
-    expect(test.views.at(-1)?.overlay?.kind).toBe('notice')
     test.handlers.onCommit('real question')
     await test.agent.whenIdle()
-    test.handlers.onExit()
-    await test.exited
+    const frames = test.states.at(-1)!.frames
+    // The notice is a stream frame: the answer content landed after it —
+    // new arrivals push it up the transcript instead of clearing it.
+    const noticeIndex = frames.findIndex(frame => frame.kind === 'notice' && frame.summary === 'Unknown command: /bogus')
+    expect(noticeIndex).toBeGreaterThan(-1)
+    expect(frames.slice(noticeIndex + 1).some(frame => frame.kind === 'assistant')).toBe(true)
+    await test.ctx.fiber.dispose()
+  })
+
+  it('clears a chrome-band notice on the next submission', async () => {
+    const test = await bench({
+      continueLatest: true,
+      sessionPersistence: { list: async () => [] },
+      afterPrompt(_ctx, session, message, turn) { appendTurn(session, turn, message, 'answer') },
+    })
+    expect(test.views.at(-1)?.overlay).toEqual({
+      kind: 'notice',
+      text: 'no stored session for this directory; started a new one',
+    })
+    test.handlers.onCommit('real question')
+    await test.agent.whenIdle()
     expect(test.views.at(-1)?.overlay).toBeUndefined()
     await test.ctx.fiber.dispose()
   })

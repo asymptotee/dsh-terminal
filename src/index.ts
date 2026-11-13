@@ -1388,6 +1388,9 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
   // Command executions run against the session's command registry; an
   // unresolved slash line is a notice, never a model message.
   const commandSignal = new AbortController().signal
+  /** Local seq source for transcript-injected notices: negative, so it never
+   *  collides with a session seq (the live-stream frames' precedent). */
+  let localNoticeSeq = 0
   // The exit is one-shot: rapid key chords (or keys landing while the tree
   // tears down after exit) must not start a second flush against a session
   // the teardown has already detached, and must not enqueue work on an agent
@@ -1422,7 +1425,24 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
         return
       }
       void commands.execute(agent, text, [], commandSignal).then((execution) => {
-        if (execution === undefined) setOverlay({ kind: 'notice', text: `unknown command: ${text}` })
+        if (execution === undefined) {
+          // The slip joins the transcript as a local notice frame — rendered
+          // like body content, pushed up by whatever arrives next, and never
+          // cleared by a later submission (a chrome-band overlay would be).
+          // It is session-local by design: UI feedback, not log material, so
+          // a resume does not replay it.
+          localNoticeSeq -= 1
+          state = {
+            ...state,
+            frames: [...state.frames, {
+              kind: 'notice' as const,
+              seq: localNoticeSeq,
+              summary: `Unknown command: ${text}`,
+              tone: 'warn' as const,
+            }],
+          }
+          scheduleRender(true)
+        }
       })
     },
     onChildPrompt: (text) => {

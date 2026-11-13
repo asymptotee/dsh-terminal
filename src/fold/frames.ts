@@ -70,6 +70,10 @@ export type Frame =
     body?: string
     /** Captured error detail of the settled child's last turn; present only when it failed. */
     error?: { message: string; code: string }
+    /** A user-correctable slip (the unknown-command notice, injected locally
+     *  by the driver): the transcript renders the row in the shared warning
+     *  yellow (#ffd43b) instead of the settlement green. */
+    tone?: 'warn'
   }
   | {
     /** The user-interruption marker appended at a user-cancelled turn end. */
