@@ -99,6 +99,9 @@ importers:
       '@types/react':
         specifier: ^19.2.18
         version: 19.2.18
+      chalk:
+        specifier: ^5.6.2
+        version: 5.6.2
       commander:
         specifier: ^15.0.0
         version: 15.0.0

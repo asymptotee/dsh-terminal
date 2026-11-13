@@ -13,8 +13,11 @@ import React, { useLayoutEffect, useReducer, useRef, useState } from 'react'
 import { Box, measureElement, render, Text } from 'ink'
 import type { Frame, FrameState } from '../fold/frames.ts'
 import { createFrameState } from '../fold/frames.ts'
+import chalk from 'chalk'
+import stringWidth from 'string-width'
 import {
   clickRowInContent,
+  colorLevelCorrection,
   createScrollState,
   createScrollStates,
   CURSOR_HIDE,
@@ -33,7 +36,10 @@ import type { ClickPosition } from './terminal.ts'
 import type { InputHandlers, Overlay, PlanReviewNarrowed, QuestionAnswerItem, QuestionDraft, QuestionItem, RenderView, TuiRenderer } from './view-types.ts'
 import {
   ApprovalPanel,
+  BACK_TO_BOTTOM_LABEL,
+  BackToBottomPill,
   COMPLETED_BOARD_LINGER_MS,
+  PILL_BOTTOM_ROWS,
   GoalPanel,
   HeartbeatLine,
   PendingUserEchoes,
@@ -64,6 +70,18 @@ export {
   wrapToWidth,
 } from './text-helpers.ts'
 export { COMPLETED_BOARD_LINGER_MS } from './chrome.tsx'
+
+// Correct chalk's color level before the first paint: ink colors through the
+// same chalk singleton, so hosts supports-color misreads (Windows Terminal's
+// WT_SESSION, VS Code's TERM_PROGRAM) would otherwise collapse every hex to
+// the 256-color cube — the pill's badge blue landing washed-out violet next
+// to dsh-TUI's truecolor original. Gated on the detected level so
+// FORCE_COLOR=0 and genuine truecolor environments stay untouched.
+{
+  const correction = colorLevelCorrection()
+  if (correction === 3 && chalk.level === 2) chalk.level = 3
+  if (correction === 2 && chalk.level > 2) chalk.level = 2
+}
 
 /** The pre-driver placeholder: nothing renders until the first driven render, so the full surface appears once. */
 function LoadingScreen(): React.JSX.Element {
@@ -555,6 +573,19 @@ export function TuiApp({
     return hit.rowInFrame < blockRows ? { key, frame } : undefined
   }
   const handleTranscriptClick = (position: ClickPosition): void => {
+    // While the pill is up it owns its band: it is painted over whatever
+    // transcript row lies underneath (a thinking header included), so the
+    // click must not fall through. The hit region is the centered label plus
+    // its two-cell clear padding each side.
+    if (scroll.offset > 0 && scroll.windowRows > 0) {
+      const pillRow = scroll.windowRows - PILL_BOTTOM_ROWS
+      const pillColumns = stringWidth(BACK_TO_BOTTOM_LABEL) + 4
+      const left = Math.floor((columns - pillColumns) / 2) + 1
+      if (position.y === pillRow && position.x >= left && position.x < left + pillColumns) {
+        dispatch({ type: 'bottom' })
+        return
+      }
+    }
     const hit = thinkingRowAt(position)
     if (hit === undefined) return
     const { key, frame } = hit
@@ -688,6 +719,10 @@ export function TuiApp({
         >
           {transcript}
         </Box>
+        {/* The scroll-away pill floats over the window (absolutely positioned,
+            painted after the content): the active transcript sits off the
+            live bottom, and Enter (empty buffer) or End jumps back. */}
+        {scroll.offset > 0 ? <BackToBottomPill /> : null}
       </Box>
       {/* The fixed chrome band below the transcript. */}
       <Box flexDirection="column" flexShrink={0}>
@@ -733,6 +768,7 @@ export function TuiApp({
           onScroll={dispatch}
           onClick={handleTranscriptClick}
           onHover={handleTranscriptHover}
+          bottomHintVisible={scroll.offset > 0}
           onFirstInput={() => { setWelcomeDismissed(true) }}
           history={history}
           focusMode={focusMode}

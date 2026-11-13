@@ -36,6 +36,7 @@ export function InputBar({
   onScroll,
   onClick,
   onHover,
+  bottomHintVisible = false,
   onFirstInput,
   history = [],
   focusMode = 'input',
@@ -96,6 +97,10 @@ export function InputBar({
   /** The pointer moved, in the same viewport coordinates; the caller tracks
    *  its hover affordances off it. */
   onHover?: (position: ClickPosition) => void
+  /** The transcript sits off the live bottom (the blue pill is up): End and
+   *  an empty-buffer Enter jump back; without it End keeps its editor role
+   *  (cursor to the buffer's end). */
+  bottomHintVisible?: boolean
   /** Fired once when the buffer first becomes non-empty (typing or paste). */
   onFirstInput?: () => void
   /** The session's submitted lines; the arrows browse them (log-restored on resume). */
@@ -205,6 +210,12 @@ export function InputBar({
       onScroll?.({ type: 'page', delta: -1 })
       return
     }
+    if (key.end && bottomHintVisible) {
+      // The pill's End promise holds only while it is up: at the live bottom
+      // End keeps its editor role (cursor to the buffer's end).
+      onScroll?.({ type: 'bottom' })
+      return
+    }
     const { value, cursor } = bufferRef.current
     if (approvalPending) {
       // The pending question owns the keys: y and Enter-on-Yes allow, n and
@@ -271,10 +282,18 @@ export function InputBar({
         handlers.onPanelOpen()
         return
       }
-      if (!childPromptable) return
+      if (!childPromptable) {
+        // The read-only child has no buffer to protect: an empty Enter
+        // honors the pill's jump when it is up.
+        if (key.return && bottomHintVisible) onScroll?.({ type: 'bottom' })
+        return
+      }
       if (key.return) {
         const text = value.trim()
-        if (text === '') return
+        if (text === '') {
+          if (bottomHintVisible) onScroll?.({ type: 'bottom' })
+          return
+        }
         setBuffer({ value: '', cursor: 0 })
         handlers.onChildPrompt(text)
         return
@@ -345,7 +364,12 @@ export function InputBar({
     }
     if (key.return) {
       const text = value.trim()
-      if (text === '') return
+      if (text === '') {
+        // The pill's Enter promise: an empty submit returns to the live
+        // bottom; a typed buffer keeps committing as usual.
+        if (bottomHintVisible) onScroll?.({ type: 'bottom' })
+        return
+      }
       historyRef.current = [...historyRef.current, text]
       setHistoryIndex(-1)
       setBuffer({ value: '', cursor: 0 })

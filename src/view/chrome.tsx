@@ -598,6 +598,34 @@ export function GoalPanel({ goal }: { goal: GoalPanelInfo }): React.JSX.Element 
   )
 }
 
+/** How many transcript rows the pill floats above the window's bottom. */
+export const PILL_BOTTOM_ROWS = 1
+
+/** The pill's label; exported so the renderer's click hit-test measures the
+ *  exact string (and its centered band) the component paints. */
+export const BACK_TO_BOTTOM_LABEL = ' ↓ Back to bottom (Enter/End) '
+
+/** The scroll-away pill: the transcript sits off the live bottom, and Enter
+ *  (empty buffer) or End returns to it. Absolutely positioned inside the
+ *  transcript window, it never costs the window a layout row — a chrome row
+ *  would shrink the window, bend the page step, and leave a page-up/page-down
+ *  round trip short of the bottom; a negative margin drags the whole chrome
+ *  band up with it and leaks window content onto the input rows. */
+export function BackToBottomPill(): React.JSX.Element {
+  return (
+    <Box position="absolute" bottom={PILL_BOTTOM_ROWS} left={0} right={0} justifyContent="center">
+      {/* The dsh-TUI badge recipe, dark-theme leg: accent-blue fill over
+          deep warm-charcoal bold text, one-cell breathing inside the fill
+          and two cells of clear padding around it. (The light-theme leg is
+          #3F6CC4 over #F6F3ED.) Truecolor-corrected hosts only — on a plain
+          256-color terminal the fill lands on the nearest cube entry. */}
+      <Box paddingX={2}>
+        <Text backgroundColor="#5E88CC" color="#22262E" bold>{BACK_TO_BOTTOM_LABEL}</Text>
+      </Box>
+    </Box>
+  )
+}
+
 /** Braille-dot spinner cycled to animate the working marker: the terminal
  *  world's canonical busy indicator, a clockwise dot sweep. */
 const HEARTBEAT_FRAMES = ['⠋', '⠙', '⠉', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']

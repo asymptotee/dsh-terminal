@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest'
 import {
   clickFromInput,
   clickRowInContent,
+  colorLevelCorrection,
   containsMouseReport,
   moveFromInput,
   createScrollState,
@@ -107,6 +108,25 @@ describe('moveFromInput', () => {
   })
 })
 
+describe('colorLevelCorrection', () => {
+  it('boosts to truecolor on the hosts supports-color misreads', () => {
+    expect(colorLevelCorrection({ WT_SESSION: 'abc' })).toBe(3)
+    expect(colorLevelCorrection({ TERM_PROGRAM: 'vscode' })).toBe(3)
+  })
+
+  it('leaves plain hosts and an explicit 256-color request alone', () => {
+    expect(colorLevelCorrection({})).toBeUndefined()
+    expect(colorLevelCorrection({ WT_SESSION: 'abc', FORCE_COLOR: '2' })).toBeUndefined()
+  })
+
+  it('clamps to 256 inside tmux unless the setup vouches for truecolor', () => {
+    expect(colorLevelCorrection({ TMUX: '/tmp/tmux-1000/default,1,0' })).toBe(2)
+    // tmux wins even on a truecolor host: its re-emission is the bottleneck.
+    expect(colorLevelCorrection({ WT_SESSION: 'abc', TMUX: '/tmp/x,1,0' })).toBe(2)
+    expect(colorLevelCorrection({ WT_SESSION: 'abc', TMUX: '/tmp/x,1,0', DSH_TERMINAL_TMUX_TRUECOLOR: '1' })).toBe(3)
+  })
+})
+
 describe('mouseEnabled', () => {
   it('defaults on and honors the opt-out', () => {
     expect(mouseEnabled({})).toBe(true)
@@ -175,6 +195,18 @@ describe('scrollReducer', () => {
     const up = scrollReducer(measured, { type: 'wheel', delta: 65 }) // near the top: offset 65
     const shrank = scrollReducer(up, { type: 'measure', contentRows: 80, windowRows: 30 })
     expect(shrank.offset).toBe(maxOffset(shrank)) // 50
+  })
+
+  it('keeps the top visible row fixed when the window height changes', () => {
+    // offset 60 of {content 100, window 30} shows content row 10 at the top;
+    // the pill joining the chrome band shrinks the window to 29 — the offset
+    // rides along so row 10 stays at the top (and a clamp computed against
+    // the old height does not strand the view one row short).
+    const up = scrollReducer(measured, { type: 'wheel', delta: 60 })
+    const shrunk = scrollReducer(up, { type: 'measure', contentRows: 100, windowRows: 29 })
+    expect(shrunk.offset).toBe(61) // 100 - 29 - 61 = 10, the same top row
+    const grown = scrollReducer(shrunk, { type: 'measure', contentRows: 100, windowRows: 30 })
+    expect(grown.offset).toBe(60)
   })
 
   it('resets on view switch', () => {

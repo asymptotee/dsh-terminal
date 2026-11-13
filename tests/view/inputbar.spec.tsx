@@ -157,3 +157,69 @@ describe('InputBar key handling', () => {
   })
 })
 
+
+describe('back-to-bottom pill', () => {
+  function overflowingFrames(): Frame[] {
+    return Array.from({ length: 30 }, (_, i) => (
+      { kind: 'assistant', seq: i + 1, turn: 1, step: 1, text: `line ${i + 1}`, streaming: false }
+    ))
+  }
+
+  it('shows while scrolled up and returns on End', async () => {
+    const { lastFrame, stdin } = renderApp(<TuiApp state={state(overflowingFrames())} handlers={noopHandlers()} />)
+    await settled(60)
+    expect(lastFrame()).not.toContain('Back to bottom')
+    stdin.write('\x1b[<64;3;3M') // one wheel notch up
+    await settled(40)
+    expect(lastFrame()).toContain('↓ Back to bottom (Enter/End)')
+    stdin.write('\x1b[F') // End jumps back to the live bottom
+    await settled(40)
+    expect(lastFrame()).not.toContain('Back to bottom')
+  })
+
+  it('returns on an empty-buffer Enter and keeps committing typed text', async () => {
+    const onCommit = vi.fn()
+    const { lastFrame, stdin } = renderApp(<TuiApp state={state(overflowingFrames())} handlers={{ ...noopHandlers(), onCommit }} />)
+    await settled(60)
+    stdin.write('\x1b[<64;3;3M')
+    await settled(40)
+    expect(lastFrame()).toContain('Back to bottom')
+    stdin.write('\r') // an empty Enter jumps instead of committing
+    await settled(40)
+    expect(onCommit).not.toHaveBeenCalled()
+    expect(lastFrame()).not.toContain('Back to bottom')
+    // A typed buffer keeps its commit meaning even while scrolled up.
+    stdin.write('\x1b[<64;3;3M')
+    await settled(40)
+    stdin.write('hi')
+    stdin.write('\r')
+    await settled(40)
+    expect(onCommit).toHaveBeenCalledWith('hi')
+  })
+
+  it('keeps the editor End (cursor to buffer end) while at the bottom', async () => {
+    const { lastFrame, stdin } = renderApp(<TuiApp state={state(overflowingFrames())} handlers={noopHandlers()} />)
+    await settled(60)
+    stdin.write('ab')
+    stdin.write('\x1b[D') // one column left: the caret sits between a and b
+    stdin.write('\x1b[F') // End at the live bottom keeps its editor role
+    await settled()
+    expect(lastFrame()).toContain('ab█')
+  })
+
+  it('returns to the bottom when the pill itself is clicked', async () => {
+    const { lastFrame, stdin } = renderApp(<TuiApp state={state(overflowingFrames())} handlers={noopHandlers()} />)
+    await settled(60)
+    stdin.write('\x1b[<64;3;3M') // one wheel notch up pops the pill
+    await settled(40)
+    const lines = lastFrame()!.split('\n')
+    const pillRow = lines.findIndex(line => line.includes('Back to bottom'))
+    expect(pillRow).toBeGreaterThan(-1)
+    // Click inside the centered label: its column in the ANSI-stripped row,
+    // mapped to 1-based SGR coordinates.
+    const x = lines[pillRow].indexOf('Back') + 3
+    stdin.write(`\x1b[<0;${x};${pillRow + 1}M`)
+    await settled(40)
+    expect(lastFrame()).not.toContain('Back to bottom')
+  })
+})

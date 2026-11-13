@@ -39,6 +39,33 @@ export function mouseEnabled(env: { DSH_TERMINAL_MOUSE?: string } = process.env)
   return env.DSH_TERMINAL_MOUSE !== '0' && env.DSH_TERMINAL_MOUSE !== 'false'
 }
 
+/**
+ * The chalk color-level correction for hosts that supports-color misreads:
+ * Windows Terminal advertises truecolor via `WT_SESSION` (forwarded into
+ * WSL) and VS Code via `TERM_PROGRAM`, but supports-color recognizes
+ * neither, so chalk would sit at 256 colors and collapse every hex onto the
+ * nearest 6×6×6 cube entry — visibly washed out next to a truecolor UI
+ * (dsh-TUI applies this exact boost). The tmux clamp is its counterpart:
+ * tmux only re-emits truecolor when its terminal-overrides declare the
+ * capability, so inside tmux the level stays 256 unless
+ * `DSH_TERMINAL_TMUX_TRUECOLOR` vouches for the setup. `3` boosts, `2`
+ * clamps, `undefined` leaves chalk's detection untouched; the caller gates
+ * each on the detected level, so `FORCE_COLOR=0` and already-detected
+ * truecolor are preserved.
+ */
+export function colorLevelCorrection(env: {
+  TERM_PROGRAM?: string
+  WT_SESSION?: string
+  FORCE_COLOR?: string
+  TMUX?: string
+  DSH_TERMINAL_TMUX_TRUECOLOR?: string
+} = process.env): 3 | 2 | undefined {
+  const truecolorHost = env.TERM_PROGRAM === 'vscode' || (env.WT_SESSION !== undefined && env.WT_SESSION !== '')
+  const tmuxClamp = env.TMUX !== undefined && env.TMUX !== '' && env.DSH_TERMINAL_TMUX_TRUECOLOR === undefined
+  if (tmuxClamp) return 2
+  return truecolorHost && env.FORCE_COLOR !== '2' ? 3 : undefined
+}
+
 /** SGR wheel button codes. */
 export const WHEEL_UP = 64
 export const WHEEL_DOWN = 65
@@ -221,11 +248,15 @@ export function scrollReducer(state: ScrollState, action: ScrollAction): ScrollS
       // the measure effect re-runs on every render and must not re-render.
       if (action.contentRows === state.contentRows && action.windowRows === state.windowRows) return state
       const next = { offset: state.offset, contentRows: action.contentRows, windowRows: action.windowRows }
-      // Content growth while scrolled up keeps the user's absolute position:
-      // the new rows land below what they are reading. Shrinkage clamps.
+      // Scrolled up, the topmost visible content row is the reading position:
+      // content growth keeps it fixed (new rows land below), and a window
+      // height change keeps it fixed too — the back-to-bottom pill joining
+      // the chrome band shrinks the window by one row, and without the
+      // offset riding along, a clamp computed against the old height strands
+      // the view one row short of the true top.
       const growth = action.contentRows - state.contentRows
       const offset = state.offset > 0
-        ? Math.min(Math.max(0, state.offset + Math.max(0, growth)), maxOffset(next))
+        ? Math.min(Math.max(0, state.offset + Math.max(0, growth) + state.windowRows - action.windowRows), maxOffset(next))
         : 0
       return { ...next, offset }
     }
