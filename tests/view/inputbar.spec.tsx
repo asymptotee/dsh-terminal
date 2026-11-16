@@ -118,6 +118,28 @@ describe('InputBar key handling', () => {
     expect(lastFrame()).toContain('❯ first█')
   })
 
+  it('keeps walking the history after recalling a bare command line', async () => {
+    // Recalling '/plan' restores text that matches the slash menu's prefix
+    // rule; the menu must stay dismissed so the next ↑ reaches the older
+    // entry instead of moving the menu selection (which reads as ↑ dead).
+    const frames: Frame[] = [
+      { kind: 'command', seq: 1, commandId: 'c1', name: 'status' },
+      { kind: 'command', seq: 2, commandId: 'c2', name: 'plan' },
+    ]
+    const { lastFrame, stdin } = renderApp(<TuiApp
+      state={state(frames)}
+      handlers={noopHandlers()}
+      view={{ commands: [{ name: 'status', description: 'Show session status' }, { name: 'plan', description: 'Enter or leave plan mode' }] }}
+    />)
+    stdin.write('\x1b[A')
+    await settled()
+    expect(lastFrame()).toContain('❯ /plan█')
+    expect(lastFrame()).not.toContain('Enter or leave plan mode')
+    stdin.write('\x1b[A')
+    await settled()
+    expect(lastFrame()).toContain('❯ /status█')
+  })
+
   it('recalls submitted lines through the history arrows', async () => {
     const { lastFrame, stdin } = renderApp(<TuiApp state={state([])} handlers={noopHandlers()} />)
     stdin.write('first')

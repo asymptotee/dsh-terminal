@@ -430,7 +430,14 @@ export function InputBar({
       const next = historyIndex < 0 ? history.length - 1 : Math.max(0, historyIndex - 1)
       setHistoryIndex(next)
       const recalled = history[next]
-      if (recalled !== undefined) setBuffer({ value: recalled, cursor: recalled.length })
+      if (recalled !== undefined) {
+        setBuffer({ value: recalled, cursor: recalled.length })
+        // A recalled line is restored text, not fresh typing: keep the slash
+        // menu dismissed (setBuffer's edit path just lifted the dismissal),
+        // so ↑/↓ keep walking the history — a bare recalled command would
+        // otherwise reopen the menu over itself and own the arrows.
+        setMenuHidden(true)
+      }
       return
     }
     if (key.downArrow) {
@@ -446,7 +453,10 @@ export function InputBar({
       } else {
         setHistoryIndex(next)
         const recalled = history[next]
-        if (recalled !== undefined) setBuffer({ value: recalled, cursor: recalled.length })
+        if (recalled !== undefined) {
+          setBuffer({ value: recalled, cursor: recalled.length })
+          setMenuHidden(true)
+        }
       }
       return
     }
