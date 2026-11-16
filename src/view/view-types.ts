@@ -43,6 +43,12 @@ export interface InputHandlers {
   onQuestionAnswer(answer: QuestionAnswer): void
   /** ⇧Tab: cycle the session's permission preset to the next catalog entry. */
   onCyclePermission(): void
+  /** Move the effort picker's ▲ by `delta` levels (clamped at both ends). */
+  onEffortMove(delta: number): void
+  /** Apply the effort picker's selected level and close it. */
+  onEffortConfirm(): void
+  /** Close the effort picker without applying anything. */
+  onEffortCancel(): void
 }
 
 /** One question the agent asks the user (the terminal's structural mirror of
@@ -363,11 +369,31 @@ export interface CommandInfo {
   hint?: string
 }
 
+/** One disclosed reasoning-effort level the picker offers. */
+export interface EffortLevel {
+  readonly id: string
+  readonly name?: string
+  /** The adapter's one-line guidance for the level; the picker floats it
+   *  under the scale while the level is selected. */
+  readonly description?: string
+}
+
+/** The effort picker popup's state: the scale and the ←/→ selection (the
+ *  driver opens it with the selection on the level in effect). */
+export interface EffortPickerView {
+  /** The adapter-disclosed levels, ordered faster → smarter. */
+  readonly levels: readonly EffortLevel[]
+  /** The ←/→ selection index into `levels`. */
+  readonly selected: number
+}
+
 export interface RenderView {
   overlay?: Overlay
   status?: StatusInfo
   /** Registered slash commands; drives the `/` completion menu. */
   commands?: readonly CommandInfo[]
+  /** The effort picker popup; present while it is open above the input bar. */
+  effortPicker?: EffortPickerView
   /** The unfinished direct subagents; absent or empty hides the panel. */
   subagents?: readonly SubagentRow[]
   /** The panel's selected row (0 = the main agent row); absent means the input bar holds focus. */

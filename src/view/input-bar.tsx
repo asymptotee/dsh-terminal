@@ -12,7 +12,7 @@ import stringWidth from 'string-width'
 import type { ScrollAction } from './terminal.ts'
 import { clickFromInput, containsMouseReport, moveFromInput, wheelDeltaFromInput } from './terminal.ts'
 import type { ClickPosition } from './terminal.ts'
-import type { CommandInfo, InputHandlers, StatusInfo } from './view-types.ts'
+import type { CommandInfo, EffortPickerView, InputHandlers, StatusInfo } from './view-types.ts'
 import { padToWidth, truncateToWidth } from './text-helpers.ts'
 import { useTerminalWidth } from './use-terminal.ts'
 import { StatusBar } from './chrome.tsx'
@@ -57,6 +57,7 @@ export function InputBar({
   onQuestionTextChange,
   panelAvailable = false,
   commands = [],
+  effortPicker,
   status,
   statusHint,
 }: {
@@ -126,6 +127,8 @@ export function InputBar({
   panelAvailable?: boolean
   /** The registered slash commands; a leading-`/` buffer opens the completion menu. */
   commands?: readonly CommandInfo[]
+  /** The effort picker popup's state; present while it floats above the box. */
+  effortPicker?: EffortPickerView
   /** The footer facts; the completion menu opens above the box and never
    *  displaces them. */
   status?: StatusInfo
@@ -196,10 +199,12 @@ export function InputBar({
       // (releases, other buttons) is swallowed.
       const click = clickFromInput(input)
       if (click !== undefined) {
-        // While the completion menu overlays the transcript's bottom rows, a
-        // click must not fall through to the content (or the pill) hidden
-        // beneath it: the menu is keyboard-driven, so the press is swallowed.
-        if (commandMatchesFor(bufferRef.current.value).length === 0 || menuHiddenRef.current) onClick?.(click)
+        // While the completion menu or the effort picker overlays the
+        // transcript's bottom rows, a click must not fall through to the
+        // content (or the pill) hidden beneath it: both are keyboard-driven,
+        // so the press is swallowed.
+        const menuOpenNow = commandMatchesFor(bufferRef.current.value).length > 0 && !menuHiddenRef.current
+        if (!menuOpenNow && effortPicker === undefined) onClick?.(click)
         return
       }
       const move = moveFromInput(input)
@@ -264,6 +269,16 @@ export function InputBar({
         // like the main editor does (the draft renders line-split).
         onQuestionTextChange?.(questionTextDraft + input.replace(/\r\n|\r/g, '\n'))
       }
+      return
+    }
+    if (effortPicker !== undefined) {
+      // The effort popup owns the keys while it floats: ←/→ move the ▲,
+      // Enter applies the selection, Esc cancels; everything else waits (the
+      // editor buffer underneath is untouched).
+      if (key.escape) { handlers.onEffortCancel(); return }
+      if (key.leftArrow) { handlers.onEffortMove(-1); return }
+      if (key.rightArrow) { handlers.onEffortMove(1); return }
+      if (key.return) { handlers.onEffortConfirm(); return }
       return
     }
     if (focusMode === 'job') {
@@ -547,7 +562,10 @@ export function InputBar({
       {/* The completion menu floats above the box, Claude Code style: an
           absolute overlay painted over the transcript's bottom rows, so the
           transcript content, the input box, and the footer all hold their
-          rows — opening the menu never reflows anything. */}
+          rows — opening the menu never reflows anything. The effort picker
+          floats the same way; the two never open together (the picker owns
+          the keys, so the buffer never reaches the menu's prefix rule). */}
+      {effortPicker !== undefined ? <EffortPickerPopup picker={effortPicker} width={width} /> : null}
       {menuOpen ? <CommandMenu items={menuMatches} selected={menuSelected} width={width} /> : null}
       {rule}
       {showPlaceholder
@@ -679,6 +697,111 @@ function CommandMenu({
         )
       })}
       {hiddenAfter > 0 ? <Text dimColor>{padToWidth(`  … ${hiddenAfter} more`, width)}</Text> : null}
+    </Box>
+  )
+}
+
+/** The effort picker popup floating above the input bar: the same absolute
+ *  overlay recipe as the completion menu — a negative `top` equal to its own
+ *  row count keeps it out of flow (the transcript never reflows), and every
+ *  row pads to the full terminal width so the cells underneath are erased.
+ *  The ▲ rides a centered, shortened scale at the ←/→ selection; the
+ *  selected level wears the shared highlight tint. */
+const EFFORT_POPUP_BASE_ROWS = 8
+function EffortPickerPopup({ picker, width }: {
+  picker: EffortPickerView
+  width: number
+}): React.JSX.Element {
+  const { levels, selected } = picker
+  const clampedSelected = Math.min(Math.max(0, selected), Math.max(0, levels.length - 1))
+  // The nominal track length follows the level count — 10 columns per level,
+  // floor 20, ceiling 50 — and shrinks further only when the terminal is
+  // narrower. The Faster/Smarter labels float above its two ends, so the row
+  // itself is just the track.
+  const wantedSpan = Math.min(Math.max(levels.length * 10, 20), 50)
+  const trackSpan = Math.max(8, Math.min(wantedSpan, width - 8))
+  // The \u25b2 never rides the track's ends: both keep one cell of \u2500 clear,
+  // so a selection at either end still sits inside the scale.
+  const trackEndInset = 1
+  const columnOf = (index: number): number => {
+    if (levels.length <= 1) return Math.floor(trackSpan / 2)
+    const inner = Math.max(0, trackSpan - 1 - trackEndInset * 2)
+    return trackEndInset + Math.round(index * inner / (levels.length - 1))
+  }
+  const column = columnOf(clampedSelected)
+  const pad = (used: number): string => ' '.repeat(Math.max(0, width - used))
+  // The levels row: each id placed so its \u25b2-cell sits exactly on its track
+  // column (odd widths center exactly; even widths shift right, landing the
+  // \u25b2 on the left-of-center cell — the `i` of `high`), kept two clear of
+  // neighbours; the first label is never bumped off its column.
+  const labels: { text: string; start: number; isSelected: boolean }[] = []
+  let previousEnd = -Infinity
+  levels.forEach((level, index) => {
+    const centered = columnOf(index) - Math.floor((stringWidth(level.id) - 1) / 2)
+    const start = Math.max(previousEnd + 2, Math.max(0, centered))
+    labels.push({ text: level.id, start, isSelected: index === clampedSelected })
+    previousEnd = start + stringWidth(level.id)
+  })
+  // The rendered track spans the labels: an even-width LAST name shifted onto
+  // its \u25b2-cell can overhang the nominal end, and the line must reach the
+  // name's last cell — both ends of the rule align with the names below.
+  const lastLabel = labels[labels.length - 1]
+  const trackLen = Math.max(trackSpan, lastLabel === undefined ? 0 : lastLabel.start + stringWidth(lastLabel.text))
+  const leftPad = Math.max(0, Math.floor((width - trackLen) / 2))
+  const trackBefore = '\u2500'.repeat(column)
+  const trackAfter = '\u2500'.repeat(Math.max(0, trackLen - column - 1))
+  // The labels row: `Faster` flush with the track's left end, `Smarter` with
+  // its right end, both in white above the line.
+  const fasterWidth = stringWidth('Faster')
+  const smarterWidth = stringWidth('Smarter')
+  const labelGap = Math.max(1, trackLen - fasterWidth - smarterWidth)
+  let labelCursor = 0
+  const labelSegments = labels.map((label, index) => {
+    const gap = ' '.repeat(Math.max(0, label.start - labelCursor))
+    labelCursor = label.start + stringWidth(label.text)
+    return label.isSelected ? (
+      <React.Fragment key={index}>{gap}<Text color="#a5d8ff" bold>{label.text}</Text></React.Fragment>
+    ) : (
+      <React.Fragment key={index}>{gap}<Text dimColor>{label.text}</Text></React.Fragment>
+    )
+  })
+  const hint = '\u2190/\u2192 to adjust \u00b7 Enter to confirm \u00b7 Esc to cancel'
+  // The selected level's adapter description floats under the scale — one
+  // centered dim line, truncated to the popup width; levels that disclose
+  // none drop the row entirely (the overlay's row count follows).
+  const rawDescription = levels[clampedSelected]?.description
+  const description = rawDescription === undefined || rawDescription === ''
+    ? undefined
+    : truncateToWidth(rawDescription, Math.max(0, width - 4))
+  // The description keeps one blank row of breathing room under the level
+  // names: two extra rows when it renders, none when it does not.
+  const rowCount = description === undefined ? EFFORT_POPUP_BASE_ROWS : EFFORT_POPUP_BASE_ROWS + 2
+  return (
+    <Box position="absolute" top={-rowCount} left={0} right={0} flexDirection="column">
+      <Text color="#a5d8ff">{'\u2594'.repeat(width)}</Text>
+      <Text color="#ffffff">{'  Effort'}{pad(8)}</Text>
+      <Text>{' '.repeat(width)}</Text>
+      <Text>
+        {' '.repeat(leftPad)}<Text color="#ffffff">Faster</Text>{' '.repeat(labelGap)}<Text color="#ffffff">Smarter</Text>
+        {pad(leftPad + fasterWidth + labelGap + smarterWidth)}
+      </Text>
+      <Text>
+        {' '.repeat(leftPad)}<Text dimColor>{trackBefore}</Text><Text color="#a5d8ff">{'\u25b2'}</Text><Text dimColor>{trackAfter}</Text>
+        {pad(leftPad + trackLen)}
+      </Text>
+      <Text>{' '.repeat(leftPad)}{labelSegments}{pad(leftPad + labelCursor)}</Text>
+      {description === undefined ? null : <Text>{' '.repeat(width)}</Text>}
+      {description === undefined
+        ? null
+        : (
+          <Text dimColor>
+            {' '.repeat(Math.max(0, Math.floor((width - stringWidth(description)) / 2)))}
+            {description}
+            {pad(Math.floor((width - stringWidth(description)) / 2) + stringWidth(description))}
+          </Text>
+        )}
+      <Text>{' '.repeat(width)}</Text>
+      <Text dimColor>{'  '}{hint}{pad(2 + stringWidth(hint))}</Text>
     </Box>
   )
 }

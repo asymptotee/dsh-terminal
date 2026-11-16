@@ -15,14 +15,14 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import type { AgentSetup, AgentTeamProjectionState, ApprovalOutcome, AssistantStreamFrame, CommandDescriptor, CommandRuntime, Context, GoalProjectionState, ModelSelection, SessionEvent } from './dsh-adapter/types.ts'
-import { createUserMessage, installModelSelection, SessionId, z } from './dsh-adapter/services.ts'
+import type { AgentSetup, AgentTeamProjectionState, ApprovalOutcome, AssistantStreamFrame, CommandDescriptor, CommandRuntime, Context, GoalProjectionState, ModelSelection, ReasoningEffortId, SessionEvent } from './dsh-adapter/types.ts'
+import { createUserMessage, installModelSelection, ReasoningEffortId as brandEffortId, SessionId, z } from './dsh-adapter/services.ts'
 import './dsh-adapter/effects.ts'
 import { createFrameState, foldAssistantStreamChunk, foldEvent, readableFailureMessage } from './fold/frames.ts'
 import type { FoldDeps, Frame, FrameState } from './fold/frames.ts'
 import { teamToolPresentation } from './fold/team-present.ts'
 import { createInkRenderer, foldInvocationLine } from './view/renderer.tsx'
-import type { ApprovalChoice, CommandInfo, GoalPanelInfo, GoalPhase, JobDetailView, JobsPanelInfo, JobRow, Overlay, QuestionAnswer, QuestionItem, RenderView, SubagentRow, TeamPanelInfo, TeamTaskRow, TuiRenderer, WorkflowMemberRow, WorkflowMemberStatus, WorkflowPanelInfo, WorkflowPhaseGroup, WorkflowRunRow, WorkflowRunStatus } from './view/renderer.tsx'
+import type { ApprovalChoice, CommandInfo, EffortPickerView, GoalPanelInfo, GoalPhase, JobDetailView, JobsPanelInfo, JobRow, Overlay, QuestionAnswer, QuestionItem, RenderView, SubagentRow, TeamPanelInfo, TeamTaskRow, TuiRenderer, WorkflowMemberRow, WorkflowMemberStatus, WorkflowPanelInfo, WorkflowPhaseGroup, WorkflowRunRow, WorkflowRunStatus } from './view/renderer.tsx'
 
 // Re-exported so driver suites import the renderer contract without reaching
 // the ink view's .tsx module directly (the host aggregate compiles specs).
@@ -456,14 +456,42 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
   // in when the info resolves.
   let contextWindow: number | undefined
   let latestUsed: number | undefined
+  /** The adapter's default effort for the model (when it discloses one); the
+   *  badge falls back to it whenever no selection carries an effort. */
+  let resolvedDefaultEffort: string | undefined
+  /** The adapter-disclosed effort levels (the picker's scale); cached by the
+   *  startup model-info lookup, lazily refetched when that disclosed none. */
+  let effortLevelsCache: readonly { id: ReasoningEffortId; name?: string; description?: string }[] | undefined
+  /** The open effort picker popup's state; undefined keeps it closed. */
+  let effortPickerState: {
+    levels: readonly { id: ReasoningEffortId; name?: string; description?: string }[]
+    selected: number
+  } | undefined
+  // Presentation fallbacks for well-known effort ids: the deepseek adapter
+  // discloses descriptions with its levels, but other adapters (pi-ai) hand
+  // over id + name only, which would leave the picker's description row
+  // blank. Adapter-disclosed copy always wins; the real fix lives upstream.
+  const EFFORT_DESCRIPTION_FALLBACKS: Readonly<Record<string, string>> = {
+    off: 'Use for simple tasks that do not need reasoning.',
+    low: 'Prefer for routine or latency-sensitive tasks.',
+    medium: 'A balanced choice for everyday tasks.',
+    high: 'The default balance for most tasks.',
+    xhigh: 'Deeper reasoning for demanding tasks.',
+    max: 'Reserve for the hardest quality-first tasks.',
+  }
   void (async () => {
     const info = (await ctx.get('llm')
       ?.resolveModelInfo(selection.provider, selection.model)
       .catch(() => undefined)) as
-      | { context?: { contextWindow: number }; reasoning?: { defaultEffort?: string } }
+      | { context?: { contextWindow: number }; reasoning?: { defaultEffort?: string; efforts?: readonly { id: ReasoningEffortId; name?: string; description?: string }[] } }
       | undefined
     const window = info?.context?.contextWindow
-    const effort = selection.reasoningEffort ?? info?.reasoning?.defaultEffort
+    resolvedDefaultEffort = info?.reasoning?.defaultEffort
+    // The picker reads the same disclosure; cache it so opening never waits.
+    effortLevelsCache = info?.reasoning?.efforts
+    // The agent-owned selection wins: a resume re-records the durable effort,
+    // and a mid-session switch must beat this one-shot lookup.
+    const effort = agent.model.current()?.reasoningEffort ?? selection.reasoningEffort ?? info?.reasoning?.defaultEffort
     if (window === undefined && effort === undefined) return
     contextWindow = window
     view = view.status === undefined
@@ -917,6 +945,52 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
       ...(descriptor.input?.hint === undefined ? {} : { hint: descriptor.input.hint }),
     }))
   }
+  // The terminal's own `/effort` command: upstream ships no effort switch, so
+  // the driver registers one against the agent-owned model selection. The
+  // switch is durable — select() appends a logged `model/selection` event,
+  // restored on resume — and the footer badge follows that same event. No
+  // args reports the current effort and the adapter's disclosed levels;
+  // `off` clears back to the model default. recordInput defaults on, so the
+  // line lands in the command history like any other.
+  const commandsRegistry: CommandRuntime | undefined = ctx.get('commands')
+  if (typeof commandsRegistry?.register === 'function') {
+    commandsRegistry.register({
+      name: 'effort',
+      description: 'Set the reasoning effort',
+      input: { hint: '<level>|off' },
+      handler: async ({ agent: target, rawInput }) => {
+        const wanted = rawInput.trim()
+        const current = target.model.current()
+        const info = (await ctx.get('llm')
+          ?.resolveModelInfo(current?.provider ?? selection.provider, current?.model ?? selection.model)
+          .catch(() => undefined)) as
+          | { reasoning?: { defaultEffort?: string; efforts?: readonly { id: ReasoningEffortId; name?: string; description?: string }[] } }
+          | undefined
+        const efforts = info?.reasoning?.efforts ?? []
+        const levels = efforts.map(level => level.id).join(' · ')
+        if (wanted === '') {
+          const shown = current?.reasoningEffort ?? resolvedDefaultEffort ?? 'model default'
+          return {
+            kind: 'success',
+            text: levels === '' ? `Reasoning effort: ${shown}` : `Reasoning effort: ${shown} · available: ${levels}`,
+          }
+        }
+        const clearing = wanted === 'off' || wanted === 'none' || wanted === 'default'
+        const match = efforts.find(level => level.id === wanted || level.name === wanted)
+        if (!clearing && efforts.length > 0 && match === undefined) {
+          return { kind: 'error', text: `Unknown effort: ${wanted}${levels === '' ? '' : ` · available: ${levels}`}` }
+        }
+        if (current === undefined) return { kind: 'error', text: 'No model selection is recorded for this session.' }
+        target.model.select(clearing
+          ? { provider: current.provider, model: current.model }
+          : { provider: current.provider, model: current.model, reasoningEffort: match?.id ?? brandEffortId(wanted) })
+        return {
+          kind: 'success',
+          text: clearing ? 'Reasoning effort cleared (model default).' : `Reasoning effort set to: ${match?.id ?? wanted}`,
+        }
+      },
+    })
+  }
   /** The base view plus the panel slice computed from the live roster. */
   function withPanel(base: RenderView): RenderView {
     const next: RenderView = { ...base }
@@ -988,9 +1062,64 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
     state = next
     scheduleRender(immediate)
   }
+  // The effort picker popup: a bare `/effort` opens it, ←/→ walk the scale,
+  // Enter applies the selection through the agent-owned model selection
+  // (durable, badge-following, resume-proof — the /effort badge's own
+  // machinery), Esc closes it untouched. The state declarations live up by
+  // the startup model-info lookup, which feeds the levels cache.
+  const effortPickerSlice = (): EffortPickerView | undefined => (
+    effortPickerState === undefined
+      ? undefined
+      : {
+        levels: effortPickerState.levels.map(level => ({
+          id: level.id,
+          ...(level.name === undefined ? {} : { name: level.name }),
+          ...(level.description === undefined ? {} : { description: level.description }),
+        })),
+        selected: effortPickerState.selected,
+      }
+  )
+  const publishEffortPicker = (): void => {
+    const { effortPicker: _dropped, ...rest } = view
+    const slice = effortPickerSlice()
+    view = slice === undefined ? rest : { ...rest, effortPicker: slice }
+    scheduleRender(true)
+  }
+  const openEffortPicker = async (): Promise<void> => {
+    let levels = effortLevelsCache
+    if (levels === undefined) {
+      const info = (await ctx.get('llm')
+        ?.resolveModelInfo(selection.provider, selection.model)
+        .catch(() => undefined)) as
+        | { reasoning?: { efforts?: readonly { id: ReasoningEffortId; name?: string; description?: string }[] } }
+        | undefined
+      effortLevelsCache = info?.reasoning?.efforts
+      levels = effortLevelsCache
+    }
+    if (levels === undefined || levels.length === 0) {
+      injectLocalNotice('No effort levels disclosed for this model', 'warn')
+      return
+    }
+    const currentId = agent.model.current()?.reasoningEffort ?? resolvedDefaultEffort as ReasoningEffortId | undefined
+    const currentIndex = currentId === undefined ? -1 : levels.findIndex(level => level.id === currentId)
+    effortPickerState = {
+      // Backfill the description row for adapters that disclose none.
+      levels: levels.map(level => {
+        if (level.description !== undefined) return level
+        const fallback = EFFORT_DESCRIPTION_FALLBACKS[level.id as string]
+        return fallback === undefined ? level : { ...level, description: fallback }
+      }),
+      selected: currentIndex === -1 ? 0 : currentIndex,
+    }
+    publishEffortPicker()
+  }
   const setOverlay = (overlay: Overlay | undefined): void => {
+    const picker = effortPickerSlice()
     view = overlay === undefined
-      ? { ...(view.status === undefined ? {} : { status: view.status }) }
+      ? {
+        ...(view.status === undefined ? {} : { status: view.status }),
+        ...(picker === undefined ? {} : { effortPicker: picker }),
+      }
       : { ...view, overlay }
     scheduleRender(true)
   }
@@ -1104,6 +1233,26 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
       view = { ...view, status: { ...view.status, planMode } }
     }
   }
+  // The effort badge follows the agent-owned selection: `/effort` appends a
+  // `model/selection` event whose payload IS the recorded selection, so the
+  // live badge reads it off the event (the projection's fold order against
+  // this listener is not guaranteed). Without an event it re-reads the
+  // agent's current selection — the startup seed and the resume path — and
+  // falls back to the adapter's disclosed default.
+  const refreshEffortBadge = (event?: SessionEvent): void => {
+    if (view.status === undefined) return
+    const effort = event === undefined
+      ? agent.model.current()?.reasoningEffort
+      : (event.data as { reasoningEffort?: unknown }).reasoningEffort
+    const shown = typeof effort === 'string' ? effort : resolvedDefaultEffort
+    if (view.status.effort === shown) return
+    if (shown === undefined) {
+      const { effort: _dropped, ...rest } = view.status
+      view = { ...view, status: rest }
+      return
+    }
+    view = { ...view, status: { ...view.status, effort: shown } }
+  }
   // A preset switch appends its identity event and each changed knob event in
   // one synchronous burst; re-reading the badge per event would paint an
   // in-between derivation — leaving `auto`, the knobs (full sandbox + ask)
@@ -1150,6 +1299,9 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
   refreshPermissionBadge()
   // Seed the plan badge from the log projection the same way.
   refreshPlanBadge()
+  // Seed the effort badge from the agent-owned selection (a resume re-recorded
+  // the durable effort; a fresh session falls back to the startup value).
+  refreshEffortBadge()
   // Seed the goal strip from the durable log too: a resumed session with a
   // current goal shows its objective and round progress immediately, starting
   // disarmed until an activation event says otherwise.
@@ -1202,6 +1354,7 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
     trackUsage(event)
     if (PERMISSION_KNOB_EVENTS.has(event.type as string)) queuePermissionBadge(event)
     if (PLAN_BADGE_EVENTS.has(event.type as string)) refreshPlanBadge()
+    if ((event.type as string) === 'model/selection') refreshEffortBadge(event)
     // A team event moves the authoritative agentTeam projection, so re-read it
     // before the render below to keep the team panel current.
     if ((event.type as string).startsWith('team/')) refreshTeam()
@@ -1415,6 +1568,22 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
   /** Local seq source for transcript-injected notices: negative, so it never
    *  collides with a session seq (the live-stream frames' precedent). */
   let localNoticeSeq = 0
+  /** Append one session-local notice frame to the transcript: UI feedback,
+   *  never log material, so a resume does not replay it. New arrivals push it
+   *  up the stream like any other frame. */
+  const injectLocalNotice = (summary: string, tone?: 'warn'): void => {
+    localNoticeSeq -= 1
+    state = {
+      ...state,
+      frames: [...state.frames, {
+        kind: 'notice' as const,
+        seq: localNoticeSeq,
+        summary,
+        ...(tone === undefined ? {} : { tone }),
+      }],
+    }
+    scheduleRender(true)
+  }
   // The exit is one-shot: rapid key chords (or keys landing while the tree
   // tears down after exit) must not start a second flush against a session
   // the teardown has already detached, and must not enqueue work on an agent
@@ -1443,30 +1612,24 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
         agent.steer(message)
         return
       }
+      if (text.trim() === '/effort') {
+        // A bare /effort opens the picker popup — the popup is the feedback,
+        // so the line never enters the command runtime (no ❯ echo, no log
+        // record): the Claude Code parity choice. `/effort <level>` keeps
+        // running through the registry below.
+        void openEffortPicker()
+        return
+      }
       const commands: CommandRuntime | undefined = ctx.get('commands')
       if (commands === undefined) {
         setOverlay({ kind: 'notice', text: `no command runtime: ${text} was not dispatched` })
         return
       }
       void commands.execute(agent, text, [], commandSignal).then((execution) => {
-        if (execution === undefined) {
-          // The slip joins the transcript as a local notice frame — rendered
-          // like body content, pushed up by whatever arrives next, and never
-          // cleared by a later submission (a chrome-band overlay would be).
-          // It is session-local by design: UI feedback, not log material, so
-          // a resume does not replay it.
-          localNoticeSeq -= 1
-          state = {
-            ...state,
-            frames: [...state.frames, {
-              kind: 'notice' as const,
-              seq: localNoticeSeq,
-              summary: `Unknown command: ${text}`,
-              tone: 'warn' as const,
-            }],
-          }
-          scheduleRender(true)
-        }
+        // The slip joins the transcript as a local notice frame — rendered
+        // like body content, pushed up by whatever arrives next, and never
+        // cleared by a later submission (a chrome-band overlay would be).
+        if (execution === undefined) injectLocalNotice(`Unknown command: ${text}`, 'warn')
       })
     },
     onChildPrompt: (text) => {
@@ -1555,6 +1718,30 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
     onCyclePermission: () => {
       if (exiting) return
       cyclePermission()
+    },
+    onEffortMove: (delta) => {
+      if (exiting || effortPickerState === undefined) return
+      const selected = Math.min(Math.max(0, effortPickerState.selected + delta), effortPickerState.levels.length - 1)
+      if (selected === effortPickerState.selected) return
+      effortPickerState = { ...effortPickerState, selected }
+      publishEffortPicker()
+    },
+    onEffortConfirm: () => {
+      if (exiting || effortPickerState === undefined) return
+      const pick = effortPickerState.levels[effortPickerState.selected]
+      effortPickerState = undefined
+      publishEffortPicker()
+      if (pick === undefined) return
+      const base = agent.model.current() ?? selection
+      // Durable switch: the appended model/selection event moves the badge,
+      // and the transcript keeps its own session-local account of it.
+      agent.model.select({ provider: base.provider, model: base.model, reasoningEffort: pick.id })
+      injectLocalNotice(`Reasoning effort set to: ${pick.id}`)
+    },
+    onEffortCancel: () => {
+      if (exiting || effortPickerState === undefined) return
+      effortPickerState = undefined
+      publishEffortPicker()
     },
     onPanelOpen: () => {
       if (exiting) return

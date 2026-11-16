@@ -7,6 +7,7 @@
 
 export { installModelSelection } from '@deepseek-ai/dsh-agent'
 export { createUserMessage } from '@deepseek-ai/dsh-llm'
+export { ReasoningEffortId } from '@deepseek-ai/dsh-llm/brand'
 export { SessionId } from '@deepseek-ai/dsh-session'
 export { parseCmdline } from '@deepseek-ai/dsh-cmdline'
 export { default as z } from '@deepseek-ai/schemastery'

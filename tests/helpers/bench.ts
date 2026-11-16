@@ -7,7 +7,7 @@
 
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
-import type { Agent, AgentHandle, CreateAgentOptions, Inbox, ResumeAgentOptions } from '@deepseek-ai/dsh-agent'
+import type { Agent, AgentHandle, CreateAgentOptions, Inbox, ModelSelection, ResumeAgentOptions } from '@deepseek-ai/dsh-agent'
 import AgentDefaultModelConfig from '@deepseek-ai/dsh-agent-default-model'
 import { createAssistantMessage } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
@@ -132,9 +132,30 @@ export async function bench(script: Script): Promise<BenchHandle> {
       cancel: () => {},
       runMaintenance: () => Promise.reject(new Error('not used')),
       send: () => {},
-      // The 0.2.2 agent owns its model choice; the scripted agent keeps the
-      // choice stateless (the driver's setup re-selects on resume).
-      model: { current: () => undefined, select: () => {} },
+      // The 0.2.2 agent owns its model choice; the scripted agent mimics the
+      // real AgentModel's durable-record contract at the level the driver
+      // depends on: select() appends a `model/selection` session event (the
+      // payload IS the selection) and current() reads the last one back,
+      // falling back to the live options until something is recorded.
+      model: (() => {
+        let selected: ModelSelection | undefined
+        const fallback = agentOptions?.provider !== undefined && agentOptions?.model !== undefined
+          ? {
+            provider: agentOptions.provider,
+            model: agentOptions.model,
+            ...agentOptions.reasoningEffort === undefined ? {} : { reasoningEffort: agentOptions.reasoningEffort },
+          }
+          : undefined
+        return {
+          current: () => selected ?? fallback,
+          select: (next: ModelSelection) => {
+            if (selected !== undefined && selected.provider === next.provider
+              && selected.model === next.model && selected.reasoningEffort === next.reasoningEffort) return
+            selected = next
+            ;(session.append as unknown as (type: string, data: unknown) => void)('model/selection', next)
+          },
+        }
+      })(),
       followup: (message: UserMessage) => {
         agent.inbox.append('next-turn', message)
         idle = Promise.resolve().then(() => script.afterPrompt(ctx, session, message, ++turn))
@@ -187,6 +208,9 @@ export async function bench(script: Script): Promise<BenchHandle> {
     onChildPrompt: () => {},
     onJobKill: () => {},
     onQuestionAnswer: () => {},
+    onEffortMove: () => {},
+    onEffortConfirm: () => {},
+    onEffortCancel: () => {},
   }
   let resolveBound: () => void = () => {}
   const bound = new Promise<void>((resolve) => { resolveBound = resolve })

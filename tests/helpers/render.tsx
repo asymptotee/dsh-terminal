@@ -37,6 +37,9 @@ export function noopHandlers(): InputHandlers {
     onJobKill: () => {},
     onQuestionAnswer: () => {},
     onCyclePermission: () => {},
+    onEffortMove: () => {},
+    onEffortConfirm: () => {},
+    onEffortCancel: () => {},
   }
 }
 
