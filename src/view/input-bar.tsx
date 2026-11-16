@@ -330,18 +330,33 @@ export function InputBar({
       handlers.onCyclePermission()
       return
     }
-    // The open slash menu owns the arrows, Tab/Enter (complete, never commit —
-    // executing takes a second Enter on the completed line), and Esc (dismiss
-    // the menu only; the buffer stays and the turn is not interrupted). Every
-    // other key falls through to normal editing, which re-derives the menu.
+    // The open slash menu owns the arrows, Tab (complete the selected row to
+    // type its arguments), Enter (execute the selected command at once), and
+    // Esc (dismiss the menu only; the buffer stays and the turn is not
+    // interrupted). Every other key falls through to normal editing, which
+    // re-derives the menu.
     const matches = commandMatchesFor(bufferRef.current.value)
     if (matches.length > 0 && !menuHiddenRef.current) {
       if (key.escape) { setMenuHidden(true); return }
       if (key.upArrow) { setMenuIndex(Math.max(0, menuIndexRef.current - 1)); return }
       if (key.downArrow) { setMenuIndex(Math.min(matches.length - 1, menuIndexRef.current + 1)); return }
-      if (key.tab || key.return) {
+      if (key.tab) {
         const pick = matches[Math.min(menuIndexRef.current, matches.length - 1)]
         if (pick !== undefined) setBuffer({ value: `/${pick.name} `, cursor: pick.name.length + 2 })
+        return
+      }
+      if (key.return) {
+        // Enter executes the arrow-selected command: the commit runs exactly
+        // as if the same line had been typed and submitted by hand — history
+        // entry, the ❯ echo, the ⎿ outcome, all identical.
+        const pick = matches[Math.min(menuIndexRef.current, matches.length - 1)]
+        if (pick === undefined) return
+        const text = `/${pick.name}`
+        historyRef.current = [...historyRef.current, text]
+        setHistoryIndex(-1)
+        setBuffer({ value: '', cursor: 0 })
+        handlers.onCommit(text)
+        onScroll?.({ type: 'bottom' })
         return
       }
     }

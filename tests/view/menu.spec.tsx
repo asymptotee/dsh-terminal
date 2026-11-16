@@ -86,15 +86,27 @@ describe('slash command completion menu', () => {
     expect(frame).not.toContain('Switch the permission preset')
   })
 
-  it('completes on Enter without committing while the menu is open', async () => {
+  it('executes the selected command on Enter while the menu is open', async () => {
     const handlers = spyHandlers()
     const { lastFrame, stdin } = renderApp(<TuiApp state={state([])} handlers={handlers} view={commandView} />)
     stdin.write('/per')
     await settled()
     stdin.write('\r')
     await settled()
-    expect(handlers.onCommit).not.toHaveBeenCalled()
-    expect(lastFrame() ?? '').toContain('❯ /permission █')
+    expect(handlers.onCommit).toHaveBeenCalledWith('/permission')
+    expect(lastFrame() ?? '').toContain('❯ █')
+  })
+
+  it('executes the arrow-selected row on Enter', async () => {
+    const handlers = spyHandlers()
+    const { stdin } = renderApp(<TuiApp state={state([])} handlers={handlers} view={commandView} />)
+    stdin.write('/')
+    await settled()
+    stdin.write('\x1b[B') // Down: effort -> permission
+    await settled()
+    stdin.write('\r')
+    await settled()
+    expect(handlers.onCommit).toHaveBeenCalledWith('/permission')
   })
 
   it('dismisses on Esc without interrupting, keeps the buffer, and reopens on the next edit', async () => {
