@@ -236,6 +236,7 @@ function CommandRow({ frame, expandedOutput, width }: {
         ? <IndentedBlock
           text={done.text ?? 'command failed'}
           expanded={expandedOutput}
+          bright
           {...(done.kind === 'error' ? { error: true } : {})}
         />
         : null}
@@ -430,8 +431,8 @@ function ToolResultView({
   }
 }
 
-/** The Claude Code-style output block: one `⎿` connector, then aligned lines, truncated with an expand hint; a failed result renders red instead of dim. */
-function IndentedBlock({ text, expanded, error }: { text: string; expanded: boolean; error?: boolean }): React.JSX.Element {
+/** The Claude Code-style output block: one `⎿` connector, then aligned lines, truncated with an expand hint; a failed result renders red instead of dim, and a `bright` success renders white (the slash commands' results — tool outputs and notice bodies stay dim). */
+function IndentedBlock({ text, expanded, error, bright }: { text: string; expanded: boolean; error?: boolean; bright?: boolean }): React.JSX.Element {
   const lines = text.split('\n')
   const hidden = lines.length - TRUNCATED_OUTPUT_LINES
   // The `⎿` connector is always dim across the whole project, whether or not
@@ -439,7 +440,9 @@ function IndentedBlock({ text, expanded, error }: { text: string; expanded: bool
   const row = (line: string, index: number): React.JSX.Element => (
     <Text key={index}>
       <Text dimColor>{index === 0 ? '  ⎿  ' : '     '}</Text>
-      {error ? <Text color="red">{line}</Text> : <Text dimColor>{line}</Text>}
+      {error
+        ? <Text color="red">{line}</Text>
+        : bright ? <Text color="#ffffff">{line}</Text> : <Text dimColor>{line}</Text>}
     </Text>
   )
   if (!expanded && hidden > 0) {
