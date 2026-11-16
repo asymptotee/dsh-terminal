@@ -431,11 +431,15 @@ export function TuiApp({
   const { columns, rows: termRows } = useTerminalSize()
   const rows = viewportRows ?? termRows
   const frames = state.frames
-  // The arrow-browsed history: the session's submitted user lines, so a
-  // resumed session restores its past inputs from the replayed log.
-  const history = frames
-    .filter((frame): frame is Extract<Frame, { kind: 'user' }> => frame.kind === 'user')
-    .map(frame => frame.text)
+  // The arrow-browsed history: the session's submitted lines — user messages
+  // and executed slash commands, rebuilt exactly as the CommandRow echoes
+  // them (`/name` plus the verbatim args, absent when recordInput is off) —
+  // so a resumed session restores its past inputs from the replayed log.
+  const history = frames.flatMap(frame => {
+    if (frame.kind === 'user') return [frame.text]
+    if (frame.kind === 'command') return [`/${frame.name}${frame.args ?? ''}`]
+    return []
+  })
   const subagents = view?.subagents ?? []
   const opened = view?.openSubagent
   // The opened job's full-screen detail owns the transcript window (and the

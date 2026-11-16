@@ -100,6 +100,24 @@ describe('InputBar key handling', () => {
     expect(lastFrame()).toContain('❯ third█')
   })
 
+  it('restores executed commands into the arrow history in log order', async () => {
+    const frames: Frame[] = [
+      { kind: 'user', seq: 1, text: 'first' },
+      { kind: 'command', seq: 2, commandId: 'c1', name: 'rename', args: ' nihao' },
+      { kind: 'user', seq: 3, text: 'second' },
+    ]
+    const { lastFrame, stdin } = renderApp(<TuiApp state={state(frames)} handlers={noopHandlers()} />)
+    stdin.write('\x1b[A')
+    await settled()
+    expect(lastFrame()).toContain('❯ second█')
+    stdin.write('\x1b[A')
+    await settled()
+    expect(lastFrame()).toContain('❯ /rename nihao█')
+    stdin.write('\x1b[A')
+    await settled()
+    expect(lastFrame()).toContain('❯ first█')
+  })
+
   it('recalls submitted lines through the history arrows', async () => {
     const { lastFrame, stdin } = renderApp(<TuiApp state={state([])} handlers={noopHandlers()} />)
     stdin.write('first')
