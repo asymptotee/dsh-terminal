@@ -467,6 +467,8 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
     levels: readonly { id: ReasoningEffortId; name?: string; description?: string }[]
     selected: number
   } | undefined
+  /** Settles the open picker's `/effort` command with its ⎿ result text. */
+  let effortPickerSettle: ((text: string) => void) | undefined
   // Presentation fallbacks for well-known effort ids: the deepseek adapter
   // discloses descriptions with its levels, but other adapters (pi-ai) hand
   // over id + name only, which would leave the picker's description row
@@ -948,17 +950,17 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
   // The terminal's own `/effort` command: upstream ships no effort switch, so
   // the driver registers one against the agent-owned model selection. The
   // switch is durable — select() appends a logged `model/selection` event,
-  // restored on resume — and the footer badge follows that same event. No
-  // args reports the current effort and the adapter's disclosed levels;
-  // `off` clears back to the model default. recordInput defaults on, so the
-  // line lands in the command history like any other.
+  // restored on resume — and the footer badge follows that same event. Bare
+  // /effort opens the picker popup; `<level>` sets directly and `off` clears
+  // back to the model default. It rides the runtime like any other command:
+  // logged ❯ echo, log-restored history, resume-proof.
   const commandsRegistry: CommandRuntime | undefined = ctx.get('commands')
   if (typeof commandsRegistry?.register === 'function') {
     commandsRegistry.register({
       name: 'effort',
       description: 'Set the reasoning effort',
       input: { hint: '<level>|off' },
-      handler: async ({ agent: target, rawInput }) => {
+      handler: async ({ agent: target, rawInput, signal }) => {
         const wanted = rawInput.trim()
         const current = target.model.current()
         const info = (await ctx.get('llm')
@@ -969,11 +971,17 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
         const efforts = info?.reasoning?.efforts ?? []
         const levels = efforts.map(level => level.id).join(' · ')
         if (wanted === '') {
-          const shown = current?.reasoningEffort ?? resolvedDefaultEffort ?? 'model default'
-          return {
-            kind: 'success',
-            text: levels === '' ? `Reasoning effort: ${shown}` : `Reasoning effort: ${shown} · available: ${levels}`,
-          }
+          // Bare /effort opens the picker: the runtime has already logged
+          // command/run, so the ❯ echo and the history entry stand like any
+          // other command's. The handler settles only when the user does — or
+          // when the dispatch's signal aborts (an exit mid-popup settles the
+          // command as cancelled instead of stranding it) — so the ⎿ result
+          // carries the choice and rides the log like every other command's
+          // outcome. A missing disclosure is the command's error result.
+          const result = await openEffortPicker(signal)
+          return result === undefined
+            ? { kind: 'error', text: 'No effort levels disclosed for this model' }
+            : { kind: 'success', text: result }
         }
         const clearing = wanted === 'off' || wanted === 'none' || wanted === 'default'
         const match = efforts.find(level => level.id === wanted || level.name === wanted)
@@ -986,7 +994,7 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
           : { provider: current.provider, model: current.model, reasoningEffort: match?.id ?? brandEffortId(wanted) })
         return {
           kind: 'success',
-          text: clearing ? 'Reasoning effort cleared (model default).' : `Reasoning effort set to: ${match?.id ?? wanted}`,
+          text: clearing ? 'Reasoning effort cleared (model default).' : `Reasoning effort set to ${match?.id ?? wanted}`,
         }
       },
     })
@@ -1085,7 +1093,10 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
     view = slice === undefined ? rest : { ...rest, effortPicker: slice }
     scheduleRender(true)
   }
-  const openEffortPicker = async (): Promise<void> => {
+  /** Open the picker and settle only when the user — or an abort — does: the
+   *  returned text becomes the `/effort` command's ⎿ result, logged with it.
+   *  `undefined` means it could not open (no disclosed levels). */
+  const openEffortPicker = async (signal?: AbortSignal): Promise<string | undefined> => {
     let levels = effortLevelsCache
     if (levels === undefined) {
       const info = (await ctx.get('llm')
@@ -1096,12 +1107,14 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
       effortLevelsCache = info?.reasoning?.efforts
       levels = effortLevelsCache
     }
-    if (levels === undefined || levels.length === 0) {
-      injectLocalNotice('No effort levels disclosed for this model', 'warn')
-      return
-    }
+    if (levels === undefined || levels.length === 0) return undefined
     const currentId = agent.model.current()?.reasoningEffort ?? resolvedDefaultEffort as ReasoningEffortId | undefined
     const currentIndex = currentId === undefined ? -1 : levels.findIndex(level => level.id === currentId)
+    // A second /effort while one picker is pending cannot happen through the
+    // keys (the popup owns them), but guard the settle slot anyway: settle the
+    // old command as cancelled BEFORE installing this picker, so the old
+    // close cannot clobber the new state.
+    effortPickerSettle?.('Cancelled')
     effortPickerState = {
       // Backfill the description row for adapters that disclose none.
       levels: levels.map(level => {
@@ -1112,6 +1125,22 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
       selected: currentIndex === -1 ? 0 : currentIndex,
     }
     publishEffortPicker()
+    return new Promise<string>((resolve) => {
+      const settle = (text: string): void => {
+        // A newer picker replaced the slot, or confirm/cancel already settled.
+        if (effortPickerSettle !== settle) return
+        effortPickerSettle = undefined
+        effortPickerState = undefined
+        publishEffortPicker()
+        resolve(text)
+      }
+      effortPickerSettle = settle
+      // An aborted dispatch (a graceful exit mid-popup, or the dispatcher
+      // cancelling) closes the picker and settles Cancelled — the command/run
+      // never strands without its command/done.
+      if (signal?.aborted === true) { settle('Cancelled'); return }
+      signal?.addEventListener('abort', () => settle('Cancelled'), { once: true })
+    })
   }
   const setOverlay = (overlay: Overlay | undefined): void => {
     const picker = effortPickerSlice()
@@ -1563,8 +1592,11 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
   })
 
   // Command executions run against the session's command registry; an
-  // unresolved slash line is a notice, never a model message.
-  const commandSignal = new AbortController().signal
+  // unresolved slash line is a notice, never a model message. The controller
+  // is kept so the exit can abort in-flight dispatches (an interactive
+  // command must settle, not strand its command/run without a done).
+  const commandAbort = new AbortController()
+  const commandSignal = commandAbort.signal
   /** Local seq source for transcript-injected notices: negative, so it never
    *  collides with a session seq (the live-stream frames' precedent). */
   let localNoticeSeq = 0
@@ -1610,14 +1642,6 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
           scheduleRender(true)
         }
         agent.steer(message)
-        return
-      }
-      if (text.trim() === '/effort') {
-        // A bare /effort opens the picker popup — the popup is the feedback,
-        // so the line never enters the command runtime (no ❯ echo, no log
-        // record): the Claude Code parity choice. `/effort <level>` keeps
-        // running through the registry below.
-        void openEffortPicker()
         return
       }
       const commands: CommandRuntime | undefined = ctx.get('commands')
@@ -1733,15 +1757,18 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
       publishEffortPicker()
       if (pick === undefined) return
       const base = agent.model.current() ?? selection
-      // Durable switch: the appended model/selection event moves the badge,
-      // and the transcript keeps its own session-local account of it.
+      // Durable switch: the appended model/selection event moves the badge;
+      // the pending /effort command's ⎿ result reports the choice.
       agent.model.select({ provider: base.provider, model: base.model, reasoningEffort: pick.id })
-      injectLocalNotice(`Reasoning effort set to: ${pick.id}`)
+      effortPickerSettle?.(`Reasoning effort set to ${pick.id}`)
+      effortPickerSettle = undefined
     },
     onEffortCancel: () => {
       if (exiting || effortPickerState === undefined) return
       effortPickerState = undefined
       publishEffortPicker()
+      effortPickerSettle?.('Cancelled')
+      effortPickerSettle = undefined
     },
     onPanelOpen: () => {
       if (exiting) return
@@ -1967,6 +1994,10 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
       if (exiting) return
       exiting = true
       clearInterval(panelTick)
+      // Abort in-flight command dispatches: an interactive command waiting on
+      // its popup settles as Cancelled, so its command/done lands in the log
+      // the flush below persists — no stranded command/run.
+      commandAbort.abort()
       void (async () => {
         // Durability is best-effort at graceful exit: a persistence or
         // telemetry listener that never settles must not strand the process

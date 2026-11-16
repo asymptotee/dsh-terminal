@@ -35,7 +35,7 @@ function commandsFake() {
         description: def.description,
         ...(def.input === undefined ? {} : { input: def.input }),
       })),
-      execute: vi.fn(async () => undefined),
+      execute: vi.fn(async (_agent: unknown, _line: string) => ({ commandId: 'c-exec', result: { kind: 'success' } })),
     },
   }
 }
@@ -52,16 +52,15 @@ describe('effort command', () => {
     ])
     const invoke = (rawInput: string): Promise<{ kind: string; text?: string }> =>
       effort!.handler({ agent: test.agent, rawInput, attachments: [], signal: new AbortController().signal, commandId: 'c1' })
-    // Without args it reports the current state (no recorded selection, no
-    // adapter default in this bench: the model default).
-    expect(await invoke('')).toEqual({ kind: 'success', text: 'Reasoning effort: model default' })
-    expect(await invoke(' high ')).toEqual({ kind: 'success', text: 'Reasoning effort set to: high' })
+    // Bare /effort opens the picker; this bench discloses no levels, so the
+    // handler settles as the command's error instead.
+    expect(await invoke('')).toEqual({ kind: 'error', text: 'No effort levels disclosed for this model' })
+    expect(await invoke(' high ')).toEqual({ kind: 'success', text: 'Reasoning effort set to high' })
     await settle()
     // The switch is durable (the scripted model appended `model/selection`)
     // and the badge follows the event.
     expect(test.agent.model.current()?.reasoningEffort).toBe('high')
     expect(test.views.at(-1)?.status?.effort).toBe('high')
-    expect(await invoke('')).toEqual({ kind: 'success', text: 'Reasoning effort: high' })
     await test.ctx.fiber.dispose()
   })
 
@@ -97,9 +96,14 @@ describe('effort command', () => {
     const effort = commands.registered.find(def => def.name === 'effort')!
     const invoke = (rawInput: string): Promise<{ kind: string; text?: string }> =>
       effort.handler({ agent: test.agent, rawInput, attachments: [], signal: new AbortController().signal, commandId: 'c1' })
-    // The resolved adapter default seeds both the report and the badge.
-    expect(await invoke('')).toEqual({ kind: 'success', text: 'Reasoning effort: low · available: low · high' })
+    // The resolved adapter default seeds the badge; the bare call opens the
+    // picker and settles only when the user does.
+    const pendingBare = invoke('')
+    await settle()
+    expect(test.views.at(-1)?.effortPicker).toBeDefined()
     expect(test.views.at(-1)?.status?.effort).toBe('low')
+    test.handlers.onEffortCancel()
+    expect(await pendingBare).toEqual({ kind: 'success', text: 'Cancelled' })
     // An unknown level is rejected without touching the selection.
     expect(await invoke('ultra')).toEqual({ kind: 'error', text: 'Unknown effort: ultra · available: low · high' })
     expect(test.agent.model.current()?.reasoningEffort).toBeUndefined()
@@ -109,11 +113,18 @@ describe('effort command', () => {
 })
 
 describe('effort picker', () => {
+  /** Invoke the registered handler the way the runtime does — the returned
+   *  promise settles only when the user confirms or cancels the popup. */
+  async function openViaHandler(test: Awaited<ReturnType<typeof bench>>, commands: ReturnType<typeof commandsFake>): Promise<{ kind: string; text?: string }> {
+    const effort = commands.registered.find(def => def.name === 'effort')!
+    return await effort.handler({ agent: test.agent, rawInput: '', attachments: [], signal: new AbortController().signal, commandId: 'c-open' })
+  }
+
   function llmFake(efforts: readonly { id: string; description?: string }[]) {
     return { resolveModelInfo: async () => ({ reasoning: { efforts } }) }
   }
 
-  it('a bare /effort opens the picker instead of running the registry', async () => {
+  it('routes a bare /effort through the runtime like any other command', async () => {
     const commands = commandsFake()
     const test = await bench({
       commands: commands.service,
@@ -122,7 +133,14 @@ describe('effort picker', () => {
     })
     test.handlers.onCommit('/effort')
     await settle()
-    expect(commands.service.execute).not.toHaveBeenCalled()
+    // The line rides the registry — logged ❯ echo, log-restored history,
+    // resume-proof — exactly like the other commands.
+    expect(commands.service.execute).toHaveBeenCalledTimes(1)
+    expect(commands.service.execute.mock.calls[0]?.[1]).toBe('/effort')
+    // The registered handler is what opens the popup; it settles only when
+    // the user confirms or cancels.
+    const pending = openViaHandler(test, commands)
+    await settle()
     const picker = test.views.at(-1)?.effortPicker
     expect(picker).toBeDefined()
     expect(picker?.levels).toEqual([
@@ -130,6 +148,8 @@ describe('effort picker', () => {
       { id: 'high', description: 'Deep and slow' },
     ])
     expect(picker?.selected).toBe(0)
+    test.handlers.onEffortCancel()
+    expect(await pending).toEqual({ kind: 'success', text: 'Cancelled' })
     await test.ctx.fiber.dispose()
   })
 
@@ -142,6 +162,8 @@ describe('effort picker', () => {
     })
     test.handlers.onCommit('/effort')
     await settle()
+    const pending = openViaHandler(test, commands)
+    await settle()
     test.handlers.onEffortMove(1)
     expect(test.views.at(-1)?.effortPicker?.selected).toBe(1)
     test.handlers.onEffortMove(5) // clamped at the last level
@@ -152,11 +174,10 @@ describe('effort picker', () => {
     expect(test.views.at(-1)?.effortPicker).toBeUndefined()
     expect(test.agent.model.current()?.reasoningEffort).toBe('high')
     expect(test.views.at(-1)?.status?.effort).toBe('high')
-    // The transcript keeps its own account of the switch.
-    expect(test.states.at(-1)!.frames.at(-1)).toMatchObject({
-      kind: 'notice',
-      summary: 'Reasoning effort set to: high',
-    })
+    // The choice rides the pending command's ⎿ result — no separate local
+    // notice frame in the transcript.
+    expect(await pending).toEqual({ kind: 'success', text: 'Reasoning effort set to high' })
+    expect(test.states.at(-1)!.frames.some(frame => frame.kind === 'notice')).toBe(false)
     await test.ctx.fiber.dispose()
   })
 
@@ -169,27 +190,53 @@ describe('effort picker', () => {
     })
     test.handlers.onCommit('/effort')
     await settle()
+    const pending = openViaHandler(test, commands)
+    await settle()
     expect(test.views.at(-1)?.effortPicker).toBeDefined()
     test.handlers.onEffortCancel()
+    expect(await pending).toEqual({ kind: 'success', text: 'Cancelled' })
     expect(test.views.at(-1)?.effortPicker).toBeUndefined()
     expect(test.agent.model.current()?.reasoningEffort).toBeUndefined()
     test.handlers.onCommit('/effort high')
     await settle()
-    expect(commands.service.execute).toHaveBeenCalledTimes(1)
+    // Both lines ride the runtime: the bare one (whose handler opened the
+    // popup) and the direct set.
+    expect(commands.service.execute).toHaveBeenCalledTimes(2)
+    expect(commands.service.execute.mock.calls[1]?.[1]).toBe('/effort high')
     expect(test.views.at(-1)?.effortPicker).toBeUndefined()
     await test.ctx.fiber.dispose()
   })
 
-  it('reports a missing disclosure as a warn notice instead of opening', async () => {
-    const test = await bench({ afterPrompt: () => {} })
-    test.handlers.onCommit('/effort')
-    await settle()
-    expect(test.views.at(-1)?.effortPicker).toBeUndefined()
-    expect(test.states.at(-1)!.frames.at(-1)).toMatchObject({
-      kind: 'notice',
-      summary: 'No effort levels disclosed for this model',
-      tone: 'warn',
+  it('settles as Cancelled when the dispatch signal aborts mid-popup', async () => {
+    const commands = commandsFake()
+    const test = await bench({
+      commands: commands.service,
+      llm: llmFake([{ id: 'low' }, { id: 'high' }]),
+      afterPrompt: () => {},
     })
+    const effort = commands.registered.find(def => def.name === 'effort')!
+    const controller = new AbortController()
+    const pending = effort.handler({ agent: test.agent, rawInput: '', attachments: [], signal: controller.signal, commandId: 'c1' })
+    await settle()
+    expect(test.views.at(-1)?.effortPicker).toBeDefined()
+    // The abort (a graceful exit mid-popup, or the dispatcher cancelling)
+    // settles the command and closes the picker with it.
+    controller.abort()
+    await settle()
+    expect(await pending).toEqual({ kind: 'success', text: 'Cancelled' })
+    expect(test.views.at(-1)?.effortPicker).toBeUndefined()
+    expect(test.agent.model.current()?.reasoningEffort).toBeUndefined()
+    await test.ctx.fiber.dispose()
+  })
+
+  it('reports a missing disclosure as the command error instead of opening', async () => {
+    const commands = commandsFake()
+    const test = await bench({ commands: commands.service, afterPrompt: () => {} })
+    const effort = commands.registered.find(def => def.name === 'effort')!
+    const result = await effort.handler({ agent: test.agent, rawInput: '', attachments: [], signal: new AbortController().signal, commandId: 'c1' })
+    expect(result).toEqual({ kind: 'error', text: 'No effort levels disclosed for this model' })
+    expect(test.views.at(-1)?.effortPicker).toBeUndefined()
+    expect(test.states.at(-1)!.frames.some(frame => frame.kind === 'notice')).toBe(false)
     await test.ctx.fiber.dispose()
   })
   it('backfills well-known level descriptions the adapter did not disclose', async () => {
@@ -201,11 +248,15 @@ describe('effort picker', () => {
     })
     test.handlers.onCommit('/effort')
     await settle()
+    const pending = openViaHandler(test, commands)
+    await settle()
     expect(test.views.at(-1)?.effortPicker?.levels).toEqual([
       { id: 'off', description: 'Use for simple tasks that do not need reasoning.' },
       { id: 'medium', description: 'A balanced choice for everyday tasks.' },
       { id: 'turbo' }, // an unknown id keeps the row blank rather than inventing copy
     ])
+    test.handlers.onEffortCancel()
+    await pending
     await test.ctx.fiber.dispose()
   })
 })
