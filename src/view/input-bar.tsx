@@ -483,6 +483,10 @@ export function InputBar({
   })
 
   const { value, cursor } = buffer
+  // A slash buffer may tint its command token with the shared light blue (the
+  // line renderer gates on a full registered-name match); the main editor
+  // only — a child's continuation prompt is not a command line.
+  const commandInput = focusMode === 'input' && value.startsWith('/')
   const lines = value.split('\n')
   const beforeCursor = value.slice(0, cursor)
   const cursorLine = beforeCursor.split('\n').length - 1
@@ -553,21 +557,46 @@ export function InputBar({
           </Text>
         )
         : lines.map((line, index) => {
-          const marked = caretVisible && index === cursorLine
-            ? (
+          const hasCaret = caretVisible && index === cursorLine
+          // The command token (the `/name`, up to the first whitespace) wears
+          // the shared light blue once it completes a registered command's
+          // name — an unfinished prefix or an unknown name stays body-colored,
+          // and the arguments always do. Only the buffer's first line can
+          // carry the token (a name never spans a newline). The caret takes
+          // the tint of the segment it sits in; the ❯ marker stays outside.
+          const tokenEnd = commandInput && index === 0 ? (/\s/.exec(line)?.index ?? line.length) : -1
+          const tinted = tokenEnd >= 0 && commands.some(command => line.slice(1, tokenEnd) === command.name)
+          const blue = (node: React.ReactNode): React.ReactNode => (
+            node === '' || node === null ? null : <Text color="#a5d8ff">{node}</Text>
+          )
+          let body: React.ReactNode
+          if (!hasCaret) {
+            body = tinted
+              ? <>{blue(line.slice(0, tokenEnd))}{line.slice(tokenEnd)}</>
+              : line
+          } else if (!tinted || cursorColumn > tokenEnd) {
+            // The caret sits in the body-colored stretch: a plain line, an
+            // untinted token, or a command's arguments past the token.
+            const token = tinted ? blue(line.slice(0, tokenEnd)) : null
+            const plainBefore = tinted ? line.slice(tokenEnd, cursorColumn) : line.slice(0, cursorColumn)
+            body = <>{token}{plainBefore}{caretCell}{line.slice(cursorColumn)}</>
+          } else {
+            // The caret sits inside (or right at the end of) the blue token.
+            body = (
               <>
-                {line.slice(0, cursorColumn)}
-                {caretCell}
-                {line.slice(cursorColumn)}
+                {blue(line.slice(0, cursorColumn))}
+                <Text color="#a5d8ff">{caretCell}</Text>
+                {blue(line.slice(cursorColumn, tokenEnd))}
+                {line.slice(tokenEnd)}
               </>
             )
-            : line
+          }
           return (
             <Text key={index}>
               {/* The prompt marker leads the first line in the body color; later
                   lines indent two columns so every line's text aligns. */}
               {index === 0 ? <Text>❯ </Text> : '  '}
-              {marked}
+              {body}
             </Text>
           )
         })}
