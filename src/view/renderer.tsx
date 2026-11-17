@@ -136,6 +136,9 @@ export function createInkRenderer(): TuiRenderer {
     onEffortMove: () => {},
     onEffortConfirm: () => {},
     onEffortCancel: () => {},
+    onModelMove: () => {},
+    onModelConfirm: () => {},
+    onModelCancel: () => {},
     onCyclePermission: () => {},
     onChildPrompt: () => {},
     onJobKill: () => {},
@@ -806,6 +809,7 @@ export function TuiApp({
           panelAvailable={subagents.length > 0 || (view?.team?.members.length ?? 0) > 0 || workflowVisible || jobsVisible}
           commands={view?.commands ?? []}
           {...(view?.effortPicker === undefined ? {} : { effortPicker: view.effortPicker })}
+          {...(view?.modelPicker === undefined ? {} : { modelPicker: view.modelPicker })}
           {...(view?.status === undefined ? {} : { status: view.status })}
           {...(openJob !== undefined
             ? {}

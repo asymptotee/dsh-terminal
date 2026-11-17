@@ -12,7 +12,7 @@ import stringWidth from 'string-width'
 import type { ScrollAction } from './terminal.ts'
 import { clickFromInput, containsMouseReport, moveFromInput, wheelDeltaFromInput } from './terminal.ts'
 import type { ClickPosition } from './terminal.ts'
-import type { CommandInfo, EffortPickerView, InputHandlers, StatusInfo } from './view-types.ts'
+import type { CommandInfo, EffortPickerView, InputHandlers, ModelOption, ModelPickerView, StatusInfo } from './view-types.ts'
 import { padToWidth, truncateToWidth } from './text-helpers.ts'
 import { useTerminalWidth } from './use-terminal.ts'
 import { StatusBar } from './chrome.tsx'
@@ -58,6 +58,7 @@ export function InputBar({
   panelAvailable = false,
   commands = [],
   effortPicker,
+  modelPicker,
   status,
   statusHint,
 }: {
@@ -129,6 +130,8 @@ export function InputBar({
   commands?: readonly CommandInfo[]
   /** The effort picker popup's state; present while it floats above the box. */
   effortPicker?: EffortPickerView
+  /** The model-route picker popup's state; present while it floats above the box. */
+  modelPicker?: ModelPickerView
   /** The footer facts; the completion menu opens above the box and never
    *  displaces them. */
   status?: StatusInfo
@@ -204,7 +207,8 @@ export function InputBar({
         // content (or the pill) hidden beneath it: both are keyboard-driven,
         // so the press is swallowed.
         const menuOpenNow = commandMatchesFor(bufferRef.current.value).length > 0 && !menuHiddenRef.current
-        if (!menuOpenNow && effortPicker === undefined) onClick?.(click)
+        const popupOpen = effortPicker !== undefined || modelPicker !== undefined
+        if (!menuOpenNow && !popupOpen) onClick?.(click)
         return
       }
       const move = moveFromInput(input)
@@ -269,6 +273,15 @@ export function InputBar({
         // like the main editor does (the draft renders line-split).
         onQuestionTextChange?.(questionTextDraft + input.replace(/\r\n|\r/g, '\n'))
       }
+      return
+    }
+    if (modelPicker !== undefined) {
+      // The route list owns the keys while it floats: ↑/↓ walk it, Enter
+      // applies the selection, Esc cancels; everything else waits.
+      if (key.escape) { handlers.onModelCancel(); return }
+      if (key.upArrow) { handlers.onModelMove(-1); return }
+      if (key.downArrow) { handlers.onModelMove(1); return }
+      if (key.return) { handlers.onModelConfirm(); return }
       return
     }
     if (effortPicker !== undefined) {
@@ -565,6 +578,7 @@ export function InputBar({
           rows — opening the menu never reflows anything. The effort picker
           floats the same way; the two never open together (the picker owns
           the keys, so the buffer never reaches the menu's prefix rule). */}
+      {modelPicker !== undefined ? <ModelPickerPopup picker={modelPicker} width={width} /> : null}
       {effortPicker !== undefined ? <EffortPickerPopup picker={effortPicker} width={width} /> : null}
       {menuOpen ? <CommandMenu items={menuMatches} selected={menuSelected} width={width} /> : null}
       {rule}
@@ -799,6 +813,93 @@ function EffortPickerPopup({ picker, width }: {
             {description}
             {pad(Math.floor((width - stringWidth(description)) / 2) + stringWidth(description))}
           </Text>
+        )}
+      <Text>{' '.repeat(width)}</Text>
+      <Text dimColor>{'  '}{hint}{pad(2 + stringWidth(hint))}</Text>
+    </Box>
+  )
+}
+
+/** Rows the model-route picker shows before windowing around the selection. */
+const MODEL_PICKER_MAX_ROWS = 8
+
+/**
+ * The model-route picker popup floating above the input bar: the same
+ * absolute-overlay recipe as the completion menu and the effort slider — a
+ * negative `top` equal to its own row count keeps it out of flow, and every
+ * row pads to the full width so the cells underneath are erased. A vertical
+ * list rather than a scale: route ids are long and the catalog is open-ended.
+ * The route in effect wears ✓, the ↑/↓ selection wears the highlight tint,
+ * and its description floats under the list.
+ */
+function ModelPickerPopup({ picker, width }: {
+  picker: ModelPickerView
+  width: number
+}): React.JSX.Element {
+  const { options, selected, current } = picker
+  const clamped = Math.min(Math.max(0, selected), Math.max(0, options.length - 1))
+  const start = options.length <= MODEL_PICKER_MAX_ROWS
+    ? 0
+    : Math.min(Math.max(0, clamped - Math.floor(MODEL_PICKER_MAX_ROWS / 2)), options.length - MODEL_PICKER_MAX_ROWS)
+  const visible = options.slice(start, start + MODEL_PICKER_MAX_ROWS)
+  const hiddenBefore = start
+  const hiddenAfter = options.length - start - visible.length
+  // Routes align in one label column so the ✓ marks and names line up.
+  const labelOf = (option: ModelOption): string => `${option.provider}/${option.model}`
+  const nameCol = options.reduce((max, option) => Math.max(max, stringWidth(labelOf(option))), 0)
+  const descriptionBudget = Math.max(0, width - 4 - 2 - nameCol - MENU_DESCRIPTION_GAP)
+  const pad = (used: number): string => ' '.repeat(Math.max(0, width - used))
+  const focused = options[clamped]
+  const description = focused?.description === undefined || focused.description === ''
+    ? undefined
+    : truncateToWidth(focused.description, Math.max(0, width - 4))
+  const detailRows = description === undefined ? 0 : 2
+  // Rows actually rendered: rule + title + blank, the list (with its overflow
+  // notices), the description block, the closing blank, and the hint line.
+  // The negative `top` must equal this exactly or the popup lands off by the
+  // difference and paints over the editor row.
+  const rowCount = 4 + visible.length + (hiddenBefore > 0 ? 1 : 0) + (hiddenAfter > 0 ? 1 : 0) + detailRows + 1
+  const hint = '↑/↓ to move · Enter to confirm · Esc to cancel'
+  return (
+    <Box position="absolute" top={-rowCount} left={0} right={0} flexDirection="column">
+      <Text color="#a5d8ff">{'▔'.repeat(width)}</Text>
+      <Text color="#ffffff">{'  Model'}{pad(7)}</Text>
+      <Text>{' '.repeat(width)}</Text>
+      {hiddenBefore > 0 ? <Text dimColor>{padToWidth(`  … ${hiddenBefore} more`, width)}</Text> : null}
+      {visible.map((option, index) => {
+        const absolute = start + index
+        const isSelected = absolute === clamped
+        const mark = current !== undefined && current === labelOf(option) ? '✓ ' : '  '
+        const label = padToWidth(labelOf(option), nameCol)
+        // The adapter often fills `name` with the id itself when the model row
+        // declares no display name (pi-ai does exactly that), so a nominal
+        // column equal to the id — or to the whole label — adds nothing.
+        const redundant = option.name === undefined
+          || option.name === option.model
+          || option.name === labelOf(option)
+        const note = redundant ? '' : option.name
+        const shown = note === '' ? '' : truncateToWidth(note, descriptionBudget)
+        const gap = Math.max(0, width - 2 - 2 - nameCol - MENU_DESCRIPTION_GAP - stringWidth(shown))
+        return isSelected ? (
+          <Text key={labelOf(option)} color="#a5d8ff">
+            <Text bold>{'  '}{mark}{label}</Text>{' '.repeat(MENU_DESCRIPTION_GAP)}{shown}{' '.repeat(gap)}
+          </Text>
+        ) : (
+          <Text key={labelOf(option)} dimColor>
+            {'  '}{mark}{label}{' '.repeat(MENU_DESCRIPTION_GAP)}{shown}{' '.repeat(gap)}
+          </Text>
+        )
+      })}
+      {hiddenAfter > 0 ? <Text dimColor>{padToWidth(`  … ${hiddenAfter} more`, width)}</Text> : null}
+      {description === undefined
+        ? null
+        : (
+          <>
+            <Text>{' '.repeat(width)}</Text>
+            <Text dimColor>
+              {'  '}{description}{pad(2 + stringWidth(description))}
+            </Text>
+          </>
         )}
       <Text>{' '.repeat(width)}</Text>
       <Text dimColor>{'  '}{hint}{pad(2 + stringWidth(hint))}</Text>

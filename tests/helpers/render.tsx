@@ -40,6 +40,9 @@ export function noopHandlers(): InputHandlers {
     onEffortMove: () => {},
     onEffortConfirm: () => {},
     onEffortCancel: () => {},
+    onModelMove: () => {},
+    onModelConfirm: () => {},
+    onModelCancel: () => {},
   }
 }
 

@@ -49,6 +49,12 @@ export interface InputHandlers {
   onEffortConfirm(): void
   /** Close the effort picker without applying anything. */
   onEffortCancel(): void
+  /** Move the model picker's ↑/↓ selection by `delta` rows. */
+  onModelMove(delta: number): void
+  /** Apply the model picker's selected route and close it. */
+  onModelConfirm(): void
+  /** Close the model picker without applying anything. */
+  onModelCancel(): void
 }
 
 /** One question the agent asks the user (the terminal's structural mirror of
@@ -387,6 +393,25 @@ export interface EffortPickerView {
   readonly selected: number
 }
 
+/** One selectable model route the route picker offers. */
+export interface ModelOption {
+  readonly provider: string
+  readonly model: string
+  readonly name?: string
+  readonly description?: string
+}
+
+/** The model-route picker popup's state: a scrollable list of discovered
+ *  routes with the ↑/↓ selection. */
+export interface ModelPickerView {
+  /** Every discovered route, in adapter-preferred order. */
+  readonly options: readonly ModelOption[]
+  /** The ↑/↓ selection index into `options`. */
+  readonly selected: number
+  /** The `provider/model` in effect when the picker opened (marked ✓). */
+  readonly current?: string
+}
+
 export interface RenderView {
   overlay?: Overlay
   status?: StatusInfo
@@ -394,6 +419,8 @@ export interface RenderView {
   commands?: readonly CommandInfo[]
   /** The effort picker popup; present while it is open above the input bar. */
   effortPicker?: EffortPickerView
+  /** The model-route picker popup; present while it is open above the bar. */
+  modelPicker?: ModelPickerView
   /** The unfinished direct subagents; absent or empty hides the panel. */
   subagents?: readonly SubagentRow[]
   /** The panel's selected row (0 = the main agent row); absent means the input bar holds focus. */
