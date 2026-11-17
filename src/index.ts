@@ -15,8 +15,8 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import type { AgentSetup, AgentTeamProjectionState, ApprovalOutcome, AssistantStreamFrame, CommandDescriptor, CommandRuntime, Context, GoalProjectionState, ModelSelection, ReasoningEffortId, SessionEvent } from './dsh-adapter/types.ts'
-import { createUserMessage, installModelSelection, ReasoningEffortId as brandEffortId, SessionId, z } from './dsh-adapter/services.ts'
+import type { AgentSetup, AgentTeamProjectionState, ApprovalOutcome, AssistantStreamFrame, CommandDescriptor, CommandRuntime, Context, GoalProjectionState, ModelSelection, SessionEvent } from './dsh-adapter/types.ts'
+import { createUserMessage, installModelSelection, SessionId, z } from './dsh-adapter/services.ts'
 import './dsh-adapter/effects.ts'
 import { createFrameState, foldAssistantStreamChunk, foldEvent, readableFailureMessage } from './fold/frames.ts'
 import type { FoldDeps, Frame, FrameState } from './fold/frames.ts'
@@ -202,6 +202,17 @@ const JOB_OUTPUT_BUFFER_MAX = 8_000
 const JOB_KILL_ARM_MS = 3_000
 
 /** One unfinished direct subagent tracked for the panel below the status bar. */
+/** Structural face of the effort plugin's picker-request waterfall: the
+ *  plugin (dsh-command-effort) is an optional sibling package, so the
+ *  terminal matches its request/answer by shape instead of importing types. */
+interface EffortPickRequestShape {
+  readonly agent: unknown
+  readonly levels: readonly { id: string; name?: string; description?: string }[]
+  readonly current?: string
+  readonly signal?: AbortSignal
+}
+type EffortPickAnswerShape = { readonly level: string } | { readonly cancelled: true }
+
 interface ChildEntry {
   /** The child's display label: its delegation description once the descriptor arrives. */
   label: string
@@ -459,38 +470,22 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
   /** The adapter's default effort for the model (when it discloses one); the
    *  badge falls back to it whenever no selection carries an effort. */
   let resolvedDefaultEffort: string | undefined
-  /** The adapter-disclosed effort levels (the picker's scale); cached by the
-   *  startup model-info lookup, lazily refetched when that disclosed none. */
-  let effortLevelsCache: readonly { id: ReasoningEffortId; name?: string; description?: string }[] | undefined
-  /** The open effort picker popup's state; undefined keeps it closed. */
+  /** The open effort picker popup's state; undefined keeps it closed. The
+   *  levels arrive with the effort plugin's waterfall request. */
   let effortPickerState: {
-    levels: readonly { id: ReasoningEffortId; name?: string; description?: string }[]
+    levels: readonly { id: string; name?: string; description?: string }[]
     selected: number
   } | undefined
-  /** Settles the open picker's `/effort` command with its ⎿ result text. */
-  let effortPickerSettle: ((text: string) => void) | undefined
-  // Presentation fallbacks for well-known effort ids: the deepseek adapter
-  // discloses descriptions with its levels, but other adapters (pi-ai) hand
-  // over id + name only, which would leave the picker's description row
-  // blank. Adapter-disclosed copy always wins; the real fix lives upstream.
-  const EFFORT_DESCRIPTION_FALLBACKS: Readonly<Record<string, string>> = {
-    off: 'Use for simple tasks that do not need reasoning.',
-    low: 'Prefer for routine or latency-sensitive tasks.',
-    medium: 'A balanced choice for everyday tasks.',
-    high: 'The default balance for most tasks.',
-    xhigh: 'Deeper reasoning for demanding tasks.',
-    max: 'Reserve for the hardest quality-first tasks.',
-  }
+  /** Settles the open picker's waterfall request with the user's verdict. */
+  let effortPickerSettle: ((answer: EffortPickAnswerShape) => void) | undefined
   void (async () => {
     const info = (await ctx.get('llm')
       ?.resolveModelInfo(selection.provider, selection.model)
       .catch(() => undefined)) as
-      | { context?: { contextWindow: number }; reasoning?: { defaultEffort?: string; efforts?: readonly { id: ReasoningEffortId; name?: string; description?: string }[] } }
+      | { context?: { contextWindow: number }; reasoning?: { defaultEffort?: string } }
       | undefined
     const window = info?.context?.contextWindow
     resolvedDefaultEffort = info?.reasoning?.defaultEffort
-    // The picker reads the same disclosure; cache it so opening never waits.
-    effortLevelsCache = info?.reasoning?.efforts
     // The agent-owned selection wins: a resume re-records the durable effort,
     // and a mid-session switch must beat this one-shot lookup.
     const effort = agent.model.current()?.reasoningEffort ?? selection.reasoningEffort ?? info?.reasoning?.defaultEffort
@@ -947,58 +942,6 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
       ...(descriptor.input?.hint === undefined ? {} : { hint: descriptor.input.hint }),
     }))
   }
-  // The terminal's own `/effort` command: upstream ships no effort switch, so
-  // the driver registers one against the agent-owned model selection. The
-  // switch is durable — select() appends a logged `model/selection` event,
-  // restored on resume — and the footer badge follows that same event. Bare
-  // /effort opens the picker popup; `<level>` sets directly and `off` clears
-  // back to the model default. It rides the runtime like any other command:
-  // logged ❯ echo, log-restored history, resume-proof.
-  const commandsRegistry: CommandRuntime | undefined = ctx.get('commands')
-  if (typeof commandsRegistry?.register === 'function') {
-    commandsRegistry.register({
-      name: 'effort',
-      description: 'Set the reasoning effort',
-      input: { hint: '<level>|off' },
-      handler: async ({ agent: target, rawInput, signal }) => {
-        const wanted = rawInput.trim()
-        const current = target.model.current()
-        const info = (await ctx.get('llm')
-          ?.resolveModelInfo(current?.provider ?? selection.provider, current?.model ?? selection.model)
-          .catch(() => undefined)) as
-          | { reasoning?: { defaultEffort?: string; efforts?: readonly { id: ReasoningEffortId; name?: string; description?: string }[] } }
-          | undefined
-        const efforts = info?.reasoning?.efforts ?? []
-        const levels = efforts.map(level => level.id).join(' · ')
-        if (wanted === '') {
-          // Bare /effort opens the picker: the runtime has already logged
-          // command/run, so the ❯ echo and the history entry stand like any
-          // other command's. The handler settles only when the user does — or
-          // when the dispatch's signal aborts (an exit mid-popup settles the
-          // command as cancelled instead of stranding it) — so the ⎿ result
-          // carries the choice and rides the log like every other command's
-          // outcome. A missing disclosure is the command's error result.
-          const result = await openEffortPicker(signal)
-          return result === undefined
-            ? { kind: 'error', text: 'No effort levels disclosed for this model' }
-            : { kind: 'success', text: result }
-        }
-        const clearing = wanted === 'off' || wanted === 'none' || wanted === 'default'
-        const match = efforts.find(level => level.id === wanted || level.name === wanted)
-        if (!clearing && efforts.length > 0 && match === undefined) {
-          return { kind: 'error', text: `Unknown effort: ${wanted}${levels === '' ? '' : ` · available: ${levels}`}` }
-        }
-        if (current === undefined) return { kind: 'error', text: 'No model selection is recorded for this session.' }
-        target.model.select(clearing
-          ? { provider: current.provider, model: current.model }
-          : { provider: current.provider, model: current.model, reasoningEffort: match?.id ?? brandEffortId(wanted) })
-        return {
-          kind: 'success',
-          text: clearing ? 'Reasoning effort cleared (model default).' : `Reasoning effort set to ${match?.id ?? wanted}`,
-        }
-      },
-    })
-  }
   /** The base view plus the panel slice computed from the live roster. */
   function withPanel(base: RenderView): RenderView {
     const next: RenderView = { ...base }
@@ -1070,11 +1013,13 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
     state = next
     scheduleRender(immediate)
   }
-  // The effort picker popup: a bare `/effort` opens it, ←/→ walk the scale,
-  // Enter applies the selection through the agent-owned model selection
-  // (durable, badge-following, resume-proof — the /effort badge's own
-  // machinery), Esc closes it untouched. The state declarations live up by
-  // the startup model-info lookup, which feeds the levels cache.
+  // The effort picker popup, driven by the effort plugin's waterfall: bare
+  // /effort dispatches `effort-picker/request` with the disclosed levels, this
+  // answerer opens the popup (←/→ walk the scale), and settles the request
+  // when the user confirms (the chosen level) or cancels (Esc/abort). The
+  // plugin owns the command and applies the durable selection; the terminal
+  // owns only this UI. The listener is structural — no compile-time
+  // dependency on the plugin package, which stays optional at runtime.
   const effortPickerSlice = (): EffortPickerView | undefined => (
     effortPickerState === undefined
       ? undefined
@@ -1093,55 +1038,42 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
     view = slice === undefined ? rest : { ...rest, effortPicker: slice }
     scheduleRender(true)
   }
-  /** Open the picker and settle only when the user — or an abort — does: the
-   *  returned text becomes the `/effort` command's ⎿ result, logged with it.
-   *  `undefined` means it could not open (no disclosed levels). */
-  const openEffortPicker = async (signal?: AbortSignal): Promise<string | undefined> => {
-    let levels = effortLevelsCache
-    if (levels === undefined) {
-      const info = (await ctx.get('llm')
-        ?.resolveModelInfo(selection.provider, selection.model)
-        .catch(() => undefined)) as
-        | { reasoning?: { efforts?: readonly { id: ReasoningEffortId; name?: string; description?: string }[] } }
-        | undefined
-      effortLevelsCache = info?.reasoning?.efforts
-      levels = effortLevelsCache
-    }
-    if (levels === undefined || levels.length === 0) return undefined
-    const currentId = agent.model.current()?.reasoningEffort ?? resolvedDefaultEffort as ReasoningEffortId | undefined
-    const currentIndex = currentId === undefined ? -1 : levels.findIndex(level => level.id === currentId)
-    // A second /effort while one picker is pending cannot happen through the
-    // keys (the popup owns them), but guard the settle slot anyway: settle the
-    // old command as cancelled BEFORE installing this picker, so the old
-    // close cannot clobber the new state.
-    effortPickerSettle?.('Cancelled')
+  ;(ctx as unknown as {
+    on(name: string, listener: (
+      request: EffortPickRequestShape,
+      next: () => Promise<EffortPickAnswerShape | undefined>,
+    ) => Promise<EffortPickAnswerShape | undefined>): void
+  }).on('effort-picker/request', (request, next) => {
+    // Only the agent this terminal drives gets a popup; anything else (or an
+    // exiting session) delegates down the waterfall.
+    if (exiting || request.agent !== agent) return next()
+    // A superseded picker settles as cancelled BEFORE installing this one, so
+    // the old close cannot clobber the new state.
+    effortPickerSettle?.({ cancelled: true })
+    const current = request.current
     effortPickerState = {
-      // Backfill the description row for adapters that disclose none.
-      levels: levels.map(level => {
-        if (level.description !== undefined) return level
-        const fallback = EFFORT_DESCRIPTION_FALLBACKS[level.id as string]
-        return fallback === undefined ? level : { ...level, description: fallback }
-      }),
-      selected: currentIndex === -1 ? 0 : currentIndex,
+      levels: request.levels,
+      selected: current === undefined ? 0 : Math.max(0, request.levels.findIndex(level => level.id === current)),
     }
     publishEffortPicker()
-    return new Promise<string>((resolve) => {
-      const settle = (text: string): void => {
+    return new Promise<EffortPickAnswerShape>((resolve) => {
+      const settle = (answer: EffortPickAnswerShape): void => {
         // A newer picker replaced the slot, or confirm/cancel already settled.
         if (effortPickerSettle !== settle) return
         effortPickerSettle = undefined
         effortPickerState = undefined
         publishEffortPicker()
-        resolve(text)
+        resolve(answer)
       }
       effortPickerSettle = settle
-      // An aborted dispatch (a graceful exit mid-popup, or the dispatcher
-      // cancelling) closes the picker and settles Cancelled — the command/run
-      // never strands without its command/done.
-      if (signal?.aborted === true) { settle('Cancelled'); return }
-      signal?.addEventListener('abort', () => settle('Cancelled'), { once: true })
+      // An aborted dispatch (a graceful exit mid-popup, or the command's
+      // cancellation) closes the picker and answers cancelled — the plugin's
+      // command/run never strands without its command/done.
+      const signal = request.signal
+      if (signal?.aborted === true) { settle({ cancelled: true }); return }
+      signal?.addEventListener('abort', () => settle({ cancelled: true }), { once: true })
     })
-  }
+  })
   const setOverlay = (overlay: Overlay | undefined): void => {
     const picker = effortPickerSlice()
     view = overlay === undefined
@@ -1756,18 +1688,16 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
       effortPickerState = undefined
       publishEffortPicker()
       if (pick === undefined) return
-      const base = agent.model.current() ?? selection
-      // Durable switch: the appended model/selection event moves the badge;
-      // the pending /effort command's ⎿ result reports the choice.
-      agent.model.select({ provider: base.provider, model: base.model, reasoningEffort: pick.id })
-      effortPickerSettle?.(`Reasoning effort set to ${pick.id}`)
+      // The plugin applies the durable selection from this answer; the badge
+      // follows the model/selection event it appends.
+      effortPickerSettle?.({ level: pick.id })
       effortPickerSettle = undefined
     },
     onEffortCancel: () => {
       if (exiting || effortPickerState === undefined) return
       effortPickerState = undefined
       publishEffortPicker()
-      effortPickerSettle?.('Cancelled')
+      effortPickerSettle?.({ cancelled: true })
       effortPickerSettle = undefined
     },
     onPanelOpen: () => {
