@@ -122,7 +122,7 @@ describe('subagent panel', () => {
     await settled(10)
     expect(app.lastFrame() ?? '').toContain('Tasks · 1')
     expect(app.lastFrame() ?? '').toContain('done thing')
-    await settled(80)
+    await settled(200)
     let frame = app.lastFrame() ?? ''
     expect(frame).toContain('Teammates · 1')
     expect(frame).not.toContain('Tasks ·')

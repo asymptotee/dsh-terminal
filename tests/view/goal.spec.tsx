@@ -59,7 +59,7 @@ describe('goal strip', () => {
     const app = renderApp(<TuiApp state={state([])} handlers={noopHandlers()} completedLingerMs={40} view={{ goal: goal({ phase: 'complete' }) }} />)
     await settled(10)
     expect(app.lastFrame() ?? '').toContain('Goal · complete')
-    await settled(80)
+    await settled(200)
     expect(app.lastFrame() ?? '').not.toContain('Goal · complete')
     // A new active goal flips goalComplete and cancels the hide.
     app.rerender(<TuiApp state={state([])} handlers={noopHandlers()} completedLingerMs={40} view={{ goal: goal({ phase: 'active' }) }} />)

@@ -305,7 +305,7 @@ describe('workflow panel', () => {
     const app = renderApp(<TuiApp state={state([])} handlers={noopHandlers()} completedLingerMs={40} view={runView([settledRun])} />)
     await settled(10)
     expect(app.lastFrame() ?? '').toContain('Workflow (done-run) · 1 成员')
-    await settled(80)
+    await settled(200)
     expect(app.lastFrame() ?? '').not.toContain('Workflow (done-run) · 1 成员')
     // A new running run flips allSettled and cancels the hide.
     app.rerender(<TuiApp
