@@ -133,12 +133,9 @@ export function createInkRenderer(): TuiRenderer {
     onPanelMove: () => {},
     onPanelEnter: () => {},
     onPanelBack: () => {},
-    onEffortMove: () => {},
-    onEffortConfirm: () => {},
-    onEffortCancel: () => {},
-    onModelMove: () => {},
-    onModelConfirm: () => {},
-    onModelCancel: () => {},
+    onPickerMove: () => {},
+    onPickerConfirm: () => {},
+    onPickerCancel: () => {},
     onCyclePermission: () => {},
     onChildPrompt: () => {},
     onJobKill: () => {},
@@ -808,8 +805,7 @@ export function TuiApp({
           onQuestionTextChange={planReview !== undefined ? onPlanTextChange : onQuestionTextChange}
           panelAvailable={subagents.length > 0 || (view?.team?.members.length ?? 0) > 0 || workflowVisible || jobsVisible}
           commands={view?.commands ?? []}
-          {...(view?.effortPicker === undefined ? {} : { effortPicker: view.effortPicker })}
-          {...(view?.modelPicker === undefined ? {} : { modelPicker: view.modelPicker })}
+          {...(view?.picker === undefined ? {} : { picker: view.picker })}
           {...(view?.status === undefined ? {} : { status: view.status })}
           {...(openJob !== undefined
             ? {}

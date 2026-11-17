@@ -22,7 +22,7 @@ import { createFrameState, foldAssistantStreamChunk, foldEvent, readableFailureM
 import type { FoldDeps, Frame, FrameState } from './fold/frames.ts'
 import { teamToolPresentation } from './fold/team-present.ts'
 import { createInkRenderer, foldInvocationLine } from './view/renderer.tsx'
-import type { ApprovalChoice, CommandInfo, EffortPickerView, ModelPickerView, GoalPanelInfo, GoalPhase, JobDetailView, JobsPanelInfo, JobRow, Overlay, QuestionAnswer, QuestionItem, RenderView, SubagentRow, TeamPanelInfo, TeamTaskRow, TuiRenderer, WorkflowMemberRow, WorkflowMemberStatus, WorkflowPanelInfo, WorkflowPhaseGroup, WorkflowRunRow, WorkflowRunStatus } from './view/renderer.tsx'
+import type { ApprovalChoice, CommandInfo, PickerPopupView, GoalPanelInfo, GoalPhase, JobDetailView, JobsPanelInfo, JobRow, Overlay, QuestionAnswer, QuestionItem, RenderView, SubagentRow, TeamPanelInfo, TeamTaskRow, TuiRenderer, WorkflowMemberRow, WorkflowMemberStatus, WorkflowPanelInfo, WorkflowPhaseGroup, WorkflowRunRow, WorkflowRunStatus } from './view/renderer.tsx'
 
 // Re-exported so driver suites import the renderer contract without reaching
 // the ink view's .tsx module directly (the host aggregate compiles specs).
@@ -202,28 +202,19 @@ const JOB_OUTPUT_BUFFER_MAX = 8_000
 const JOB_KILL_ARM_MS = 3_000
 
 /** One unfinished direct subagent tracked for the panel below the status bar. */
-/** Structural face of the effort plugin's picker-request waterfall: the
- *  plugin (dsh-command-effort) is an optional sibling package, so the
- *  terminal matches its request/answer by shape instead of importing types. */
-interface EffortPickRequestShape {
-  readonly agent: unknown
-  readonly levels: readonly { id: string; name?: string; description?: string }[]
-  readonly current?: string
+/** Structural face of the shared picker waterfall every plugin command that
+ *  asks the user to choose dispatches. Matched by shape, so plugin packages
+ *  stay optional siblings the terminal never imports. */
+interface PickerRequestShape {
+  readonly pickerId: string
+  readonly kind: 'scale' | 'list'
+  readonly title: string
+  readonly options: readonly { value: string; label: string; note?: string; description?: string }[]
+  readonly currentIndex?: number
+  readonly scaleEnds?: { readonly low: string; readonly high: string }
   readonly signal?: AbortSignal
 }
-type EffortPickAnswerShape = { readonly level: string } | { readonly cancelled: true }
-
-/** Structural face of the model plugin's route-picker waterfall — the same
- *  shape-not-import contract as the effort picker above. */
-interface ModelPickRequestShape {
-  readonly agent: unknown
-  readonly models: readonly { provider: string; model: string; name?: string; description?: string }[]
-  readonly current?: string
-  readonly signal?: AbortSignal
-}
-type ModelPickAnswerShape =
-  | { readonly provider: string; readonly model: string }
-  | { readonly cancelled: true }
+type PickerAnswerShape = { readonly value: string } | { readonly cancelled: true }
 
 interface ChildEntry {
   /** The child's display label: its delegation description once the descriptor arrives. */
@@ -482,22 +473,10 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
   /** The adapter's default effort for the model (when it discloses one); the
    *  badge falls back to it whenever no selection carries an effort. */
   let resolvedDefaultEffort: string | undefined
-  /** The open effort picker popup's state; undefined keeps it closed. The
-   *  levels arrive with the effort plugin's waterfall request. */
-  let effortPickerState: {
-    levels: readonly { id: string; name?: string; description?: string }[]
-    selected: number
-  } | undefined
+  /** The open picker popup's state; undefined keeps it closed. */
+  let pickerState: (PickerRequestShape & { selected: number }) | undefined
   /** Settles the open picker's waterfall request with the user's verdict. */
-  let effortPickerSettle: ((answer: EffortPickAnswerShape) => void) | undefined
-  /** The open model-route picker's state; undefined keeps it closed. */
-  let modelPickerState: {
-    options: readonly { provider: string; model: string; name?: string; description?: string }[]
-    selected: number
-    current?: string
-  } | undefined
-  /** Settles the open model picker's waterfall request. */
-  let modelPickerSettle: ((answer: ModelPickAnswerShape) => void) | undefined
+  let pickerSettle: ((answer: PickerAnswerShape) => void) | undefined
   void (async () => {
     const info = (await ctx.get('llm')
       ?.resolveModelInfo(selection.provider, selection.model)
@@ -1033,131 +1012,75 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
     state = next
     scheduleRender(immediate)
   }
-  // The effort picker popup, driven by the effort plugin's waterfall: bare
-  // /effort dispatches `effort-picker/request` with the disclosed levels, this
-  // answerer opens the popup (←/→ walk the scale), and settles the request
-  // when the user confirms (the chosen level) or cancels (Esc/abort). The
-  // plugin owns the command and applies the durable selection; the terminal
-  // owns only this UI. The listener is structural — no compile-time
-  // dependency on the plugin package, which stays optional at runtime.
-  const effortPickerSlice = (): EffortPickerView | undefined => (
-    effortPickerState === undefined
+  // The picker popup, driven by whichever plugin command asked: a bare
+  // /effort or /model dispatches `picker/request`, this answerer opens one
+  // popup shaped by the request's `kind` (a walkable scale or a scrollable
+  // list), and settles the request when the user confirms (the chosen value)
+  // or cancels (Esc/abort). The plugin owns the command and applies its
+  // durable effect; the terminal owns only this UI. The listener is
+  // structural — plugin packages stay optional siblings.
+  const pickerSlice = (): PickerPopupView | undefined => (
+    pickerState === undefined
       ? undefined
       : {
-        levels: effortPickerState.levels.map(level => ({
-          id: level.id,
-          ...(level.name === undefined ? {} : { name: level.name }),
-          ...(level.description === undefined ? {} : { description: level.description }),
-        })),
-        selected: effortPickerState.selected,
+        pickerId: pickerState.pickerId,
+        kind: pickerState.kind,
+        title: pickerState.title,
+        options: pickerState.options,
+        selected: pickerState.selected,
+        ...(pickerState.currentIndex === undefined ? {} : { currentIndex: pickerState.currentIndex }),
+        ...(pickerState.scaleEnds === undefined ? {} : { scaleEnds: pickerState.scaleEnds }),
       }
   )
-  const publishEffortPicker = (): void => {
-    const { effortPicker: _dropped, ...rest } = view
-    const slice = effortPickerSlice()
-    view = slice === undefined ? rest : { ...rest, effortPicker: slice }
+  const publishPicker = (): void => {
+    const { picker: _dropped, ...rest } = view
+    const slice = pickerSlice()
+    view = slice === undefined ? rest : { ...rest, picker: slice }
     scheduleRender(true)
   }
   ;(ctx as unknown as {
     on(name: string, listener: (
-      request: EffortPickRequestShape,
-      next: () => Promise<EffortPickAnswerShape | undefined>,
-    ) => Promise<EffortPickAnswerShape | undefined>): void
-  }).on('effort-picker/request', (request, next) => {
-    // Only the agent this terminal drives gets a popup; anything else (or an
-    // exiting session) delegates down the waterfall.
-    if (exiting || request.agent !== agent) return next()
+      request: PickerRequestShape,
+      next: () => Promise<PickerAnswerShape | undefined>,
+    ) => Promise<PickerAnswerShape | undefined>): void
+  }).on('picker/request', (request, next) => {
+    // The popup belongs to the agent this terminal drives; anything else (or
+    // an exiting session) delegates down the waterfall.
+    if (exiting) return next()
     // A superseded picker settles as cancelled BEFORE installing this one, so
     // the old close cannot clobber the new state.
-    effortPickerSettle?.({ cancelled: true })
-    const current = request.current
-    effortPickerState = {
-      levels: request.levels,
-      selected: current === undefined ? 0 : Math.max(0, request.levels.findIndex(level => level.id === current)),
+    pickerSettle?.({ cancelled: true })
+    pickerState = {
+      ...request,
+      selected: request.currentIndex === undefined
+        ? 0
+        : Math.max(0, Math.min(request.currentIndex, request.options.length - 1)),
     }
-    publishEffortPicker()
-    return new Promise<EffortPickAnswerShape>((resolve) => {
-      const settle = (answer: EffortPickAnswerShape): void => {
+    publishPicker()
+    return new Promise<PickerAnswerShape>((resolve) => {
+      const settle = (answer: PickerAnswerShape): void => {
         // A newer picker replaced the slot, or confirm/cancel already settled.
-        if (effortPickerSettle !== settle) return
-        effortPickerSettle = undefined
-        effortPickerState = undefined
-        publishEffortPicker()
+        if (pickerSettle !== settle) return
+        pickerSettle = undefined
+        pickerState = undefined
+        publishPicker()
         resolve(answer)
       }
-      effortPickerSettle = settle
+      pickerSettle = settle
       // An aborted dispatch (a graceful exit mid-popup, or the command's
-      // cancellation) closes the picker and answers cancelled — the plugin's
+      // cancellation) closes the popup and answers cancelled — the plugin's
       // command/run never strands without its command/done.
       const signal = request.signal
       if (signal?.aborted === true) { settle({ cancelled: true }); return }
       signal?.addEventListener('abort', () => settle({ cancelled: true }), { once: true })
     })
   })
-  // The model-route picker, driven the same way by the model plugin's
-  // waterfall: bare /model dispatches `model-picker/request` with the
-  // discovered routes, this answerer opens the list popup (↑/↓ walk it), and
-  // settles the request on confirm (the chosen route) or cancel (Esc/abort).
-  const modelPickerSlice = (): ModelPickerView | undefined => (
-    modelPickerState === undefined
-      ? undefined
-      : {
-        options: modelPickerState.options.map(option => ({
-          provider: option.provider,
-          model: option.model,
-          ...(option.name === undefined ? {} : { name: option.name }),
-          ...(option.description === undefined ? {} : { description: option.description }),
-        })),
-        selected: modelPickerState.selected,
-        ...(modelPickerState.current === undefined ? {} : { current: modelPickerState.current }),
-      }
-  )
-  const publishModelPicker = (): void => {
-    const { modelPicker: _dropped, ...rest } = view
-    const slice = modelPickerSlice()
-    view = slice === undefined ? rest : { ...rest, modelPicker: slice }
-    scheduleRender(true)
-  }
-  ;(ctx as unknown as {
-    on(name: string, listener: (
-      request: ModelPickRequestShape,
-      next: () => Promise<ModelPickAnswerShape | undefined>,
-    ) => Promise<ModelPickAnswerShape | undefined>): void
-  }).on('model-picker/request', (request, next) => {
-    if (exiting || request.agent !== agent) return next()
-    modelPickerSettle?.({ cancelled: true })
-    const current = request.current
-    const currentIndex = current === undefined
-      ? -1
-      : request.models.findIndex(option => `${option.provider}/${option.model}` === current)
-    modelPickerState = {
-      options: request.models,
-      selected: currentIndex === -1 ? 0 : currentIndex,
-      ...(current === undefined ? {} : { current }),
-    }
-    publishModelPicker()
-    return new Promise<ModelPickAnswerShape>((resolve) => {
-      const settle = (answer: ModelPickAnswerShape): void => {
-        if (modelPickerSettle !== settle) return
-        modelPickerSettle = undefined
-        modelPickerState = undefined
-        publishModelPicker()
-        resolve(answer)
-      }
-      modelPickerSettle = settle
-      const signal = request.signal
-      if (signal?.aborted === true) { settle({ cancelled: true }); return }
-      signal?.addEventListener('abort', () => settle({ cancelled: true }), { once: true })
-    })
-  })
   const setOverlay = (overlay: Overlay | undefined): void => {
-    const effortSlice = effortPickerSlice()
-    const modelSlice = modelPickerSlice()
+    const slice = pickerSlice()
     view = overlay === undefined
       ? {
         ...(view.status === undefined ? {} : { status: view.status }),
-        ...(effortSlice === undefined ? {} : { effortPicker: effortSlice }),
-        ...(modelSlice === undefined ? {} : { modelPicker: modelSlice }),
+        ...(slice === undefined ? {} : { picker: slice }),
       }
       : { ...view, overlay }
     scheduleRender(true)
@@ -1753,54 +1676,32 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
       if (exiting) return
       cyclePermission()
     },
-    onEffortMove: (delta) => {
-      if (exiting || effortPickerState === undefined) return
-      const selected = Math.min(Math.max(0, effortPickerState.selected + delta), effortPickerState.levels.length - 1)
-      if (selected === effortPickerState.selected) return
-      effortPickerState = { ...effortPickerState, selected }
-      publishEffortPicker()
+    onPickerMove: (delta) => {
+      if (exiting || pickerState === undefined) return
+      const selected = Math.min(
+        Math.max(0, pickerState.selected + delta),
+        Math.max(0, pickerState.options.length - 1),
+      )
+      if (selected === pickerState.selected) return
+      pickerState = { ...pickerState, selected }
+      publishPicker()
     },
-    onEffortConfirm: () => {
-      if (exiting || effortPickerState === undefined) return
-      const pick = effortPickerState.levels[effortPickerState.selected]
-      effortPickerState = undefined
-      publishEffortPicker()
+    onPickerConfirm: () => {
+      if (exiting || pickerState === undefined) return
+      const pick = pickerState.options[pickerState.selected]
+      pickerState = undefined
+      publishPicker()
       if (pick === undefined) return
-      // The plugin applies the durable selection from this answer; the badge
-      // follows the model/selection event it appends.
-      effortPickerSettle?.({ level: pick.id })
-      effortPickerSettle = undefined
+      // The owning plugin applies its durable effect from this answer.
+      pickerSettle?.({ value: pick.value })
+      pickerSettle = undefined
     },
-    onEffortCancel: () => {
-      if (exiting || effortPickerState === undefined) return
-      effortPickerState = undefined
-      publishEffortPicker()
-      effortPickerSettle?.({ cancelled: true })
-      effortPickerSettle = undefined
-    },
-    onModelMove: (delta) => {
-      if (exiting || modelPickerState === undefined) return
-      const selected = Math.min(Math.max(0, modelPickerState.selected + delta), Math.max(0, modelPickerState.options.length - 1))
-      if (selected === modelPickerState.selected) return
-      modelPickerState = { ...modelPickerState, selected }
-      publishModelPicker()
-    },
-    onModelConfirm: () => {
-      if (exiting || modelPickerState === undefined) return
-      const pick = modelPickerState.options[modelPickerState.selected]
-      modelPickerState = undefined
-      publishModelPicker()
-      if (pick === undefined) return
-      // The plugin applies the durable select() from this answer.
-      modelPickerSettle?.({ provider: pick.provider, model: pick.model })
-      modelPickerSettle = undefined
-    },
-    onModelCancel: () => {
-      if (exiting || modelPickerState === undefined) return
-      modelPickerState = undefined
-      publishModelPicker()
-      modelPickerSettle?.({ cancelled: true })
-      modelPickerSettle = undefined
+    onPickerCancel: () => {
+      if (exiting || pickerState === undefined) return
+      pickerState = undefined
+      publishPicker()
+      pickerSettle?.({ cancelled: true })
+      pickerSettle = undefined
     },
     onPanelOpen: () => {
       if (exiting) return

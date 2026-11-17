@@ -22,8 +22,7 @@ describe('slash command completion menu', () => {
       onPanelOpen: vi.fn(), onPanelMove: vi.fn(), onPanelEnter: vi.fn(), onPanelBack: vi.fn(),
       onChildPrompt: vi.fn(), onJobKill: vi.fn(), onQuestionAnswer: vi.fn(),
       onCyclePermission: vi.fn(),
-      onEffortMove: vi.fn(), onEffortConfirm: vi.fn(), onEffortCancel: vi.fn(),
-      onModelMove: vi.fn(), onModelConfirm: vi.fn(), onModelCancel: vi.fn(),
+      onPickerMove: vi.fn(), onPickerConfirm: vi.fn(), onPickerCancel: vi.fn(),
     }
   }
 

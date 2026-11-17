@@ -208,12 +208,9 @@ export async function bench(script: Script): Promise<BenchHandle> {
     onChildPrompt: () => {},
     onJobKill: () => {},
     onQuestionAnswer: () => {},
-    onEffortMove: () => {},
-    onEffortConfirm: () => {},
-    onEffortCancel: () => {},
-    onModelMove: () => {},
-    onModelConfirm: () => {},
-    onModelCancel: () => {},
+    onPickerMove: () => {},
+    onPickerConfirm: () => {},
+    onPickerCancel: () => {},
   }
   let resolveBound: () => void = () => {}
   const bound = new Promise<void>((resolve) => { resolveBound = resolve })

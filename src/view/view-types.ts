@@ -43,18 +43,12 @@ export interface InputHandlers {
   onQuestionAnswer(answer: QuestionAnswer): void
   /** ⇧Tab: cycle the session's permission preset to the next catalog entry. */
   onCyclePermission(): void
-  /** Move the effort picker's ▲ by `delta` levels (clamped at both ends). */
-  onEffortMove(delta: number): void
-  /** Apply the effort picker's selected level and close it. */
-  onEffortConfirm(): void
-  /** Close the effort picker without applying anything. */
-  onEffortCancel(): void
-  /** Move the model picker's ↑/↓ selection by `delta` rows. */
-  onModelMove(delta: number): void
-  /** Apply the model picker's selected route and close it. */
-  onModelConfirm(): void
-  /** Close the model picker without applying anything. */
-  onModelCancel(): void
+  /** Move the picker's selection by `delta` steps (clamped at both ends). */
+  onPickerMove(delta: number): void
+  /** Apply the picker's selected choice and close it. */
+  onPickerConfirm(): void
+  /** Close the picker without applying anything. */
+  onPickerCancel(): void
 }
 
 /** One question the agent asks the user (the terminal's structural mirror of
@@ -375,41 +369,40 @@ export interface CommandInfo {
   hint?: string
 }
 
-/** One disclosed reasoning-effort level the picker offers. */
-export interface EffortLevel {
-  readonly id: string
-  readonly name?: string
-  /** The adapter's one-line guidance for the level; the picker floats it
-   *  under the scale while the level is selected. */
+/** One choice a picker popup offers. */
+export interface PickerOptionView {
+  /** Opaque value reported back on confirm; never shown. */
+  readonly value: string
+  /** The row's (or scale tick's) primary text. */
+  readonly label: string
+  /** An optional short right-column note. */
+  readonly note?: string
+  /** An optional longer explanation of the focused choice. */
   readonly description?: string
 }
 
-/** The effort picker popup's state: the scale and the ←/→ selection (the
- *  driver opens it with the selection on the level in effect). */
-export interface EffortPickerView {
-  /** The adapter-disclosed levels, ordered faster → smarter. */
-  readonly levels: readonly EffortLevel[]
-  /** The ←/→ selection index into `levels`. */
+/**
+ * The single picker popup's state. One surface serves every plugin command
+ * that asks the user to choose: `scale` lays the options along a walkable
+ * track (capability levels), `list` stacks them as scrollable rows (routes,
+ * directories). The owning plugin decides the values; the terminal decides
+ * only how they look and which keys move the selection.
+ */
+export interface PickerPopupView {
+  /** Stable id of the dispatch this popup is answering. */
+  readonly pickerId: string
+  /** The layout: an ordered track or a scrollable list. */
+  readonly kind: 'scale' | 'list'
+  /** The popup's title line. */
+  readonly title: string
+  /** The choices, in the owning command's order. */
+  readonly options: readonly PickerOptionView[]
+  /** The ↑/↓ (list) or ←/→ (scale) selection index. */
   readonly selected: number
-}
-
-/** One selectable model route the route picker offers. */
-export interface ModelOption {
-  readonly provider: string
-  readonly model: string
-  readonly name?: string
-  readonly description?: string
-}
-
-/** The model-route picker popup's state: a scrollable list of discovered
- *  routes with the ↑/↓ selection. */
-export interface ModelPickerView {
-  /** Every discovered route, in adapter-preferred order. */
-  readonly options: readonly ModelOption[]
-  /** The ↑/↓ selection index into `options`. */
-  readonly selected: number
-  /** The `provider/model` in effect when the picker opened (marked ✓). */
-  readonly current?: string
+  /** The index of the choice in effect, when unknown. */
+  readonly currentIndex?: number
+  /** Names for the scale's two ends; ignored by `list`. */
+  readonly scaleEnds?: { readonly low: string; readonly high: string }
 }
 
 export interface RenderView {
@@ -417,10 +410,8 @@ export interface RenderView {
   status?: StatusInfo
   /** Registered slash commands; drives the `/` completion menu. */
   commands?: readonly CommandInfo[]
-  /** The effort picker popup; present while it is open above the input bar. */
-  effortPicker?: EffortPickerView
-  /** The model-route picker popup; present while it is open above the bar. */
-  modelPicker?: ModelPickerView
+  /** The picker popup; present while it is open above the input bar. */
+  picker?: PickerPopupView
   /** The unfinished direct subagents; absent or empty hides the panel. */
   subagents?: readonly SubagentRow[]
   /** The panel's selected row (0 = the main agent row); absent means the input bar holds focus. */
