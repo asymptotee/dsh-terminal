@@ -710,123 +710,135 @@ const PICKER_LIST_MAX_ROWS = 8
  *  the popup's own rule rather than hugging the terminal edge. */
 const PICKER_INDENT = '    '
 
+/** Rows the effort popup renders: rule, title, blank, ends, track, labels,
+ *  [blank + description], blank, hint. */
+const EFFORT_POPUP_BASE_ROWS = 8
+
 /**
- * The picker popup: one overlay serving every plugin command that asks the
- * user to choose. The same absolute-recipe as the completion menu — a
- * negative `top` equal to its own row count keeps it out of flow (the
- * transcript never reflows), and every row pads to the full width so the
- * cells underneath are erased.
- *
- * `scale` lays the choices along a walkable track (←/→): the label row sits
- * under the track, the ▲ rides the selection, and the ends name the two
- * directions. `list` stacks the choices as scrollable rows (↑/↓) with the
- * choice in effect marked ✓. Both float the focused choice's description
- * under a blank row.
+ * The effort picker popup: a scale of the route's disclosed levels. Its own
+ * component, deliberately not shared with the route list — the two layouts
+ * have different geometry (a track in column coordinates vs rows in a
+ * scrollable list) and sharing one renderer made every tweak to one shift the
+ * other. The ▲ rides the track at the ←/→ selection, the labels sit centred on
+ * their own ▲ column, and Faster/Smarter float above the two ends.
  */
-function PickerPopup({ picker, width }: {
+function EffortPickerPopup({ picker, width }: {
+  picker: PickerPopupView
+  width: number
+}): React.JSX.Element {
+  const { options, selected } = picker
+  const clampedSelected = Math.min(Math.max(0, selected), Math.max(0, options.length - 1))
+  // The nominal track length follows the level count — 10 columns per level,
+  // floor 20, ceiling 50 — and shrinks further only when the terminal is
+  // narrower. The Faster/Smarter labels float above its two ends, so the row
+  // itself is just the track.
+  const wantedSpan = Math.min(Math.max(options.length * 10, 20), 50)
+  const trackSpan = Math.max(8, Math.min(wantedSpan, width - 8))
+  // The ▲ never rides the track's ends: both keep one cell of ─ clear, so a
+  // selection at either end still sits inside the scale.
+  const trackEndInset = 1
+  const columnOf = (index: number): number => {
+    if (options.length <= 1) return Math.floor(trackSpan / 2)
+    const inner = Math.max(0, trackSpan - 1 - trackEndInset * 2)
+    return trackEndInset + Math.round(index * inner / (options.length - 1))
+  }
+  const column = columnOf(clampedSelected)
+  const pad = (used: number): string => ' '.repeat(Math.max(0, width - used))
+  // The levels row: each label placed so its ▲-cell sits exactly on its track
+  // column (odd widths center exactly; even widths shift right, landing the ▲
+  // on the left-of-center cell — the `i` of `high`), kept two clear of
+  // neighbours; the first label is never bumped off its column.
+  const labels: { text: string; start: number; isSelected: boolean }[] = []
+  let previousEnd = -Infinity
+  options.forEach((option, index) => {
+    const centered = columnOf(index) - Math.floor((stringWidth(option.label) - 1) / 2)
+    const start = Math.max(previousEnd + 2, Math.max(0, centered))
+    labels.push({ text: option.label, start, isSelected: index === clampedSelected })
+    previousEnd = start + stringWidth(option.label)
+  })
+  // The rendered track spans the labels: an even-width LAST name shifted onto
+  // its ▲-cell can overhang the nominal end, and the line must reach the
+  // name's last cell — both ends of the rule align with the names below.
+  const lastLabel = labels[labels.length - 1]
+  const trackLen = Math.max(trackSpan, lastLabel === undefined ? 0 : lastLabel.start + stringWidth(lastLabel.text))
+  const leftPad = Math.max(0, Math.floor((width - trackLen) / 2))
+  const trackBefore = '─'.repeat(column)
+  const trackAfter = '─'.repeat(Math.max(0, trackLen - column - 1))
+  // The ends row: `Faster` flush with the track's left end, `Smarter` with its
+  // right end, both above the line.
+  const lowEnd = picker.scaleEnds?.low ?? 'Faster'
+  const highEnd = picker.scaleEnds?.high ?? 'Smarter'
+  const lowWidth = stringWidth(lowEnd)
+  const highWidth = stringWidth(highEnd)
+  const labelGap = Math.max(1, trackLen - lowWidth - highWidth)
+  let labelCursor = 0
+  const labelSegments = labels.map((label, index) => {
+    const gap = ' '.repeat(Math.max(0, label.start - labelCursor))
+    labelCursor = label.start + stringWidth(label.text)
+    return label.isSelected ? (
+      <React.Fragment key={index}>{gap}<Text color="#a5d8ff" bold>{label.text}</Text></React.Fragment>
+    ) : (
+      <React.Fragment key={index}>{gap}<Text dimColor>{label.text}</Text></React.Fragment>
+    )
+  })
+  const hint = '←/→ to adjust · Enter to confirm · Esc to cancel'
+  // The selected level's description floats under the scale — one centered
+  // dim line, truncated to the popup width; levels that disclose none drop
+  // the row entirely (the overlay's row count follows).
+  const rawDescription = options[clampedSelected]?.description
+  const description = rawDescription === undefined || rawDescription === ''
+    ? undefined
+    : truncateToWidth(rawDescription, Math.max(0, width - 4))
+  // Two blank rows above the rule hide the transcript lines the popup would
+  // otherwise crowd; the description keeps one blank row of breathing room
+  // under the level names.
+  const rowCount = EFFORT_POPUP_BASE_ROWS + 2 + (description === undefined ? 0 : 2)
+  return (
+    <Box position="absolute" top={-rowCount} left={0} right={0} flexDirection="column">
+      <Text>{' '.repeat(width)}</Text>
+      <Text>{' '.repeat(width)}</Text>
+      <Text color="#a5d8ff">{'▔'.repeat(width)}</Text>
+      <Text color="#ffffff">{`${PICKER_INDENT}${picker.title}`}{pad(stringWidth(PICKER_INDENT) + stringWidth(picker.title))}</Text>
+      <Text>{' '.repeat(width)}</Text>
+      <Text>
+        {' '.repeat(leftPad)}<Text color="#ffffff">{lowEnd}</Text>{' '.repeat(labelGap)}<Text color="#ffffff">{highEnd}</Text>
+        {pad(leftPad + lowWidth + labelGap + highWidth)}
+      </Text>
+      <Text>
+        {' '.repeat(leftPad)}<Text dimColor>{trackBefore}</Text><Text color="#a5d8ff">▲</Text><Text dimColor>{trackAfter}</Text>
+        {pad(leftPad + trackLen)}
+      </Text>
+      <Text>{' '.repeat(leftPad)}{labelSegments}{pad(leftPad + labelCursor)}</Text>
+      {description === undefined ? null : <Text>{' '.repeat(width)}</Text>}
+      {description === undefined
+        ? null
+        : (
+          <Text dimColor>
+            {' '.repeat(Math.max(0, Math.floor((width - stringWidth(description)) / 2)))}
+            {description}
+            {pad(Math.floor((width - stringWidth(description)) / 2) + stringWidth(description))}
+          </Text>
+        )}
+      <Text>{' '.repeat(width)}</Text>
+      <Text dimColor>{PICKER_INDENT}{hint}{pad(stringWidth(PICKER_INDENT) + stringWidth(hint))}</Text>
+    </Box>
+  )
+}
+
+/**
+ * The model-route picker popup: a scrollable list of the adapters' routes.
+ * Its own component for the same reason the effort scale is — a vertical list
+ * and a column-coordinate track share no geometry worth unifying. A ❯ marks
+ * the ↑/↓ selection, a dim ordinal counts across the whole list, the route in
+ * effect wears mint with a green ✔, and the focused route's description
+ * floats under the list.
+ */
+function ModelPickerPopup({ picker, width }: {
   picker: PickerPopupView
   width: number
 }): React.JSX.Element {
   const { options, selected, currentIndex } = picker
   const clamped = Math.min(Math.max(0, selected), Math.max(0, options.length - 1))
-  const focused = options[clamped]
-  const pad = (used: number): string => ' '.repeat(Math.max(0, width - used))
-  const description = focused?.description === undefined || focused.description === ''
-    ? undefined
-    : truncateToWidth(focused.description, Math.max(0, width - 4))
-  const hint = picker.kind === 'scale'
-    ? '←/→ to adjust · Enter to confirm · Esc to cancel'
-    : '↑/↓ to move · Enter to confirm · Esc to cancel'
-  const title = picker.title
-  const header = () => (
-    <>
-      {/* Two erased rows above the rule: they hide the transcript lines the
-          popup's arrival would otherwise crowd, and keep the light-blue cap
-          off the body text directly. */}
-      <Text>{' '.repeat(width)}</Text>
-      <Text>{' '.repeat(width)}</Text>
-      <Text color="#a5d8ff">{'▔'.repeat(width)}</Text>
-      <Text color="#ffffff">{PICKER_INDENT}{title}{pad(stringWidth(PICKER_INDENT) + stringWidth(title))}</Text>
-      <Text>{' '.repeat(width)}</Text>
-    </>
-  )
-  const footer = (rows: number) => (
-    <>
-      {description === undefined
-        ? null
-        : (
-          <>
-            <Text>{' '.repeat(width)}</Text>
-            <Text dimColor>{PICKER_INDENT}{description}{pad(stringWidth(PICKER_INDENT) + stringWidth(description))}</Text>
-          </>
-        )}
-      <Text>{' '.repeat(width)}</Text>
-      <Text dimColor>{PICKER_INDENT}{hint}{pad(stringWidth(PICKER_INDENT) + stringWidth(hint))}</Text>
-    </>
-  )
-
-  if (picker.kind === 'scale') {
-    // The track: ten columns per choice, the ▲ inset one cell from each end
-    // so an end selection still shows a dash of track beyond it.
-    const wantedSpan = Math.min(Math.max(options.length * 10, 20), 50)
-    const trackSpan = Math.max(8, Math.min(wantedSpan, width - 8))
-    const trackEndInset = 1
-    const columnOf = (index: number): number => {
-      if (options.length <= 1) return Math.floor(trackSpan / 2)
-      const inner = Math.max(0, trackSpan - 1 - trackEndInset * 2)
-      return trackEndInset + Math.round(index * inner / (options.length - 1))
-    }
-    const column = columnOf(clamped)
-    // Labels sit centred on their ▲ column, kept two clear of neighbours; an
-    // even-width label shifts right so its left-of-centre cell takes the ▲.
-    const labels: { text: string; start: number; isSelected: boolean }[] = []
-    let previousEnd = -Infinity
-    options.forEach((option, index) => {
-      const centered = columnOf(index) - Math.floor((stringWidth(option.label) - 1) / 2)
-      const start = Math.max(previousEnd + 2, Math.max(0, centered))
-      labels.push({ text: option.label, start, isSelected: index === clamped })
-      previousEnd = start + stringWidth(option.label)
-    })
-    const lastLabel = labels[labels.length - 1]
-    const trackLen = Math.max(trackSpan, lastLabel === undefined ? 0 : lastLabel.start + stringWidth(lastLabel.text))
-    const leftPad = Math.max(0, Math.floor((width - trackLen) / 2))
-    let labelCursor = 0
-    const labelSegments = labels.map((label, index) => {
-      const gap = ' '.repeat(Math.max(0, label.start - labelCursor))
-      labelCursor = label.start + stringWidth(label.text)
-      return label.isSelected ? (
-        <React.Fragment key={index}>{gap}<Text color="#a5d8ff" bold>{label.text}</Text></React.Fragment>
-      ) : (
-        <React.Fragment key={index}>{gap}<Text dimColor>{label.text}</Text></React.Fragment>
-      )
-    })
-    const lowEnd = picker.scaleEnds?.low ?? ''
-    const highEnd = picker.scaleEnds?.high ?? ''
-    const endsRowWidth = stringWidth(lowEnd) + 1 + trackLen + 1 + stringWidth(highEnd)
-    const endsPad = Math.max(0, Math.floor((width - endsRowWidth) / 2))
-    const trackIndent = endsPad + stringWidth(lowEnd) + 1
-    // Rows: rule, title, blank, ends, track, labels, [blank + description],
-    // blank, hint. The negative `top` must match exactly or the popup lands
-    // off by the difference and paints over the editor row.
-    const rowCount = 10 + (description === undefined ? 0 : 2)
-    return (
-      <Box position="absolute" top={-rowCount} left={0} right={0} flexDirection="column">
-        {header()}
-        <Text>
-          {' '.repeat(endsPad)}<Text color="#ffffff">{lowEnd}</Text>{' '.repeat(Math.max(1, trackLen - stringWidth(lowEnd) - stringWidth(highEnd)))}<Text color="#ffffff">{highEnd}</Text>
-          {pad(endsPad + endsRowWidth)}
-        </Text>
-        <Text>
-          {' '.repeat(trackIndent)}<Text dimColor>{'─'.repeat(column)}</Text><Text color="#a5d8ff">{'▲'}</Text><Text dimColor>{'─'.repeat(Math.max(0, trackLen - column - 1))}</Text>
-          {pad(trackIndent + trackLen)}
-        </Text>
-        <Text>{' '.repeat(trackIndent)}{labelSegments}{pad(trackIndent + labelCursor)}</Text>
-        {footer(0)}
-      </Box>
-    )
-  }
-
-  // list
   const start = options.length <= PICKER_LIST_MAX_ROWS
     ? 0
     : Math.min(Math.max(0, clamped - Math.floor(PICKER_LIST_MAX_ROWS / 2)), options.length - PICKER_LIST_MAX_ROWS)
@@ -834,20 +846,31 @@ function PickerPopup({ picker, width }: {
   const hiddenBefore = start
   const hiddenAfter = options.length - start - visible.length
   const nameCol = options.reduce((max, option) => Math.max(max, stringWidth(option.label)), 0)
-  const noteBudget = Math.max(0, width - 4 - 2 - nameCol - MENU_DESCRIPTION_GAP)
-  const rows = visible.length + (hiddenBefore > 0 ? 1 : 0) + (hiddenAfter > 0 ? 1 : 0)
-  const rowCount = 6 + rows + (description === undefined ? 0 : 2) + 1
+  const noteBudget = Math.max(0, width - stringWidth(PICKER_INDENT) - 2 - 2 - nameCol - MENU_DESCRIPTION_GAP)
+  const pad = (used: number): string => ' '.repeat(Math.max(0, width - used))
+  const focused = options[clamped]
+  const description = focused?.description === undefined || focused.description === ''
+    ? undefined
+    : truncateToWidth(focused.description, Math.max(0, width - 4))
+  const listRows = visible.length + (hiddenBefore > 0 ? 1 : 0) + (hiddenAfter > 0 ? 1 : 0)
+  // Rows: two erased, rule, title, blank, the list, [blank + description],
+  // blank, hint.
+  const rowCount = 7 + listRows + (description === undefined ? 0 : 2)
+  const hint = '↑/↓ to move · Enter to confirm · Esc to cancel'
   return (
     <Box position="absolute" top={-rowCount} left={0} right={0} flexDirection="column">
-      {header()}
-      {hiddenBefore > 0 ? <Text dimColor>{padToWidth(`  … ${hiddenBefore} more`, width)}</Text> : null}
+      <Text>{' '.repeat(width)}</Text>
+      <Text>{' '.repeat(width)}</Text>
+      <Text color="#a5d8ff">{'▔'.repeat(width)}</Text>
+      <Text color="#ffffff">{`${PICKER_INDENT}${picker.title}`}{pad(stringWidth(PICKER_INDENT) + stringWidth(picker.title))}</Text>
+      <Text>{' '.repeat(width)}</Text>
+      {hiddenBefore > 0
+        ? <Text dimColor>{padToWidth(`${PICKER_INDENT}… ${hiddenBefore} more`, width)}</Text>
+        : null}
       {visible.map((option, index) => {
         const absolute = start + index
         const isSelected = absolute === clamped
         const isCurrent = absolute === currentIndex
-        // Claude Code's list shape: a ❯ on the ↑/↓ selection, a dim ordinal
-        // counting across the whole list (stable while the window scrolls),
-        // the label, and a green ✔ on the row in effect.
         const cursor = isSelected ? '❯ ' : '  '
         const ordinal = `${absolute + 1}. `
         const check = isCurrent ? ' ✔' : '  '
@@ -857,16 +880,9 @@ function PickerPopup({ picker, width }: {
           0,
           width - stringWidth(PICKER_INDENT) - stringWidth(cursor) - stringWidth(ordinal) - nameCol - stringWidth(check) - MENU_DESCRIPTION_GAP - stringWidth(note),
         )
-        // The row in effect wears the same green as its ✔ (a soft mint that
-        // reads as "live" without competing with the highlight tint); the
-        // ↑/↓ selection still wins the light blue while it rests there.
-        // The cursor column and the ordinal are their own spans so neither
-        // inherits the row's tint: the ❯ keeps the highlight tint, and the
-        // ordinal stays a neutral gray that reads as reference text.
-        // A plain row takes no color at all: it inherits the terminal's own
-        // foreground, exactly like body text (a hardcoded #ffffff reads
-        // brighter than the theme's off-white). The ↑/↓ selection wears the
-        // highlight tint, the row in effect mint.
+        // A plain row takes no color: it inherits the terminal's foreground
+        // exactly like body text. The selection wears the highlight tint, the
+        // route in effect mint with a green ✔.
         const rowColor = isSelected ? '#a5d8ff' : isCurrent ? '#8ce99a' : undefined
         return (
           <Text key={option.value} {...(rowColor === undefined ? {} : { color: rowColor })}>
@@ -879,8 +895,29 @@ function PickerPopup({ picker, width }: {
           </Text>
         )
       })}
-      {hiddenAfter > 0 ? <Text dimColor>{padToWidth(`  … ${hiddenAfter} more`, width)}</Text> : null}
-      {footer(0)}
+      {hiddenAfter > 0
+        ? <Text dimColor>{padToWidth(`${PICKER_INDENT}… ${hiddenAfter} more`, width)}</Text>
+        : null}
+      {description === undefined ? null : <Text>{' '.repeat(width)}</Text>}
+      {description === undefined
+        ? null
+        : (
+          <Text dimColor>
+            {PICKER_INDENT}{description}{pad(stringWidth(PICKER_INDENT) + stringWidth(description))}
+          </Text>
+        )}
+      <Text>{' '.repeat(width)}</Text>
+      <Text dimColor>{PICKER_INDENT}{hint}{pad(stringWidth(PICKER_INDENT) + stringWidth(hint))}</Text>
     </Box>
   )
+}
+
+/** Dispatch to the popup the request's layout calls for. */
+function PickerPopup({ picker, width }: {
+  picker: PickerPopupView
+  width: number
+}): React.JSX.Element {
+  return picker.kind === 'scale'
+    ? <EffortPickerPopup picker={picker} width={width} />
+    : <ModelPickerPopup picker={picker} width={width} />
 }
