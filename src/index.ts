@@ -473,6 +473,58 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
   /** The adapter's default effort for the model (when it discloses one); the
    *  badge falls back to it whenever no selection carries an effort. */
   let resolvedDefaultEffort: string | undefined
+  /** The readable model name per `provider/model` route, filled from the
+   *  adapter's catalog. Adapters fronting a gateway often use opaque ids
+   *  (`mode-7f5c…`) and carry the legible name separately, so the footer must
+   *  not print the id when a name exists. */
+  const modelNames = new Map<string, string>()
+  /** The route whose name the footer is currently showing. */
+  let shownModelRoute: string | undefined
+  /** Resolve (and cache) the readable name for one route, then adopt it on
+   *  the status bar. A catalog failure leaves the id in place. */
+  const adoptModelName = (provider: string, model: string): Promise<void> => {
+    const route = `${provider}/${model}`
+    const cached = modelNames.get(route)
+    if (cached !== undefined) {
+      if (view.status !== undefined && view.status.model !== cached) {
+        view = { ...view, status: { ...view.status, model: cached } }
+      }
+      shownModelRoute = route
+      return Promise.resolve()
+    }
+    shownModelRoute = route
+    const llm = ctx.get('llm') as
+      | { listModels(provider: string): Promise<readonly { id: string; name: string }[]> }
+      | undefined
+    if (llm === undefined || typeof llm.listModels !== 'function') return Promise.resolve()
+    return llm.listModels(provider).then((models) => {
+      for (const entry of models) {
+        // A name equal to the id adds nothing; keep the id as-is then.
+        if (entry.name !== undefined && entry.name !== '' && entry.name !== entry.id) {
+          modelNames.set(`${provider}/${entry.id}`, entry.name)
+        }
+      }
+      const name = modelNames.get(route)
+      // A switch may have landed while the catalog was loading: only adopt
+      // the name if this route is still the one on screen, and only render
+      // when the text actually changes (a catalog whose names match their
+      // ids costs no extra frame).
+      if (name === undefined || shownModelRoute !== route || view.status === undefined) return
+      if (view.status.model === name) return
+      view = { ...view, status: { ...view.status, model: name } }
+      scheduleRender(true)
+    }).catch(() => undefined)
+  }
+  /** Point the footer at the agent's current route, naming it when known. */
+  const refreshModelBadge = (): void => {
+    const current = agent.model.current()
+    if (current === undefined || view.status === undefined) return
+    const route = `${current.provider}/${current.model}`
+    const name = modelNames.get(route)
+    const shown = name ?? current.model
+    if (view.status.model !== shown) view = { ...view, status: { ...view.status, model: shown } }
+    void adoptModelName(current.provider, current.model)
+  }
   /** The open picker popup's state; undefined keeps it closed. */
   let pickerState: (PickerRequestShape & { selected: number }) | undefined
   /** Settles the open picker's waterfall request with the user's verdict. */
@@ -488,7 +540,12 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
     // The agent-owned selection wins: a resume re-records the durable effort,
     // and a mid-session switch must beat this one-shot lookup.
     const effort = agent.model.current()?.reasoningEffort ?? selection.reasoningEffort ?? info?.reasoning?.defaultEffort
-    if (window === undefined && effort === undefined) return
+    if (window === undefined && effort === undefined) {
+      // Nothing to fill in: keep the single initial render below as the only
+      // frame a no-info session ever paints, and resolve the name quietly.
+      void adoptModelName(selection.provider, selection.model)
+      return
+    }
     contextWindow = window
     view = view.status === undefined
       ? view
@@ -501,6 +558,10 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
         },
       }
     renderer.render(state, withPanel(view))
+    // The catalog lookup for the footer's readable name runs after the first
+    // paint and re-renders when it lands — awaiting it here would delay
+    // startup behind a provider round trip.
+    void adoptModelName(selection.provider, selection.model)
   })()
   // Streaming chunks arrive far faster than the terminal can redraw: fold them
   // into one render per window, while non-stream events (commands, approvals,
@@ -1316,7 +1377,10 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
     trackUsage(event)
     if (PERMISSION_KNOB_EVENTS.has(event.type as string)) queuePermissionBadge(event)
     if (PLAN_BADGE_EVENTS.has(event.type as string)) refreshPlanBadge()
-    if ((event.type as string) === 'model/selection') refreshEffortBadge(event)
+    if ((event.type as string) === 'model/selection') {
+      refreshEffortBadge(event)
+      refreshModelBadge()
+    }
     // A team event moves the authoritative agentTeam projection, so re-read it
     // before the render below to keep the team panel current.
     if ((event.type as string).startsWith('team/')) refreshTeam()

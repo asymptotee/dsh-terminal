@@ -706,6 +706,10 @@ function CommandMenu({
 /** Rows a list picker shows before windowing around the selection. */
 const PICKER_LIST_MAX_ROWS = 8
 
+/** Leading columns before the picker's text, so the content sits inset from
+ *  the popup's own rule rather than hugging the terminal edge. */
+const PICKER_INDENT = '    '
+
 /**
  * The picker popup: one overlay serving every plugin command that asks the
  * user to choose. The same absolute-recipe as the completion menu — a
@@ -742,7 +746,7 @@ function PickerPopup({ picker, width }: {
       <Text>{' '.repeat(width)}</Text>
       <Text>{' '.repeat(width)}</Text>
       <Text color="#a5d8ff">{'▔'.repeat(width)}</Text>
-      <Text color="#ffffff">{`  ${title}`}{pad(2 + stringWidth(title))}</Text>
+      <Text color="#ffffff">{PICKER_INDENT}{title}{pad(stringWidth(PICKER_INDENT) + stringWidth(title))}</Text>
       <Text>{' '.repeat(width)}</Text>
     </>
   )
@@ -753,11 +757,11 @@ function PickerPopup({ picker, width }: {
         : (
           <>
             <Text>{' '.repeat(width)}</Text>
-            <Text dimColor>{'  '}{description}{pad(2 + stringWidth(description))}</Text>
+            <Text dimColor>{PICKER_INDENT}{description}{pad(stringWidth(PICKER_INDENT) + stringWidth(description))}</Text>
           </>
         )}
       <Text>{' '.repeat(width)}</Text>
-      <Text dimColor>{'  '}{hint}{pad(2 + stringWidth(hint))}</Text>
+      <Text dimColor>{PICKER_INDENT}{hint}{pad(stringWidth(PICKER_INDENT) + stringWidth(hint))}</Text>
     </>
   )
 
@@ -840,17 +844,38 @@ function PickerPopup({ picker, width }: {
       {visible.map((option, index) => {
         const absolute = start + index
         const isSelected = absolute === clamped
-        const mark = absolute === currentIndex ? '✓ ' : '  '
+        const isCurrent = absolute === currentIndex
+        // Claude Code's list shape: a ❯ on the ↑/↓ selection, a dim ordinal
+        // counting across the whole list (stable while the window scrolls),
+        // the label, and a green ✔ on the row in effect.
+        const cursor = isSelected ? '❯ ' : '  '
+        const ordinal = `${absolute + 1}. `
+        const check = isCurrent ? ' ✔' : '  '
         const label = padToWidth(option.label, nameCol)
         const note = option.note === undefined ? '' : truncateToWidth(option.note, noteBudget)
-        const gap = Math.max(0, width - 2 - 2 - nameCol - MENU_DESCRIPTION_GAP - stringWidth(note))
-        return isSelected ? (
-          <Text key={option.value} color="#a5d8ff">
-            <Text bold>{'  '}{mark}{label}</Text>{' '.repeat(MENU_DESCRIPTION_GAP)}{note}{' '.repeat(gap)}
-          </Text>
-        ) : (
-          <Text key={option.value} dimColor>
-            {'  '}{mark}{label}{' '.repeat(MENU_DESCRIPTION_GAP)}{note}{' '.repeat(gap)}
+        const gap = Math.max(
+          0,
+          width - stringWidth(PICKER_INDENT) - stringWidth(cursor) - stringWidth(ordinal) - nameCol - stringWidth(check) - MENU_DESCRIPTION_GAP - stringWidth(note),
+        )
+        // The row in effect wears the same green as its ✔ (a soft mint that
+        // reads as "live" without competing with the highlight tint); the
+        // ↑/↓ selection still wins the light blue while it rests there.
+        // The cursor column and the ordinal are their own spans so neither
+        // inherits the row's tint: the ❯ keeps the highlight tint, and the
+        // ordinal stays a neutral gray that reads as reference text.
+        // A plain row takes no color at all: it inherits the terminal's own
+        // foreground, exactly like body text (a hardcoded #ffffff reads
+        // brighter than the theme's off-white). The ↑/↓ selection wears the
+        // highlight tint, the row in effect mint.
+        const rowColor = isSelected ? '#a5d8ff' : isCurrent ? '#8ce99a' : undefined
+        return (
+          <Text key={option.value} {...(rowColor === undefined ? {} : { color: rowColor })}>
+            {PICKER_INDENT}
+            <Text color="#a5d8ff">{cursor}</Text>
+            <Text color="#adb5bd">{ordinal}</Text>
+            {isSelected ? <Text bold>{label}</Text> : label}
+            {isCurrent ? <Text color="#51cf66" bold>{check}</Text> : check}
+            {note}{' '.repeat(gap)}
           </Text>
         )
       })}

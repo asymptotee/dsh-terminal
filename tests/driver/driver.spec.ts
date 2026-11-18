@@ -664,3 +664,36 @@ describe('tui driver', () => {
   })
 })
 
+
+describe('footer model naming', () => {
+  it('names a gateway route by its advertised name, not its opaque id', async () => {
+    // A proxy fronting several backends: the id is a routing hash and the
+    // catalog carries the only legible text.
+    const test = await bench({
+      llm: {
+        resolveModelInfo: async () => ({ context: { contextWindow: 800_000 } }),
+        listProviders: () => [{ id: 'test-provider' }],
+        listModels: async () => [{ provider: 'test-provider', id: 'test-model', name: 'Readable Model' }],
+      },
+      afterPrompt: () => {},
+    })
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(test.views.at(-1)?.status?.model).toBe('Readable Model')
+    await test.ctx.fiber.dispose()
+  })
+
+  it('keeps the id when the catalog offers no distinct name', async () => {
+    const test = await bench({
+      llm: {
+        resolveModelInfo: async () => ({ context: { contextWindow: 800_000 } }),
+        listProviders: () => [{ id: 'test-provider' }],
+        // The name repeats the id: nothing to gain from swapping it in.
+        listModels: async () => [{ provider: 'test-provider', id: 'test-model', name: 'test-model' }],
+      },
+      afterPrompt: () => {},
+    })
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(test.views.at(-1)?.status?.model).toBe('test-model')
+    await test.ctx.fiber.dispose()
+  })
+})

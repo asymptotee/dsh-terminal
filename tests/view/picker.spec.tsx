@@ -68,7 +68,9 @@ describe('picker popup layouts', () => {
     expect(frame).toContain('anthropic/model-a')
     expect(frame).toContain('anthropic/model-b')
     expect(frame).toContain('other/model-a')
-    expect(frame).toContain('✓')
+    // The row in effect carries a ✔ after its label; rows are ordinaled.
+    expect(frame).toContain('✔')
+    expect(frame).toContain('1. anthropic/model-a')
     expect(frame).toContain('The slower one')
     expect(frame).toContain('↑/↓ to move · Enter to confirm · Esc to cancel')
   })
@@ -94,7 +96,7 @@ describe('picker popup layouts', () => {
       />,
     )
     const rows = (lastFrame() ?? '').split('\n')
-    expect(rows.find(row => row.includes('anthropic/model-x'))?.trimEnd()).toBe('  ✓ anthropic/model-x')
+    expect(rows.find(row => row.includes('anthropic/model-x'))?.trimEnd()).toBe('      1. anthropic/model-x ✔')
     expect(rows.find(row => row.includes('anthropic/model-z'))).toContain('Model Z')
   })
 
