@@ -841,7 +841,7 @@ describe('TuiApp rendering', () => {
     expect(frame.indexOf('Unknown command')).toBeLessThan(frame.indexOf('later message'))
   })
 
-  it('renders the status bar with model, cwd, and mode', () => {
+  it('renders the status bar with model, effort, cwd, and mode', () => {
     const { lastFrame } = renderApp(
       <TuiApp
         state={state([])}
@@ -850,13 +850,25 @@ describe('TuiApp rendering', () => {
       />,
     )
     const frame = lastFrame() ?? ''
-    expect(frame).toContain('test-model')
-    expect(frame).toContain('~/repo')
+    // One reading sentence: the effort is a property of the route in effect,
+    // so it trails the model name and precedes the directory.
+    expect(frame).toContain('test-model · max · ~/repo')
     // The mode sits on its own row below the model line.
     expect(frame.indexOf('read-only')).toBeGreaterThan(frame.indexOf('~/repo'))
-    // The effort badge sits right-aligned on the model line.
-    expect(frame).toContain('● effort: max')
-    expect(frame.indexOf('● effort: max')).toBeGreaterThan(frame.indexOf('~/repo'))
+  })
+
+  it('keeps the model line whole when no effort is recorded', () => {
+    const { lastFrame } = renderApp(
+      <TuiApp
+        state={state([])}
+        handlers={noopHandlers()}
+        view={{ status: { model: 'test-model', cwd: `${os.homedir()}/repo` } }}
+      />,
+    )
+    const frame = lastFrame() ?? ''
+    // No dangling separator where the effort would have been.
+    expect(frame).toContain('test-model · ~/repo')
+    expect(frame).not.toContain('test-model ·  ·')
   })
 
   it('renders the welcome block with title, model, and cwd', () => {

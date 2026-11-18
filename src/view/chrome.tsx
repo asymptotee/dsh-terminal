@@ -45,20 +45,18 @@ export function StatusBar({
   if (status === undefined) return <></>
   return (
     // The two-column lead aligns the footer under the panels' header column
-    // (the Workflow run header's indent); the right-aligned effort keeps its
-    // own right padding, so only the left edge moves.
+    // (the Workflow run header's indent). The standing facts read as one
+    // left-aligned sentence — model, effort, directory, context — rather than
+    // splitting the effort off to the right margin: the effort is a property
+    // of the model in effect, so it belongs beside the model it describes.
     <Box flexDirection="column" marginBottom={1} paddingLeft={2}>
       <Box flexDirection="row">
         <Text dimColor>
-          {status.model} · {shortenCwd(status.cwd)}
+          {status.model}
+          {status.effort !== undefined ? ` · ${status.effort}` : ''}
+          {' · '}{shortenCwd(status.cwd)}
           {status.context !== undefined ? ` · context: ${formatContext(status.context)}` : ''}
         </Text>
-        <Box flexGrow={1} />
-        <Box paddingRight={1}>
-          <Text dimColor>
-            {status.effort !== undefined ? `● effort: ${status.effort}` : ''}
-          </Text>
-        </Box>
       </Box>
       {status.mode !== undefined || status.planMode === true || hint !== undefined
         ? (

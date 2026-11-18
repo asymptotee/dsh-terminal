@@ -208,11 +208,10 @@ describe('workflow panel', () => {
     const frame = lastFrame() ?? ''
     // The read-only member view's box shows the dim note instead of a
     // caret — it takes no keys — while the standing footer facts stay:
-    // same model/cwd/context/effort/permission row the main view shows.
+    // same model/effort/cwd/context/permission rows the main view shows.
     expect(frame).toContain('当前子代理不接受新消息')
     expect(frame).not.toContain('█')
-    expect(frame).toContain('test-model · /workspace/repo · context: 12k/1000k (1%)')
-    expect(frame).toContain('● effort: high')
+    expect(frame).toContain('test-model · high · /workspace/repo · context: 12k/1000k (1%)')
     expect(frame).toContain('workspace-write')
   })
 

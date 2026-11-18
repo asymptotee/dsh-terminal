@@ -169,7 +169,8 @@ export interface StatusInfo {
   planMode?: boolean
   /** Current context usage from the latest step's token report. */
   context?: { used: number; window: number }
-  /** The reasoning effort, shown right-aligned with the `/effort` hint. */
+  /** The reasoning effort, shown in the standing-facts sentence right after
+   *  the model name — it is a property of the route in effect. */
   effort?: string
 }
 
