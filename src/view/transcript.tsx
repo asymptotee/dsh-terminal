@@ -237,6 +237,7 @@ function CommandRow({ frame, expandedOutput, width }: {
           text={done.text ?? 'command failed'}
           expanded={expandedOutput}
           bright
+          alwaysExpanded
           {...(done.kind === 'error' ? { error: true } : {})}
         />
         : null}
@@ -432,7 +433,16 @@ function ToolResultView({
 }
 
 /** The Claude Code-style output block: one `⎿` connector, then aligned lines, truncated with an expand hint; a failed result renders red instead of dim, and a `bright` success renders white (the slash commands' results — tool outputs and notice bodies stay dim). */
-function IndentedBlock({ text, expanded, error, bright }: { text: string; expanded: boolean; error?: boolean; bright?: boolean }): React.JSX.Element {
+function IndentedBlock({ text, expanded, error, bright, alwaysExpanded }: {
+  text: string
+  expanded: boolean
+  error?: boolean
+  bright?: boolean
+  /** Show every line regardless of the truncation budget and the ctrl+o
+   *  toggle. Command results use this: a report the user asked for should
+   *  arrive whole rather than behind an expand hint. */
+  alwaysExpanded?: boolean
+}): React.JSX.Element {
   const lines = text.split('\n')
   const hidden = lines.length - TRUNCATED_OUTPUT_LINES
   // The `⎿` connector is always dim across the whole project, whether or not
@@ -445,7 +455,7 @@ function IndentedBlock({ text, expanded, error, bright }: { text: string; expand
         : bright ? <Text color="#ffffff">{line}</Text> : <Text dimColor>{line}</Text>}
     </Text>
   )
-  if (!expanded && hidden > 0) {
+  if (!alwaysExpanded && !expanded && hidden > 0) {
     const visible = lines.slice(0, TRUNCATED_OUTPUT_LINES)
     return (
       <Box flexDirection="column">
