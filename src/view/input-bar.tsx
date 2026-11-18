@@ -13,7 +13,7 @@ import type { ScrollAction } from './terminal.ts'
 import { clickFromInput, containsMouseReport, moveFromInput, wheelDeltaFromInput } from './terminal.ts'
 import type { ClickPosition } from './terminal.ts'
 import type { CommandInfo, InputHandlers, PickerPopupView, StatusInfo } from './view-types.ts'
-import { padToWidth, truncateToWidth } from './text-helpers.ts'
+import { padToWidth, titledRule, truncateToWidth } from './text-helpers.ts'
 import { useTerminalWidth } from './use-terminal.ts'
 import { StatusBar } from './chrome.tsx'
 
@@ -531,6 +531,8 @@ export function InputBar({
   // footer keeps the session's standing facts.
   if (childReadOnly) {
     const readOnlyRule = <Text color="#a5d8ff">{'─'.repeat(width)}</Text>
+    // No title on a child's rule: the label names THIS session, and a child
+    // transcript is not it.
     return (
       <Box flexDirection="column">
         {readOnlyRule}
@@ -546,10 +548,18 @@ export function InputBar({
   }
 
   // The continuable child's editor wears the light-blue tint of the child
-  // view's chrome; the main input keeps the dim rules.
+  // view's chrome; the main input keeps the dim rules. The TOP rule carries
+  // the session title at its right end — the title belongs to this session
+  // alone, so a child transcript's box does not show the parent's. The bottom
+  // rule stays plain: two labelled rules would read as two headers sandwiching
+  // the editor.
+  const title = childPromptable || childReadOnly ? '' : (status?.title ?? '')
   const rule = childPromptable
     ? <Text color="#a5d8ff">{'─'.repeat(width)}</Text>
     : <Text dimColor>{'─'.repeat(width)}</Text>
+  const topRule = childPromptable
+    ? <Text color="#a5d8ff">{'─'.repeat(width)}</Text>
+    : <Text dimColor>{titledRule(width, title)}</Text>
   // An empty child editor shows the identity-and-keys placeholder in dim gray
   // behind the caret; the first typed character replaces the placeholder.
   const showPlaceholder = childPromptable && value === '' && childPlaceholder !== undefined
@@ -568,7 +578,7 @@ export function InputBar({
           the keys, so the buffer never reaches the menu's prefix rule). */}
       {picker !== undefined ? <PickerPopup picker={picker} width={width} /> : null}
       {menuOpen ? <CommandMenu items={menuMatches} selected={menuSelected} width={width} /> : null}
-      {rule}
+      {topRule}
       {showPlaceholder
         ? (
           <Text>

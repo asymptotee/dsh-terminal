@@ -154,6 +154,11 @@ export type Overlay =
 export interface StatusInfo {
   /** The active model name. */
   model: string
+  /** The session's folded title (a `/rename` pin, a generated one, or the
+   *  deterministic fallback). Shown at the right end of the input box's top
+   *  rule — the one row that reads as the session's own header. Absent before
+   *  any title lands. */
+  title?: string
   /** The working directory, shown home-shortened. */
   cwd: string
   /** The permission preset selection (`read-only`/`workspace-write`/`auto`/...), on its own row. */

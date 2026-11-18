@@ -91,6 +91,31 @@ export function foldInvocationLine(title: string): string {
     .join('; ')
 }
 
+/**
+ * The input box's top rule carrying the session title at its right end:
+ * `──────  …  label ─`, exactly `width` display columns. The single trailing
+ * `─` closes the rule after the label so the box still reads as framed
+ * rather than as a rule that ran out. A label that would crowd the rule is
+ * truncated with the shared ellipsis, and one with no room at all (a very
+ * narrow terminal) leaves the plain rule — the rule never overflows the
+ * width, because an overlong row wraps and breaks the frame.
+ * @param width - the terminal width in columns.
+ * @param label - the session title; empty yields the plain rule.
+ * @param minDashes - the fewest leading rule columns kept before the label.
+ * @returns the rule text, exactly `width` columns wide.
+ */
+export function titledRule(width: number, label: string, minDashes = 2): string {
+  if (width <= 0) return ''
+  const plain = '─'.repeat(width)
+  if (label === '') return plain
+  // ` label ─` costs the label plus one space on either side of it.
+  const budget = width - minDashes - 3
+  if (budget <= 0) return plain
+  const shown = truncateToWidth(label, budget)
+  const lead = width - stringWidth(shown) - 3
+  return `${'─'.repeat(Math.max(0, lead))} ${shown} ─`
+}
+
 /** Split newline-terminated content without a phantom trailing empty line. */
 export function splitLines(text: string): readonly string[] {
   if (text === '') return []

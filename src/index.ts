@@ -1256,6 +1256,23 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
       view = { ...view, status: { ...view.status, planMode } }
     }
   }
+  // The title label follows the `title` projection (the folded last-wins
+  // `session/title` text, the shape every host's session list consumes). It
+  // rides the log, so a resume restores the pin the same way the plan badge
+  // and the goal strip do. Structural read, the same pattern — no upstream
+  // import.
+  const refreshTitleLabel = (): void => {
+    if (view.status === undefined) return
+    const title = sessionProjections?.stateOf(agent.session, 'title') as string | null | undefined
+    const shown = typeof title === 'string' && title !== '' ? title : undefined
+    if (view.status.title === shown) return
+    if (shown === undefined) {
+      const { title: _dropped, ...rest } = view.status
+      view = { ...view, status: rest }
+      return
+    }
+    view = { ...view, status: { ...view.status, title: shown } }
+  }
   // The effort badge follows the agent-owned selection: `/effort` appends a
   // `model/selection` event whose payload IS the recorded selection, so the
   // live badge reads it off the event (the projection's fold order against
@@ -1322,6 +1339,10 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
   refreshPermissionBadge()
   // Seed the plan badge from the log projection the same way.
   refreshPlanBadge()
+  // A resumed session's title was pinned (or generated) before this run;
+  // the fold above replayed the event, so the label is ready for the first
+  // frame.
+  refreshTitleLabel()
   // Seed the effort badge from the agent-owned selection (a resume re-recorded
   // the durable effort; a fresh session falls back to the startup value).
   refreshEffortBadge()
@@ -1387,6 +1408,9 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
     // A committed working-directory change moves the session's effective
     // directory, so the status bar re-reads it before the render below.
     if ((event.type as string) === 'working-directory/change') refreshWorkingDirectory()
+    // A title lands from `/rename` (a pinned user title) or from the provider
+    // after the first prompt; the rule picks it up before this render.
+    if ((event.type as string) === 'session/title') refreshTitleLabel()
     // A goal event moves the goal projection's durable half (phase, objective,
     // the round budget), so re-read it before the render below. The round
     // counter itself advances on the goal-sourced user/message below, not here.
