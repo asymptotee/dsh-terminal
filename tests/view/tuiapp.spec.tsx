@@ -8,7 +8,7 @@ import { TuiApp, padToWidth, truncateToWidth } from '../../src/view/renderer.tsx
 import type { RenderView } from '../../src/view/renderer.tsx'
 import { FrameRow } from '../../src/view/transcript.tsx'
 import type { Frame, FrameState } from '../../src/fold/frames.ts'
-import { noopHandlers, renderApp, settled, state } from '../helpers/render.tsx'
+import { noopHandlers, openShellRun, renderApp, settled, state } from '../helpers/render.tsx'
 
 describe('TuiApp rendering', () => {
   it('renders the empty stream with the input marker', () => {
@@ -35,7 +35,7 @@ describe('TuiApp rendering', () => {
     // the same one-row-margin wrapper the transcript list uses.
     const expanded = (frame: Frame) => (
       <Box flexDirection="column" marginBottom={1}>
-        <FrameRow frame={frame} expandedOutput={false} approvalCallId={undefined} thinkingExpanded={true} thinkingHovered={false} />
+        <FrameRow frame={frame} expandedOutput={false} approvalCallId={undefined} thinkingExpanded thinkingHovered={false} />
       </Box>
     )
     // Thinking + text: one breathing row between the reasoning and the text.
@@ -59,16 +59,18 @@ describe('TuiApp rendering', () => {
     expect(next - border).toBe(2)
   })
 
-  it('collapses trailing newlines of assistant text to the single frame margin', () => {
+  it('collapses trailing newlines of assistant text to the single frame margin', async () => {
+    // A settled call so the episode path is not what is under test here: this
+    // asserts the assistant frame's own trailing-newline handling.
     const frames: Frame[] = [
       { kind: 'assistant', seq: 1, turn: 1, step: 1, text: 'Hello there\n\n\n', streaming: false },
-      { kind: 'tool', seq: 2, turn: 1, step: 1, callId: 'c1', name: 'bash', args: {}, call: { card: 'terminal', title: 'ls' } },
+      { kind: 'tool', seq: 2, turn: 1, step: 1, callId: 'c1', name: 'bash', args: {}, call: { card: 'terminal', title: 'ls' }, result: { card: 'terminal', output: 'a.txt' } },
     ]
-    const { lastFrame } = renderApp(<TuiApp state={state(frames)} handlers={noopHandlers()} />)
-    const frame = lastFrame() ?? ''
+    const app = renderApp(<TuiApp state={state(frames)} handlers={noopHandlers()} />)
+    const frame = app.lastFrame() ?? ''
     // Exactly one blank line — the frame wrapper's margin — between the text
-    // and the next call; the model's trailing newlines render nothing.
-    expect(frame).toContain('● Hello there\n\n● Bash(ls)')
+    // and the next row; the model's trailing newlines render nothing.
+    expect(frame).toContain('● Hello there\n\n  Ran 1 shell command')
     expect(frame).not.toContain('Hello there\n\n\n')
   })
 
@@ -82,16 +84,19 @@ describe('TuiApp rendering', () => {
     expect(lastFrame()).toMatch(/❯ hello.*\n\n+● answer/)
   })
 
-  it('folds a multiline invocation into a one-line semicolon summary', () => {
+  it('folds a multiline invocation into a one-line semicolon summary', async () => {
+    // A running shell call renders on the episode's `⎿` line without the
+    // `Bash(…)` wrapper; the fold is what keeps it to one row.
     const frames: Frame[] = [{
       kind: 'tool', seq: 1, turn: 1, step: 1, callId: 'c1', name: 'bash',
       args: { command: 'set -x\ncd /work\nmkdir smoke' },
       call: { card: 'terminal', title: 'set -x\ncd /work\nmkdir smoke' },
     }]
-    const { lastFrame } = renderApp(<TuiApp state={state(frames)} handlers={noopHandlers()} />)
+    const app = renderApp(<TuiApp state={state(frames)} handlers={noopHandlers()} />)
+    expect(await settled(60) ?? app.lastFrame()).toBeDefined()
     // Newlines fold to `; ` — shell one-liner reading, the same fold the
     // panel activity uses — and the short fold renders complete, unclamped.
-    expect(lastFrame() ?? '').toContain('● Bash(set -x; cd /work; mkdir smoke)')
+    expect(app.lastFrame() ?? '').toContain('  ⎿  set -x; cd /work; mkdir smoke')
   })
 
   it('clamps a folded invocation to the width budget and expands it with ctrl+o', async () => {
@@ -102,15 +107,17 @@ describe('TuiApp rendering', () => {
       call: { card: 'terminal', title: script },
     }]
     const { lastFrame, stdin } = renderApp(<TuiApp state={state(frames)} handlers={noopHandlers()} />)
+    await settled(60)
     // Folded to `; ` then clamped at the budget with the bare ellipsis; the
     // later steps stay hidden until ctrl+o reveals the full fold.
     let frame = lastFrame() ?? ''
-    expect(frame).toContain('● Bash(step number 1 runs; step number 2 runs; step number…')
-    expect(frame).not.toContain('step number 3 runs')
+    expect(frame).toContain('  ⎿  step number 1 runs; step number 2 runs')
+    expect(frame).toContain('…')
+    expect(frame).not.toContain('step number 8 runs')
     stdin.write('\x0f')
     await settled()
     frame = lastFrame() ?? ''
-    expect(frame).toContain('step number 8 runs)')
+    expect(frame).toContain('step number 8 runs')
   })
 
   it('echoes a multi-line user message aligned under the prompt', () => {
@@ -288,7 +295,7 @@ describe('TuiApp rendering', () => {
     }
   }
   function expandedRow(frame: Frame) {
-    return <FrameRow frame={frame} expandedOutput={false} approvalCallId={undefined} thinkingExpanded={true} thinkingHovered={false} />
+    return <FrameRow frame={frame} expandedOutput={false} approvalCallId={undefined} thinkingExpanded thinkingHovered={false} />
   }
 
   it('collapses settled thinking to the dim Thought-for line alone', () => {
@@ -312,11 +319,11 @@ describe('TuiApp rendering', () => {
     expect(ref.mock.calls.some(call => call[0] != null)).toBe(true)
   })
 
-  it('keeps the live reasoning fully visible with the blinking dot', () => {
+  it('keeps the live reasoning visible with the blinking dot', () => {
     const frames: Frame[] = [thinkingFrame('live idea', { streaming: true, text: '', thinking: { text: 'live idea', startedAt: 0, seconds: 1 } })]
     const { lastFrame } = renderApp(<TuiApp state={state(frames)} handlers={noopHandlers()} />)
     const frame = lastFrame() ?? ''
-    expect(frame).toContain('● Thought for 1s')
+    expect(frame).toContain('● Thinking for 1s')
     // The live window hangs on a rule aligned to the header's text column.
     expect(frame).toContain('  │ live idea')
   })
@@ -406,7 +413,7 @@ describe('TuiApp rendering', () => {
     expect(frame).not.toContain('●\n')
   })
 
-  it('renders a terminal tool card with command, output, and exit pill', () => {
+  it('renders a terminal tool card with command, output, and exit pill', async () => {
     const frames: Frame[] = [{
       kind: 'tool',
       seq: 3,
@@ -418,13 +425,21 @@ describe('TuiApp rendering', () => {
       call: { card: 'terminal', title: 'ls' },
       result: { card: 'terminal', output: 'a.txt\n', exitCode: 0 },
     }]
-    const { lastFrame } = renderApp(<TuiApp state={state(frames)} handlers={noopHandlers()} />)
-    const frame = lastFrame() ?? ''
+    // A tall viewport: the revealed card must fit, or the transcript scrolls
+    // it out of view and the assertion reads an empty window.
+    const app = renderApp(<TuiApp state={state(frames)} handlers={noopHandlers()} viewportRows={30} />)
+    // A settled call starts folded behind its count row.
+    expect(app.lastFrame()).toContain('Ran 1 shell command')
+    expect(await openShellRun(app)).toBe(true)
+    const frame = app.lastFrame() ?? ''
     expect(frame).toContain('● Bash(ls)')
     expect(frame).toContain('⎿  a.txt')
   })
 
-  it('shows a sibling tool result that lands after a newer frame has overtaken it', () => {
+  it('shows a sibling tool result that lands after a newer frame has overtaken it', async () => {
+    // Both calls are pending, so each keeps its own card: the episode path
+    // only folds settled calls, and this test is about the orphan-result
+    // reconciliation.
     const first: Frame = {
       kind: 'tool', seq: 3, turn: 1, step: 1, callId: 'c1', name: 'subagent',
       args: { description: '调查 subagent 包结构' },
@@ -436,22 +451,28 @@ describe('TuiApp rendering', () => {
       call: { card: 'generic', title: '统计仓库包数量' },
     }
     const { lastFrame, rerender } = renderApp(<TuiApp state={state([first, second])} handlers={noopHandlers()} />)
+    await settled()
+    // A subagent hand-off is not one of the absorbed kinds, so both keep
+    // their own cards.
     expect(lastFrame()).toContain('● Subagent(调查 subagent 包结构)')
     expect(lastFrame()).not.toContain('started subagent child-1')
     const settledFirst: Frame = { ...first, resultContent: [{ type: 'text', text: 'started subagent child-1' }] }
     rerender(<TuiApp state={state([settledFirst, second])} handlers={noopHandlers()} />)
+    await settled()
+    // The result attaches to its own call, not to the sibling that overtook it.
     expect(lastFrame()).toContain('started subagent child-1')
   })
 
-  it('aligns continuation output lines under the connector text', () => {
+  it('aligns continuation output lines under the connector text', async () => {
     const frames: Frame[] = [{
       kind: 'tool', seq: 5, turn: 1, step: 1, callId: 'c3', name: 'bash',
       args: { command: 'ls' },
       call: { card: 'terminal', title: 'ls' },
       result: { card: 'terminal', output: 'a.txt\nb.txt\n', exitCode: 0 },
     }]
-    const { lastFrame } = renderApp(<TuiApp state={state(frames)} handlers={noopHandlers()} />)
-    const frame = lastFrame() ?? ''
+    const app = renderApp(<TuiApp state={state(frames)} handlers={noopHandlers()} viewportRows={30} />)
+    expect(await openShellRun(app)).toBe(true)
+    const frame = app.lastFrame() ?? ''
     expect(frame).toContain('  ⎿  a.txt')
     expect(frame).toContain('     b.txt')
   })
@@ -496,8 +517,12 @@ describe('TuiApp rendering', () => {
       call: { card: 'terminal', title: 'seq 35' },
       result: { card: 'terminal', output: long, exitCode: 0 },
     }]
-    const { lastFrame, stdin } = renderApp(<TuiApp state={state(frames)} handlers={noopHandlers()} />)
-    let frame = lastFrame() ?? ''
+    // A tall window: the card's own 6-line output plus the truncation hint has
+    // to fit, or the transcript scrolls the top of it out of view.
+    const app = renderApp(<TuiApp state={state(frames)} handlers={noopHandlers()} viewportRows={40} />)
+    expect(await openShellRun(app)).toBe(true)
+    const { stdin } = app
+    let frame = app.lastFrame() ?? ''
     expect(frame).toContain('⎿  line 1')
     expect(frame).toContain('line 6')
     expect(frame).not.toContain('⎿  line 2')
@@ -505,18 +530,18 @@ describe('TuiApp rendering', () => {
     expect(frame).toContain('29 more lines (ctrl+o to expand)')
     stdin.write('\x0f')
     await settled()
-    frame = lastFrame() ?? ''
+    frame = app.lastFrame() ?? ''
     expect(frame).toContain('line 31')
     expect(frame).toContain('line 35')
     expect(frame).not.toContain('more lines')
     stdin.write('\x0f')
     await settled()
-    frame = lastFrame() ?? ''
+    frame = app.lastFrame() ?? ''
     expect(frame).not.toContain('line 7')
     expect(frame).toContain('29 more lines (ctrl+o to expand)')
   })
 
-  it('does not truncate output within the limit', () => {
+  it('does not truncate output within the limit', async () => {
     const lines = Array.from({ length: 3 }, (_, i) => `line ${i + 1}`).join('\n')
     const frames: Frame[] = [{
       kind: 'tool',
@@ -529,9 +554,10 @@ describe('TuiApp rendering', () => {
       call: { card: 'terminal', title: 'seq 3' },
       result: { card: 'terminal', output: lines, exitCode: 0 },
     }]
-    const { lastFrame } = renderApp(<TuiApp state={state(frames)} handlers={noopHandlers()} />)
-    expect(lastFrame()).toContain('line 3')
-    expect(lastFrame()).not.toContain('more lines')
+    const app = renderApp(<TuiApp state={state(frames)} handlers={noopHandlers()} viewportRows={30} />)
+    expect(await openShellRun(app)).toBe(true)
+    expect(app.lastFrame()).toContain('line 3')
+    expect(app.lastFrame()).not.toContain('more lines')
   })
 
   it('types l as a character even when the buffer is empty', async () => {
@@ -675,23 +701,26 @@ describe('TuiApp rendering', () => {
     expect(frame).not.toContain('```')
   })
 
-  it('renders the raw result content when the tool card has no result view', () => {
+  it('renders the raw result content when the tool card has no result view', async () => {
     const frames: Frame[] = [{
       kind: 'tool',
       seq: 5,
       turn: 1,
       step: 1,
       callId: 'c3',
-      name: 'read_file',
+      // A standalone tool so the card renders without opening a run; the raw
+      // result fallback is what this test is about.
+      name: 'write',
       args: {},
-      call: { card: 'generic', title: 'read_file', rawInput: {} },
+      call: { card: 'generic', title: 'write', rawInput: {} },
       resultContent: [{ type: 'text', text: 'file content\n' }],
     }]
-    const { lastFrame } = renderApp(<TuiApp state={state(frames)} handlers={noopHandlers()} />)
-    expect(lastFrame()).toContain('file content')
+    const app = renderApp(<TuiApp state={state(frames)} handlers={noopHandlers()} />)
+    await settled()
+    expect(app.lastFrame()).toContain('file content')
   })
 
-  it('renders a read card as numbered lines without the raw envelope', () => {
+  it('renders a read card as numbered lines without the raw envelope', async () => {
     const frames: Frame[] = [{
       kind: 'tool',
       seq: 11,
@@ -712,8 +741,10 @@ describe('TuiApp rendering', () => {
         totalLines: 2,
       },
     }]
-    const { lastFrame } = renderApp(<TuiApp state={state(frames)} handlers={noopHandlers()} />)
-    const frame = lastFrame() ?? ''
+    const app = renderApp(<TuiApp state={state(frames)} handlers={noopHandlers()} viewportRows={30} />)
+    // A read folds into its run like any non-write/edit tool.
+    expect(await openShellRun(app)).toBe(true)
+    const frame = app.lastFrame() ?? ''
     // The call label is not repeated inside the invocation.
     expect(frame).toContain('● Read(/tmp/test.txt)')
     expect(frame).toContain('1: first line')
@@ -771,8 +802,11 @@ describe('TuiApp rendering', () => {
       call: { card: 'generic', title: 'Read /tmp/test.txt', kind: 'read', rawInput: {} },
       result: { card: 'read', path: '/tmp/test.txt', offset: 1, lines, totalLines: 9 },
     }]
-    const { lastFrame, stdin } = renderApp(<TuiApp state={state(frames)} handlers={noopHandlers()} />)
-    let frame = lastFrame() ?? ''
+    const app = renderApp(<TuiApp state={state(frames)} handlers={noopHandlers()} viewportRows={30} />)
+    // A read folds into its run; the card's own truncation is under test here.
+    expect(await openShellRun(app)).toBe(true)
+    const { stdin } = app
+    let frame = app.lastFrame() ?? ''
     // The first numbered line carries the `⎿` connector like every other card.
     expect(frame).toContain('⎿  1: line 1')
     expect(frame).toContain('6: line 6')
@@ -780,7 +814,7 @@ describe('TuiApp rendering', () => {
     expect(frame).toContain('3 more lines (ctrl+o to expand)')
     stdin.write('\x0f')
     await settled()
-    frame = lastFrame() ?? ''
+    frame = app.lastFrame() ?? ''
     expect(frame).toContain('7: line 7')
     expect(frame).toContain('9: line 9')
     expect(frame).not.toContain('more lines')

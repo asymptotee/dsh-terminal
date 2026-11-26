@@ -3,7 +3,7 @@
 import { describe, expect, it } from 'vitest'
 import { TuiApp } from '../../src/view/renderer.tsx'
 import type { Frame } from '../../src/fold/frames.ts'
-import { noopHandlers, renderApp, settled, state } from '../helpers/render.tsx'
+import { noopHandlers, openShellRun, renderApp, settled, state } from '../helpers/render.tsx'
 
 describe('fullscreen transcript window', () => {
   const manyFrames = (count: number): Frame[] =>
@@ -18,7 +18,38 @@ describe('fullscreen transcript window', () => {
     expect((lastFrame() ?? '').split('\n')).toHaveLength(12)
   })
 
-  it('parks the transcript off-window before the first measurement (no top-aligned flash)', async () => {
+  it('holds the viewport height while the content grows and shrinks', async () => {
+    // The transcript rewrites itself constantly (a reasoning window growing, a
+    // command settling into its count), but the frame's height is the
+    // terminal's, not the content's — that is what keeps the chrome band
+    // pinned while the rows above it move.
+    const live: Frame = {
+      kind: 'assistant', seq: 1, turn: 1, step: 1, text: '', streaming: true,
+      thinking: { text: 'a', startedAt: 0, seconds: 1 },
+    }
+    const view = { status: { model: 'm', cwd: '/tmp' } }
+    const app = renderApp(<TuiApp
+      state={{ ...state([live]), turnStartedAt: Date.now() - 1000 }}
+      handlers={noopHandlers()}
+      viewportRows={12}
+      view={view}
+    />)
+    await settled(60)
+    const heights = [(app.lastFrame() ?? '').split('\n').length]
+    for (const text of ['a\nb\nc', 'a\nb\nc\nd\ne\nf\ng', 'a']) {
+      app.rerender(<TuiApp
+        state={{ ...state([{ ...live, thinking: { text, startedAt: 0, seconds: 1 } }]), turnStartedAt: Date.now() - 1000 }}
+        handlers={noopHandlers()}
+        viewportRows={12}
+        view={view}
+      />)
+      await settled(40)
+      heights.push((app.lastFrame() ?? '').split('\n').length)
+    }
+    expect(heights).toEqual([12, 12, 12, 12])
+  })
+
+it('parks the transcript off-window before the first measurement (no top-aligned flash)', async () => {
     const { frames, lastFrame } = renderApp(<TuiApp
       state={state(manyFrames(40))}
       handlers={noopHandlers()}
@@ -100,16 +131,20 @@ describe('fullscreen transcript window', () => {
       },
       { kind: 'user', seq: 2, text: 'next' },
     ]
-    const { lastFrame, stdin } = renderApp(<TuiApp
+    const app = renderApp(<TuiApp
       state={state(frames)}
       handlers={noopHandlers()}
       viewportRows={40}
     />)
     await settled()
-    expect(lastFrame()).not.toContain('o9')
-    stdin.write('\x0f')
+    // The settled shell call starts folded; ctrl+o governs truncation inside
+    // the revealed card, so the run has to be open for the assertion to mean
+    // anything.
+    expect(await openShellRun(app)).toBe(true)
+    expect(app.lastFrame()).not.toContain('o9')
+    app.stdin.write('\x0f')
     await settled()
-    expect(lastFrame()).toContain('o9')
+    expect(app.lastFrame()).toContain('o9')
   })
 
   it('caps the standing plan with a hint for the elided todos', () => {

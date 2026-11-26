@@ -537,6 +537,14 @@ export function foldEvent(state: FrameState, event: SessionEvent, deps: FoldDeps
             startedAt: reasoningStart ?? event.time,
             seconds: reasoningStart === undefined ? 0 : thinkingSeconds({ startedAt: reasoningStart }, event.time),
           }
+        // A tool-only step commits a message with no text and no reasoning.
+        // Rendering it would put an empty row in the transcript, and that row
+        // breaks the run of work around it: an episode above and an episode
+        // below would never join. The step's tool calls already carry
+        // everything there is to show.
+        if (text === '' && thinking === undefined) {
+          return { state: { ...state, turnTokens }, lines: [] }
+        }
         const frame: Frame = {
           kind: 'assistant',
           seq: event.seq,

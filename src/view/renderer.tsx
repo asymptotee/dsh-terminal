@@ -50,7 +50,8 @@ import {
   WelcomeBlock,
 } from './chrome.tsx'
 import { JobDetail, JobsPanel, SubagentPanel, TeamPanel, WorkflowPanel } from './panels.tsx'
-import { FrameRow, frameKey, PlanDocument, planMarkdownOf } from './transcript.tsx'
+import { EpisodeRow, episodeRowHeight, FrameRow, frameKey, isFoldableCall, isLiveThinking, isReasoningOnly, isRunningCall, PlanDocument, planMarkdownOf } from './transcript.tsx'
+import type { EpisodePart } from './transcript.tsx'
 import { wrapToWidth } from './text-helpers.ts'
 import { InputBar, READ_ONLY_CHILD_NOTE } from './input-bar.tsx'
 import { useTerminalSize } from './use-terminal.ts'
@@ -70,6 +71,10 @@ export {
   wrapToWidth,
 } from './text-helpers.ts'
 export { COMPLETED_BOARD_LINGER_MS } from './chrome.tsx'
+// The shell-run vocabulary the transcript renders with, re-exported for the
+// view tests that assert the boundaries (a failure or an open call never
+// joins a run).
+export { FOLDABLE_TOOL_NAMES, isFoldableCall, READ_TOOL_NAMES, runClause, runLabel, SEARCH_TOOL_NAMES, SHELL_TOOL_NAMES } from './transcript.tsx'
 
 // Correct chalk's color level before the first paint: ink colors through the
 // same chalk singleton, so hosts supports-color misreads (Windows Terminal's
@@ -176,6 +181,143 @@ const MAX_RENDERED_FRAMES = 300
 function windowFrames(frames: readonly Frame[]): { hidden: number; visible: readonly Frame[] } {
   const visible = frames.slice(-MAX_RENDERED_FRAMES)
   return { hidden: frames.length - visible.length, visible }
+}
+
+/** One transcript row: a lone frame, or a whole episode of think-act work. */
+export type TranscriptRow =
+  | { readonly kind: 'frame'; readonly frame: Frame; readonly key: string }
+  | { readonly kind: 'episode'; readonly parts: readonly EpisodePart[]; readonly key: string }
+
+/** Whether a frame may join an episode: settled reasoning with no answer
+ *  text, or a settled shell call. Anything else ends the episode — an answer
+ *  in between must stay between, and a failure or an open call must stay
+ *  visible on its own. */
+function joinsEpisode(frame: Frame): boolean {
+  return isReasoningOnly(frame) || isFoldableCall(frame)
+}
+
+/**
+ * Fold the display stream into rows, collapsing every maximal stretch of
+ * think-act work into one episode row.
+ *
+ * A stretch is maximal on purpose: a task reads as one episode even though it
+ * spans several steps (think → run → think → run), and one row per step turns
+ * that task into a column of near-identical counts. An episode needs at least
+ * one shell call to form — reasoning alone keeps its own dim row, and so does
+ * a single thought with no command behind it.
+ *
+ * Grouping happens here rather than in the fold so a resume replays
+ * byte-identical frames: the log keeps every call, and only the presentation
+ * decides how many rows it takes.
+ * @param frames - the windowed display stream.
+ * @returns the rows to render, in order.
+ */
+export function groupFrames(frames: readonly Frame[]): readonly TranscriptRow[] {
+  const rows: TranscriptRow[] = []
+  let run: Frame[] = []
+  /** One frame as an episode part. Only shell calls and reasoning-only assistant
+   *  frames reach a run, so the reasoning narrowing holds by construction. */
+  const partOf = (frame: Frame): EpisodePart => {
+    if (frame.kind === 'tool') return { kind: 'tool', frame, running: isRunningCall(frame) }
+    const thinking = frame.kind === 'assistant' ? frame.thinking : undefined
+    if (thinking === undefined) throw new Error('episode member without reasoning')
+    return { kind: 'thinking', seq: frame.seq, thinking, live: isLiveThinking(frame) }
+  }
+  /**
+   * Close the open run. A run of pure reasoning with nothing new to count is
+   * appended to the episode directly above it: the model finishes a stretch of
+   * commands, thinks once more, and answers — that last thought is the same
+   * stretch of work, and a second `Thought for Ns` row under the first would
+   * report it twice.
+   */
+  const flush = (): void => {
+    if (run.length === 0) return
+    const calls = run.filter(frame => frame.kind === 'tool').length
+    const above = rows.length > 0 ? rows[rows.length - 1]! : undefined
+    if (calls === 0) {
+      // Reasoning that concludes the episode above joins it rather than
+      // starting a row of its own.
+      if (above !== undefined && above.kind === 'episode') {
+        rows[rows.length - 1] = { ...above, parts: [...above.parts, ...run.map(partOf)] }
+        run = []
+        return
+      }
+      // Otherwise it keeps its own row: `Thought for 4s` alone is what the
+      // settled thinking block already says, dot and all.
+      for (const frame of run) rows.push({ kind: 'frame', frame, key: frameKey(frame) })
+      run = []
+      return
+    }
+    const parts = run.map(partOf)
+    rows.push({ kind: 'episode', parts, key: `episode:${parts[0]!.kind === 'tool' ? parts[0]!.frame.callId : `t${parts[0]!.seq}`}` })
+    run = []
+  }
+  for (let index = 0; index < frames.length; index++) {
+    const frame = frames[index]!
+    // An in-flight shell call joins the run like a finished one does: it is
+    // the work in progress, and the episode shows it live rather than letting
+    // it start a card of its own below the sentence.
+    if (isReasoningOnly(frame) || isFoldableCall(frame) || isRunningCall(frame)) {
+      run.push(frame)
+      continue
+    }
+    // Reasoning that introduces an answer is two facts, not one: the thinking
+    // belongs to the work in progress, the answer is its result. Anywhere an
+    // episode is under way (or starts right after), the thinking joins it and
+    // the answer takes its own row — otherwise the final `Thought for 21s`
+    // would sit outside the run it concluded while the answer stood apart.
+    // The check deliberately ignores `streaming`: while the answer streams,
+// the frame already carries text and would otherwise drop out of the run
+// and render as a lone row — appearing to split off, then merge back once
+// the message commits. Deciding on the content alone keeps the row stable
+// from the first text delta onward.
+    if (frame.kind === 'assistant' && frame.thinking !== undefined && frame.text.trim() !== '') {
+      // The episode the thinking concludes may still be ahead of it (the
+      // final step answers after its last commands); take those calls in so
+      // the sentence covers the whole stretch.
+      const following: Frame[] = []
+      let next = index + 1
+      while (next < frames.length && isFoldableCall(frames[next]!)) {
+        following.push(frames[next]!)
+        next++
+      }
+      // The reasoning always joins the run: the answer it introduces is the
+      // episode's result, and `flush` decides whether that means extending the
+      // episode above or opening a new one.
+      const hasEpisode = run.length > 0 || following.length > 0 || (rows.length > 0 && rows[rows.length - 1]!.kind === 'episode')
+      // A reasoning block with no episode to join keeps its own row: nothing
+      // was run, so there is no run to name.
+      if (hasEpisode) {
+        // Log order: the open run's calls, this reasoning, then the calls that
+        // follow it. Nothing is reordered — the episode renders its parts in
+        // exactly the order the model produced them.
+        // `streaming: false` on the copy: this frame reached the split branch
+        // because its text arrived, which is exactly what ends the reasoning
+        // stream. Leaving `streaming` on kept the copy reading as live
+        // reasoning (its text was blanked), so the episode's window stayed
+        // open under the sentence for the whole answer, folding only when the
+        // answer committed. The thinking is done the moment the text starts.
+        run.push({ ...frame, text: '', streaming: false })
+        run.push(...following)
+        flush()
+        const answer: Frame = {
+          kind: 'assistant',
+          seq: frame.seq,
+          turn: frame.turn,
+          step: frame.step,
+          text: frame.text,
+          streaming: frame.streaming,
+        }
+        rows.push({ kind: 'frame', frame: answer, key: `assistant-text:${frame.seq}` })
+        index = next - 1
+        continue
+      }
+    }
+    flush()
+    rows.push({ kind: 'frame', frame, key: frameKey(frame) })
+  }
+  flush()
+  return rows
 }
 
 /** Remount the panel per approval request so the selection resets. */
@@ -430,7 +572,11 @@ export function TuiApp({
   const goalVisible = view?.goal !== undefined && !(goalHidden && goalComplete)
   // The jobs panel has no hide latch of its own: the driver lingers settled
   // rows and drops them, so the renderer draws exactly what it is given.
-  const jobsVisible = view?.jobs !== undefined && view.jobs.rows.length > 0
+  // TEMPORARY: suppressed while another change is under test — the panel's
+  // appearance shifts the input bar and status bar up, which is the existing
+  // design, but it makes an unrelated flashing report hard to isolate.
+  // Restore `view?.jobs !== undefined && view.jobs.rows.length > 0` after.
+  const jobsVisible = false
   const { columns, rows: termRows } = useTerminalSize()
   const rows = viewportRows ?? termRows
   const frames = state.frames
@@ -520,21 +666,27 @@ export function TuiApp({
   // don't-estimate discipline as the scroll model — keyed per transcript view
   // so a child's frames never collide with the main session's.
   const [thinkingExpanded, setThinkingExpanded] = useState<ReadonlySet<string>>(() => new Set())
-  // The settled thinking header the pointer rests on: it drops its dim until
-  // the pointer leaves. Identity-stable updates — motion reports arrive in
-  // floods and only an actual enter/leave may re-render. Hover is motion-
-  // driven alone: a click never sets it, so a terminal that reports no motion
-  // can never strand the row white after a toggle.
-  const [hoveredThinking, setHoveredThinking] = useState<string | undefined>(undefined)
+  // A collapsed run of settled shell calls, opened by a left click: the same
+  // interaction as a settled thinking block, keyed by the run's own row key.
+  const [groupsExpanded, setGroupsExpanded] = useState<ReadonlySet<string>>(() => new Set())
+  // The collapsible row the pointer rests on — a settled thinking header or a
+  // shell run's count row: it drops its dim until the pointer leaves.
+  // Identity-stable updates — motion reports arrive in floods and only an
+  // actual enter/leave may re-render. Hover is motion-driven alone: a click
+  // never sets it, so a terminal that reports no motion can never strand the
+  // row white after a toggle.
+  const [hoveredRow, setHoveredRow] = useState<string | undefined>(undefined)
   const frameEls = useRef(new Map<string, any>())
   const frameHeights = useRef(new Map<string, number>())
-  // The thinking blocks' own elements and heights: the interactive unit spans
-  // the header plus the open box, so the hit-test needs the block's measured
-  // extent inside its frame (clicking the answer text below must not toggle).
-  const thinkingEls = useRef(new Map<string, any>())
-  const thinkingHeights = useRef(new Map<string, number>())
+  // The collapsible blocks' own elements and heights: the interactive unit
+  // spans the header plus the open body, so the hit-test needs the block's
+  // measured extent inside its row (clicking the answer text below must not
+  // toggle). A thinking block and a shell run share the machinery — one map,
+  // keyed by the row they live in.
+  const blockEls = useRef(new Map<string, any>())
+  const blockHeights = useRef(new Map<string, number>())
   const frameElCallbacks = useRef(new Map<string, (el: any) => void>())
-  const thinkingElCallbacks = useRef(new Map<string, (el: any) => void>())
+  const blockElCallbacks = useRef(new Map<string, (el: any) => void>())
   const stableRef = (
     key: string,
     callbacks: Map<string, (el: any) => void>,
@@ -553,31 +705,41 @@ export function TuiApp({
     return callback
   }
   const frameElRef = (key: string): ((el: any) => void) => stableRef(key, frameElCallbacks.current, frameEls.current)
-  const thinkingElRef = (key: string): ((el: any) => void) => stableRef(key, thinkingElCallbacks.current, thinkingEls.current)
+  const blockElRef = (key: string): ((el: any) => void) => stableRef(key, blockElCallbacks.current, blockEls.current)
   const scopedFrameKey = (frame: Frame): string => `${transcriptKey}:${frameKey(frame)}`
-  /** The settled thinking block under a viewport point, or undefined: the
-   *  hit-test both the click toggle and the pointer hover share. The target
-   *  spans the block's measured rows — the header while collapsed, the
-   *  reasoning rows while open — so clicking the reasoning collapses it
-   *  again while the answer text below stays inert. */
-  const thinkingRowAt = (position: ClickPosition): { key: string; frame: Extract<Frame, { kind: 'assistant' }> } | undefined => {
-    const windowed = opened === undefined ? mainWindowed : childWindowed
-    if (windowed === undefined) return undefined
+  const scopedRowKey = (row: TranscriptRow): string => `${transcriptKey}:${row.key}`
+  // The display stream for the active view, folded into rows: a lone frame, or
+  // a collapsed run of settled shell calls. Windowed first so the elision cap
+  // counts frames (the durable unit) rather than the rows they collapse into.
+  const activeRows = opened === undefined
+    ? groupFrames(mainWindowed.visible)
+    : groupFrames(childWindowed?.visible ?? [])
+  /** The collapsible block under a viewport point, or undefined: the hit-test
+   *  both the click toggle and the pointer hover share. Only two kinds of row
+   *  collapse — an assistant frame carrying settled reasoning, and a run of
+   *  settled shell calls. The target spans the block's measured rows (header
+   *  while collapsed, body while open), so clicking the content collapses it
+   *  again while the text below stays inert. */
+  const collapsibleRowAt = (position: ClickPosition): { row: TranscriptRow; scoped: string } | undefined => {
     const row = clickRowInContent(scroll, position.y)
     if (row === undefined) return undefined
-    const visible = windowed.visible
-    const heights = visible.map(frame => frameHeights.current.get(scopedFrameKey(frame)) ?? 0)
+    const heights = activeRows.map(row => frameHeights.current.get(scopedRowKey(row)) ?? 0)
     // With elided earlier frames a one-row notice leads the content column.
-    const hit = hitFrameRow(heights, row, windowed.hidden > 0 ? 1 : 0)
+    const hit = hitFrameRow(heights, row, (opened === undefined ? mainWindowed.hidden : (childWindowed?.hidden ?? 0)) > 0 ? 1 : 0)
     if (hit === undefined) return undefined
-    const frame = visible[hit.index]
-    if (frame === undefined || frame.kind !== 'assistant' || frame.thinking === undefined) return undefined
-    // The live block always shows its body; toggle and hover serve settled ones.
-    if (frame.streaming && frame.text === '') return undefined
-    const key = scopedFrameKey(frame)
+    const target = activeRows[hit.index]
+    if (target === undefined) return undefined
+    if (target.kind === 'frame') {
+      const frame = target.frame
+      if (frame.kind !== 'assistant' || frame.thinking === undefined) return undefined
+      // The live block always shows its body; toggle and hover serve settled ones.
+      if (frame.streaming && frame.text === '') return undefined
+    }
+    // A fused row is always clickable: it only forms for settled reasoning.
+    const scoped = scopedRowKey(target)
     // Before the block's first measurement the header row alone is the target.
-    const blockRows = thinkingHeights.current.get(key) ?? 1
-    return hit.rowInFrame < blockRows ? { key, frame } : undefined
+    const blockRows = blockHeights.current.get(scoped) ?? 1
+    return hit.rowInFrame < blockRows ? { row: target, scoped } : undefined
   }
   const handleTranscriptClick = (position: ClickPosition): void => {
     // While the pill is up it owns its band: it is painted over whatever
@@ -593,27 +755,57 @@ export function TuiApp({
         return
       }
     }
-    const hit = thinkingRowAt(position)
+    const hit = collapsibleRowAt(position)
     if (hit === undefined) return
-    const { key, frame } = hit
+    const { row, scoped } = hit
     // Stage the toggle's exact content-height delta for the render-phase
-    // scroll correction: the reasoning's physical rows against the one
-    // header row.
-    if (frame.thinking !== undefined) {
-      const physicalRows = wrapToWidth(frame.thinking.text, Math.max(1, columns - 2)).length
-      const staged = thinkingExpanded.has(key) ? 1 - physicalRows : physicalRows - 1
+    // scroll correction: the body's physical rows against the one header row.
+    if (row.kind === 'frame' && row.frame.kind === 'assistant' && row.frame.thinking !== undefined) {
+      const physicalRows = wrapToWidth(row.frame.thinking.text, Math.max(1, columns - 2)).length
+      const staged = thinkingExpanded.has(scoped) ? 1 - physicalRows : physicalRows - 1
       pendingScrollDelta.current += staged
+      setThinkingExpanded(current => {
+        const next = new Set(current)
+        if (next.has(scoped)) next.delete(scoped)
+        else next.add(scoped)
+        return next
+      })
+      return
     }
-    setThinkingExpanded(current => {
-      const next = new Set(current)
-      if (next.has(key)) next.delete(key)
-      else next.add(key)
-      return next
-    })
+    // A shell run swaps one count row for its members' full cards. The delta
+    // must land in the SAME paint as the swap: staged late it re-anchors a
+    // frame after the body appears, which reads as the block jumping and
+    // settling (most visible at the live bottom, where the whole window
+    // re-anchors). The open height is measured; the closed height is computed
+    // the way the component lays itself out. Shapes the mirror cannot cover
+    // (ctrl+o widening) fall back to the post-commit measure and its one-frame
+    // cost rather than staging a wrong number.
+    if (row.kind === 'episode') {
+      const measured = blockHeights.current.get(scoped)
+      const closing = groupsExpanded.has(scoped)
+      const openHeight = closing
+        ? (measured !== undefined && measured > 1 ? measured : undefined)
+        : episodeRowHeight(row.parts, true, expandedOutput, columns)
+      const closedHeight = episodeRowHeight(row.parts, false, expandedOutput, columns)
+      if (openHeight !== undefined && closedHeight !== undefined) {
+        // Expanding grows the content by (open − closed), collapsing shrinks
+        // by the same amount: the sign follows the direction of the swap.
+        pendingScrollDelta.current += closing ? closedHeight - openHeight : openHeight - closedHeight
+      } else if (closing && measured !== undefined && measured > 1) {
+        // Computed closed height unavailable but the open one measured.
+        pendingScrollDelta.current += 1 - measured
+      }
+      setGroupsExpanded(current => {
+        const next = new Set(current)
+        if (next.has(scoped)) next.delete(scoped)
+        else next.add(scoped)
+        return next
+      })
+    }
   }
   const handleTranscriptHover = (position: ClickPosition): void => {
-    const key = thinkingRowAt(position)?.key
-    setHoveredThinking(current => (current === key ? current : key))
+    const key = collapsibleRowAt(position)?.scoped
+    setHoveredRow(current => (current === key ? current : key))
   }
 
   // Measure the laid-out window and content after every commit and adopt the
@@ -635,9 +827,9 @@ export function TuiApp({
       const measured = measureElement(el)
       if (frameHeights.current.get(key) !== measured.height) frameHeights.current.set(key, measured.height)
     }
-    for (const [key, el] of thinkingEls.current) {
+    for (const [key, el] of blockEls.current) {
       const measured = measureElement(el)
-      if (thinkingHeights.current.get(key) !== measured.height) thinkingHeights.current.set(key, measured.height)
+      if (blockHeights.current.get(key) !== measured.height) blockHeights.current.set(key, measured.height)
     }
   })
 
@@ -652,6 +844,36 @@ export function TuiApp({
   // centered from frame one instead of flashing above center until measured.
   const welcomeChromeRows = 3 + (view?.status !== undefined ? (view.status.mode !== undefined ? 2 : 1) + 1 : 0)
   const welcomeWindowRows = scroll.windowRows > 0 ? scroll.windowRows : Math.max(3, rows - welcomeChromeRows)
+  /** One transcript row: a lone frame, or a collapsed run of shell calls. A
+   *  group's ref and height live on the row's own key, so its hit target spans
+   *  the count row or the revealed members exactly like a thinking block's. */
+  const renderRow = (row: TranscriptRow): React.JSX.Element => {
+    const scoped = scopedRowKey(row)
+    return (
+      <Box key={row.key} ref={frameElRef(scoped)} flexDirection="column" marginBottom={1}>
+        {row.kind === 'episode'
+          ? (
+            <EpisodeRow
+              parts={row.parts}
+              expandedOutput={expandedOutput}
+              expanded={groupsExpanded.has(scoped)}
+              hovered={hoveredRow === scoped}
+              blockRef={blockElRef(scoped)}
+            />
+          )
+          : (
+              <FrameRow
+                frame={row.frame}
+                expandedOutput={expandedOutput}
+                approvalCallId={approvalOverlay?.callId}
+                thinkingExpanded={thinkingExpanded.has(scoped)}
+                thinkingHovered={hoveredRow === scoped}
+                thinkingRef={blockElRef(scoped)}
+              />
+            )}
+      </Box>
+    )
+  }
   const baseTranscript = opened === undefined ? (
     showWelcome ? (
       <Box
@@ -665,21 +887,13 @@ export function TuiApp({
     ) : (
       <>
         {mainWindowed.hidden > 0 ? <Text dimColor>… {mainWindowed.hidden} earlier frames</Text> : null}
-        {mainWindowed.visible.map(frame => (
-          <Box key={frameKey(frame)} ref={frameElRef(scopedFrameKey(frame))} flexDirection="column" marginBottom={1}>
-            <FrameRow frame={frame} expandedOutput={expandedOutput} approvalCallId={approvalOverlay?.callId} thinkingExpanded={thinkingExpanded.has(scopedFrameKey(frame))} thinkingHovered={hoveredThinking === scopedFrameKey(frame)} thinkingRef={thinkingElRef(scopedFrameKey(frame))} />
-          </Box>
-        ))}
+        {activeRows.map(renderRow)}
       </>
     )
   ) : (
     <>
       {(childWindowed?.hidden ?? 0) > 0 ? <Text dimColor>… {childWindowed?.hidden} earlier frames</Text> : null}
-      {(childWindowed?.visible ?? []).map(frame => (
-        <Box key={frameKey(frame)} ref={frameElRef(scopedFrameKey(frame))} flexDirection="column" marginBottom={1}>
-          <FrameRow frame={frame} expandedOutput={expandedOutput} approvalCallId={approvalOverlay?.callId} thinkingExpanded={thinkingExpanded.has(scopedFrameKey(frame))} thinkingHovered={hoveredThinking === scopedFrameKey(frame)} thinkingRef={thinkingElRef(scopedFrameKey(frame))} />
-        </Box>
-      ))}
+      {activeRows.map(renderRow)}
     </>
   )
   // The plan-review document sits in the transcript window under its "Here is
