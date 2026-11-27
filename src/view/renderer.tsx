@@ -49,7 +49,7 @@ import {
   QuestionPanel,
   WelcomeBlock,
 } from './chrome.tsx'
-import { JobDetail, JobsPanel, SubagentPanel, TeamPanel, WorkflowPanel } from './panels.tsx'
+import { JobDetail, JobsList, SubagentPanel, TeamPanel, WorkflowPanel } from './panels.tsx'
 import { EpisodeRow, episodeRowHeight, FrameRow, frameKey, isFoldableCall, isLiveThinking, isReasoningOnly, isRunningCall, PlanDocument, planMarkdownOf } from './transcript.tsx'
 import type { EpisodePart } from './transcript.tsx'
 import { wrapToWidth } from './text-helpers.ts'
@@ -143,6 +143,7 @@ export function createInkRenderer(): TuiRenderer {
     onPickerCancel: () => {},
     onCyclePermission: () => {},
     onChildPrompt: () => {},
+    onJobBack: () => {},
     onJobKill: () => {},
     onQuestionAnswer: () => {},
   }
@@ -570,13 +571,10 @@ export function TuiApp({
     return () => clearTimeout(timer)
   }, [goalComplete, completedLingerMs])
   const goalVisible = view?.goal !== undefined && !(goalHidden && goalComplete)
-  // The jobs panel has no hide latch of its own: the driver lingers settled
-  // rows and drops them, so the renderer draws exactly what it is given.
-  // TEMPORARY: suppressed while another change is under test — the panel's
-  // appearance shifts the input bar and status bar up, which is the existing
-  // design, but it makes an unrelated flashing report hard to isolate.
-  // Restore `view?.jobs !== undefined && view.jobs.rows.length > 0` after.
-  const jobsVisible = false
+  // The jobs roster panel is gone: the footer's status bar carries the jobs
+  // summary (status.jobs), and Enter on the rung opens the Background list
+  // (view.jobsList) whose rows open the full-screen detail. The renderer
+  // draws exactly what the driver hands it.
   const { columns, rows: termRows } = useTerminalSize()
   const rows = viewportRows ?? termRows
   const frames = state.frames
@@ -601,17 +599,19 @@ export function TuiApp({
   // the keys (panelNav); otherwise a retained selection is just the row
   // highlight and the child transcript keeps the keyboard.
   const selectionActive = view?.subagentSelected !== undefined || view?.teamSelected !== undefined
-    || view?.workflowSelected !== undefined || view?.jobsSelected !== undefined
+    || view?.workflowSelected !== undefined || view?.status?.jobs?.selected === true
   // The job detail outranks every other surface: while it is open it owns the
-  // window and the keys (Esc/Enter close, x stops), so the panel cursor — if
-  // the driver retained one — does not take the arrows.
-  const focusMode: 'input' | 'panel' | 'child' | 'job' = openJob !== undefined
+  // window and the keys (Esc/Enter/←/Space close, ↑/↓ switch, x stops). The
+  // Background list ranks just below it (Esc from the detail returns there).
+  const focusMode: 'input' | 'panel' | 'child' | 'job' | 'jobList' = openJob !== undefined
     ? 'job'
-    : selectionActive && (opened === undefined || view?.panelNav === true)
-      ? 'panel'
-      : opened !== undefined
-        ? 'child'
-        : 'input'
+    : view?.jobsList !== undefined
+      ? 'jobList'
+      : selectionActive && (opened === undefined || view?.panelNav === true)
+        ? 'panel'
+        : opened !== undefined
+          ? 'child'
+          : 'input'
 
   // ---- Transcript scroll state ---------------------------------------
   // The transcript is the app's own data (no terminal scrollback): the
@@ -842,7 +842,9 @@ export function TuiApp({
   // pass lands: a fresh session's chrome is exactly the input bar (two rules
   // plus one buffer row) and, once known, the status bar — so the splash is
   // centered from frame one instead of flashing above center until measured.
-  const welcomeChromeRows = 3 + (view?.status !== undefined ? (view.status.mode !== undefined ? 2 : 1) + 1 : 0)
+  const welcomeChromeRows = 3 + (view?.status !== undefined
+    ? ((view.status.mode !== undefined || view.status.planMode === true || view.status.jobs !== undefined) ? 2 : 1) + 1
+    : 0)
   const welcomeWindowRows = scroll.windowRows > 0 ? scroll.windowRows : Math.max(3, rows - welcomeChromeRows)
   /** One transcript row: a lone frame, or a collapsed run of shell calls. A
    *  group's ref and height live on the row's own key, so its hit target spans
@@ -1017,7 +1019,7 @@ export function TuiApp({
           onQuestionSkip={planReview !== undefined ? onPlanSkip : onQuestionSkip}
           onQuestionStep={planReview !== undefined ? () => {} : onQuestionStep}
           onQuestionTextChange={planReview !== undefined ? onPlanTextChange : onQuestionTextChange}
-          panelAvailable={subagents.length > 0 || (view?.team?.members.length ?? 0) > 0 || workflowVisible || jobsVisible}
+          panelAvailable={subagents.length > 0 || (view?.team?.members.length ?? 0) > 0 || workflowVisible || view?.status?.jobs !== undefined}
           commands={view?.commands ?? []}
           {...(view?.picker === undefined ? {} : { picker: view.picker })}
           {...(view?.status === undefined ? {} : { status: view.status })}
@@ -1025,9 +1027,7 @@ export function TuiApp({
             ? {}
             : view?.workflowSelected !== undefined || view?.teamSelected !== undefined
               ? { statusHint: '↑↓ 选择 · Enter 打开 · Esc 返回' }
-              : view?.jobsSelected !== undefined
-                ? { statusHint: '↑↓ 选择 · Enter 详情 · Esc 返回' }
-                : {})}
+              : {})}
         />
         {approvalOverlay !== undefined ? (
           /* The question owns the screen bottom: the bar above rendered
@@ -1059,9 +1059,15 @@ export function TuiApp({
           />
         ) : openJob !== undefined ? (
           /* The opened job's detail owns the region below the status bar:
-             it covers the side panels (the roster stays visible through the
-             cursor on its row) while the transcript keeps scrolling above. */
+             it covers the side panels (the Background list stays open
+             underneath — Esc returns to it) while the transcript keeps
+             scrolling above. */
           <JobDetail view={openJob} />
+        ) : view?.jobsList !== undefined ? (
+          /* The Background list owns the region the same way: opened from the
+             footer's jobs segment, its rows lead to the detail, and Esc
+             closes it back to the blue segment. */
+          <JobsList view={view.jobsList} />
         ) : (
           <>
             {/* The read-only child's identity now rides its own input box's
@@ -1094,14 +1100,6 @@ export function TuiApp({
                   selected={view.teamSelected}
                   tasksHidden={teamBoardHidden}
                   {...(opened === undefined ? {} : { openChildId: opened.childId })}
-                />
-              )
-              : null}
-            {jobsVisible
-              ? (
-                <JobsPanel
-                  info={view!.jobs!}
-                  selected={view?.jobsSelected}
                 />
               )
               : null}

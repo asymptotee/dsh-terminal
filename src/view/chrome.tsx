@@ -11,7 +11,7 @@ import React, { useState } from 'react'
 import { Box, Text } from 'ink'
 import stringWidth from 'string-width'
 import type { FrameState } from '../fold/frames.ts'
-import type { GoalPanelInfo, Overlay, PendingUserEcho, PlanReviewNarrowed, QuestionDraft, QuestionItem, StatusInfo } from './view-types.ts'
+import type { GoalPanelInfo, Overlay, PendingUserEcho, PlanReviewNarrowed, QuestionDraft, QuestionItem, StatusInfo, StatusJobsSummary } from './view-types.ts'
 import { formatContext, formatElapsed, formatTokenCount, shortenCwd, toolLabel, truncateToWidth, wrapToWidth } from './text-helpers.ts'
 
 /** How long the task board lingers after its last task completes, before the
@@ -33,6 +33,25 @@ const PERMISSION_MODE_COLORS: Record<string, string> = {
  *  the collaboration state reads apart from the permission cycle it trails. */
 const PLAN_MODE_COLOR = '#b197fc'
 
+/** One jobs-count word pluralized to its count (`1 shell`, `2 shells`). */
+function jobsWord(word: string, count: number): string {
+  return count === 1 ? word : `${word}s`
+}
+
+/** The footer's background-jobs segment. At rest it is one green clause —
+ *  `· 1 shell · 1 subagent`, per-kind counts of live jobs, in the auto-mode
+ *  green it shares the row with. While the jobs rung holds the cursor the
+ *  same text inverts onto a green fill: Enter there opens the Background
+ *  list. */
+function JobsSegment({ summary }: { summary: StatusJobsSummary }): React.JSX.Element {
+  const text = summary.segments.map(({ word, count }) => `${count} ${jobsWord(word, count)}`).join(' · ')
+  // The pill's badge recipe: the fill wears the green, the text the deep
+  // warm-charcoal that reads on it.
+  return summary.selected === true
+    ? <Text backgroundColor="#51cf66" color="#22262E" bold>{text}</Text>
+    : <Text color="#51cf66">{text}</Text>
+}
+
 /** The fixed footer: model, session, working state, context usage, and scrollback hint. */
 export function StatusBar({
   status,
@@ -43,6 +62,7 @@ export function StatusBar({
   hint?: string
 }): React.JSX.Element {
   if (status === undefined) return <></>
+  const jobs = status.jobs
   return (
     // The two-column lead aligns the footer under the panels' header column
     // (the Workflow run header's indent). The standing facts read as one
@@ -58,7 +78,7 @@ export function StatusBar({
           {status.context !== undefined ? ` · context: ${formatContext(status.context)}` : ''}
         </Text>
       </Box>
-      {status.mode !== undefined || status.planMode === true || hint !== undefined
+      {status.mode !== undefined || status.planMode === true || hint !== undefined || jobs !== undefined
         ? (
           // No dimColor on the row itself: ANSI dim would inherit into the
           // colored mode segment and mute its preset color. The mode wears
@@ -83,7 +103,14 @@ export function StatusBar({
                 </>
               )
               : null}
-            {(status.mode !== undefined || status.planMode === true) && hint !== undefined
+            {/* The jobs summary trails the collaboration axes: it is session
+                state, not a mode, and its selected form is the rung the ↓
+                ladder lands on. */}
+            {jobs !== undefined && (status.mode !== undefined || status.planMode === true)
+              ? <Text dimColor> · </Text>
+              : null}
+            {jobs === undefined ? null : <JobsSegment summary={jobs} />}
+            {(status.mode !== undefined || status.planMode === true || jobs !== undefined) && hint !== undefined
               ? <Text dimColor> · </Text>
               : null}
             {hint !== undefined ? <Text dimColor>({hint})</Text> : null}

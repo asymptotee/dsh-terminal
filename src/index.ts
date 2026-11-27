@@ -22,7 +22,7 @@ import { createFrameState, foldAssistantStreamChunk, foldEvent, readableFailureM
 import type { FoldDeps, Frame, FrameState } from './fold/frames.ts'
 import { teamToolPresentation } from './fold/team-present.ts'
 import { createInkRenderer, foldInvocationLine } from './view/renderer.tsx'
-import type { ApprovalChoice, CommandInfo, PickerPopupView, GoalPanelInfo, GoalPhase, JobDetailView, JobsPanelInfo, JobRow, Overlay, QuestionAnswer, QuestionItem, RenderView, SubagentRow, TeamPanelInfo, TeamTaskRow, TuiRenderer, WorkflowMemberRow, WorkflowMemberStatus, WorkflowPanelInfo, WorkflowPhaseGroup, WorkflowRunRow, WorkflowRunStatus } from './view/renderer.tsx'
+import type { ApprovalChoice, CommandInfo, PickerPopupView, GoalPanelInfo, GoalPhase, JobDetailView, JobsListRow, JobsListView, Overlay, QuestionAnswer, QuestionItem, RenderView, StatusJobsSummary, SubagentRow, TeamPanelInfo, TeamTaskRow, TuiRenderer, WorkflowMemberRow, WorkflowMemberStatus, WorkflowPanelInfo, WorkflowPhaseGroup, WorkflowRunRow, WorkflowRunStatus } from './view/renderer.tsx'
 
 // Re-exported so driver suites import the renderer contract without reaching
 // the ink view's .tsx module directly (the host aggregate compiles specs).
@@ -153,9 +153,9 @@ interface WorkflowRunState {
   members: Map<number, WorkflowMemberState>
 }
 
-/** One background job as the panel tracks it: the registry's view fields plus
- *  the settled stamp that drives the linger (the registry may drop the job
- *  from list() before the panel retires it). */
+/** One background job as the driver tracks it: the registry's view fields.
+ *  Live and settled rows share the table — the settled ones are the
+ *  Background list's session history. */
 interface JobDisplayState {
   id: string
   kind: string
@@ -165,8 +165,6 @@ interface JobDisplayState {
   detail: string | undefined
   startedAt: number
   finishedAt: number | undefined
-  /** Epoch ms when the driver saw it settle; undefined while live. */
-  settledAt: number | undefined
 }
 
 /** The registry's event stream, shaped structurally so the driver never
@@ -191,15 +189,16 @@ type JobRegistryEvent =
   | { type: 'settled'; job: JobViewShape; cause: 'producer' | 'kill' | 'teardown' }
   | { type: 'output'; id: string; total: number }
 
-/** How long a settled job lingers in the panel before the driver drops it. */
-const SETTLED_JOB_LINGER_MS = 5_000
-
 /** Cap of the expanded job's retained output tail (bytes ≈ chars, ASCII-ish). */
 const JOB_OUTPUT_BUFFER_MAX = 8_000
 
 /** How long the job detail's first `x` stays armed before the second press is
  *  needed again (the web kill button's same re-arm window). */
 const JOB_KILL_ARM_MS = 3_000
+
+/** How many settled jobs the Background list keeps as the session's history;
+ *  older ones drop off the tail (registration order). */
+const JOBS_HISTORY_MAX = 100
 
 /** One unfinished direct subagent tracked for the panel below the status bar. */
 /** Structural face of the shared picker waterfall every plugin command that
@@ -344,25 +343,24 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
    *  the panelTick reap never touch them — the panel's Enter must keep
    *  working for a member transcript. */
   const workflowChildIds = new Set<string>()
-  /** Background jobs by id, in registration order. The registry may drop a
-   *  settled job from `list()` at any time (`removed`), but the panel lingers
-   *  it for a beat — so the driver keeps its own copy with a settledAt stamp. */
+  /** Background jobs by id, in registration order. Live jobs and the
+   *  session's settled history both live here: the Background list shows the
+   *  settled rows under its `Earlier in this session` header, so rows are
+   *  kept (capped at JOBS_HISTORY_MAX settled) rather than retired. */
   const jobsRows = new Map<string, JobDisplayState>()
-  /** Jobs whose linger expired. The registry's list() retains settled jobs
-   *  until the owner is disposed, so without a tombstone a retired row would
-   *  be re-added on the next tick with a fresh settle stamp — a revive loop
-   *  that pins it to the panel forever. Ids are unique for the process life
-   *  (`<kind>-<short-uuid>` registry issues), so this set can only grow with
-   *  real jobs. */
-  const jobsRetired = new Set<string>()
+  /** The Background list is open below the input bar (opened from the
+   *  footer's jobs segment; Esc closes it back there). */
+  let jobsListOpen = false
   /** The job whose live output is expanded; its read cursor and buffer. */
   let jobsOpen: string | undefined
   let jobsOpenCursor = 0
   let jobsOpenBuffer = ''
   let jobsOpenLossy = false
-  /** Epoch ms of the detail's armed kill gesture; armed while within
-   *  JOB_KILL_ARM_MS. Derived at projection time, so the panel tick re-render
+  /** The armed kill gesture: the target row's id and the epoch ms of the
+   *  first press. Armed while within JOB_KILL_ARM_MS and the target is
+   *  unchanged; derived at projection time, so the panel tick re-render
    *  disarms it without a dedicated timer. */
+  let jobsKillArmedId: string | undefined
   let jobsKillArmedAt: number | undefined
   // Child session id → the error detail of its last failed turn, so the child's
   // settlement notice can show the concrete cause instead of just "failed".
@@ -576,7 +574,9 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
   let teamSelected: number | undefined
   /** The selected workflow row (0 = main); undefined keeps focus elsewhere. */
   let workflowSelected: number | undefined
-  /** The selected job row (1-based); undefined keeps focus elsewhere. */
+  /** The jobs cursor (1-based over the Background list's display order —
+   *  live rows newest-first, then settled history): defined while the
+   *  footer's rung holds the focus or the list is open. */
   let jobsSelected: number | undefined
   let openChild: string | undefined
   // The panels own the keys while a child transcript is open (↓ dropped into
@@ -773,10 +773,8 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
     }
   }
 
-  /** Upsert one registry job view into the panel's own table. */
+  /** Upsert one registry job view into the driver's own table. */
   function upsertJobRow(job: JobViewShape): void {
-    const existing = jobsRows.get(job.id)
-    const settledNow = job.status !== 'running' && job.status !== 'stopping'
     jobsRows.set(job.id, {
       id: job.id,
       kind: job.kind,
@@ -786,44 +784,47 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
       detail: job.detail,
       startedAt: job.startedAt,
       finishedAt: job.finishedAt,
-      // Stamp the settle once and keep it: refreshJobs re-reads list() every
-      // tick, and the registry retains settled jobs, so a fresh stamp each
-      // time would reset the linger clock and pin the row forever.
-      settledAt: settledNow ? (existing?.settledAt ?? Date.now()) : undefined,
     })
   }
 
-  /** Merge the registry's owner-fenced list into the linger table: live jobs
-   *  and settled jobs inside their linger window survive; a settled job past
-   *  the window retires whether or not the registry still lists it (list()
-   *  keeps settled jobs until the owner is disposed). An open output block
-   *  pins its row so the view never vanishes mid-read. */
+  /** Merge the registry's owner-fenced list into the driver's table: live
+   *  jobs survive as-is, settled jobs stay as the session's history (capped),
+   *  and a live job the registry dropped without a settle (defensive; the
+   *  `removed` event normally handles this) goes at once. */
   function refreshJobs(): void {
     if (jobs === undefined) return
-    const now = Date.now()
     const listed = new Set<string>()
     for (const job of jobs.list(agent.session.id)) {
       listed.add(job.id)
-      // A retired job's linger has already run to completion; the registry
-      // still lists it, but re-adding it would stamp a fresh settledAt and
-      // resurrect the row — skip tombstoned ids.
-      if (jobsRetired.has(job.id)) continue
       upsertJobRow(job)
     }
     let dropped = false
     for (const [id, row] of jobsRows) {
-      const expired = row.settledAt !== undefined && now - row.settledAt > SETTLED_JOB_LINGER_MS
-      // A live job the registry dropped without a settle (defensive; the
-      // `removed` event normally handles this) goes at once.
-      const goneLive = !listed.has(id) && row.settledAt === undefined
-      if ((expired || goneLive) && jobsOpen !== id) {
-        if (expired) jobsRetired.add(id)
+      const live = row.status === 'running' || row.status === 'stopping'
+      if (!listed.has(id) && live && jobsOpen !== id) {
         jobsRows.delete(id)
         dropped = true
       }
     }
+    // The settled history caps at JOBS_HISTORY_MAX rows: the oldest settle
+    // (first in registration order) drops off, never the open detail's row.
+    const settled = [...jobsRows.entries()].filter(([, row]) => row.status !== 'running' && row.status !== 'stopping')
+    for (let index = 0; index < settled.length - JOBS_HISTORY_MAX; index++) {
+      const [id] = settled[index]!
+      if (jobsOpen !== id) {
+        jobsRows.delete(id)
+        dropped = true
+      }
+    }
+    // The footer's segment tracks live jobs only: with none left and no list
+    // open to show the history, the rung's focus goes too (the entry point
+    // vanished — a stray cursor would trap Esc).
+    if (liveJobsCount() === 0 && !jobsListOpen && jobsSelected !== undefined) {
+      jobsSelected = undefined
+      dropped = true
+    }
     // The panel tick's idle guard can return before it repaints once the last
-    // row goes, so a retirement forces its own render.
+    // row goes, so a drop forces its own render.
     if (dropped) scheduleRender(true)
   }
 
@@ -848,7 +849,41 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
     jobsOpenCursor = 0
     jobsOpenBuffer = ''
     jobsOpenLossy = false
+    jobsKillArmedId = undefined
     jobsKillArmedAt = undefined
+  }
+
+  /** Whether one row is live (running or stopping). */
+  function jobIsLive(row: JobDisplayState): boolean {
+    return row.status === 'running' || row.status === 'stopping'
+  }
+
+  /** The count of live jobs — what the footer's segment counts and what
+   *  keeps the panel tick running. */
+  function liveJobsCount(): number {
+    let count = 0
+    for (const row of jobsRows.values()) if (jobIsLive(row)) count += 1
+    return count
+  }
+
+  /** The Background list's display order: live rows first (newest
+   *  registration leads), then the settled history (newest first). The
+   *  jobsSelected cursor indexes this order. */
+  function jobsDisplayRows(): JobDisplayState[] {
+    const rows = [...jobsRows.values()]
+    const live = rows.filter(jobIsLive).reverse()
+    const earlier = rows.filter(row => !jobIsLive(row)).reverse()
+    return [...live, ...earlier]
+  }
+
+  /** Open (or switch to) one job's detail: reset the read cursor and seed
+   *  the output tail from the ring. */
+  function openJobRow(id: string): void {
+    jobsOpen = id
+    jobsOpenCursor = 0
+    jobsOpenBuffer = ''
+    jobsOpenLossy = false
+    readOpenJob()
   }
 
   /** The registry's event bus: lifecycle events move the linger table, the
@@ -873,24 +908,67 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
     scheduleRender(true)
   }
 
-  /** The jobs panel slice for the render. */
-  function jobsPanel(): JobsPanelInfo | undefined {
-    if (jobsRows.size === 0) return undefined
-    const rows: JobRow[] = [...jobsRows.values()].map(row => ({
-      id: row.id,
-      kind: row.kind,
-      label: row.label,
-      status: row.status,
-      ...row.progress === undefined ? {} : { progress: row.progress },
-      ...row.detail === undefined ? {} : { detail: row.detail },
-      elapsedMs: (row.finishedAt ?? Date.now()) - row.startedAt,
-    }))
-    return { rows }
+  /** The footer word for one job kind (the detail title's own vocabulary):
+   *  bash/pwsh are shells, everything else keeps its producer name. */
+  function jobKindWord(kind: string): string {
+    if (kind === 'bash' || kind === 'pwsh') return 'shell'
+    if (kind === 'subagent') return 'subagent'
+    if (kind === 'workflow') return 'workflow'
+    return 'job'
   }
 
-  /** The kind-driven heading and label field name for one job's detail view. */
+  /** The footer's jobs summary: per-kind counts of LIVE jobs (settled rows
+   *  live only in the Background list's history section), the segment turning
+   *  blue while the rung holds the cursor. */
+  function jobsFooter(): StatusJobsSummary | undefined {
+    const live = [...jobsRows.values()].filter(jobIsLive)
+    if (live.length === 0) return undefined
+    const counts = new Map<string, number>()
+    for (const row of live) {
+      const word = jobKindWord(row.kind)
+      counts.set(word, (counts.get(word) ?? 0) + 1)
+    }
+    const segments = [...counts.entries()].map(([word, count]) => ({ word, count }))
+    return { segments, ...(jobsSelected !== undefined ? { selected: true } : {}) }
+  }
+
+  /** The Background list slice, or undefined while it is closed. */
+  function jobsList(): JobsListView | undefined {
+    if (!jobsListOpen) return undefined
+    const rows = jobsDisplayRows()
+    const active = rows.filter(jobIsLive)
+    const earlier = rows.filter(row => !jobIsLive(row))
+    const selected = Math.min(jobsSelected ?? 1, Math.max(1, rows.length))
+    const selectedRow = rows[selected - 1]
+    // The header names the live kind when one kind runs, else counts jobs.
+    const words = new Set(active.map(row => jobKindWord(row.kind)))
+    const activeSummary = active.length === 0
+      ? '0 active jobs'
+      : words.size === 1
+        ? `${active.length} active ${[...words][0]!}${active.length === 1 ? '' : 's'}`
+        : `${active.length} active jobs`
+    return {
+      activeSummary,
+      active: active.map(jobsListRow),
+      earlier: earlier.map(jobsListRow),
+      selected,
+      killArmed: selectedRow !== undefined
+        && jobsKillArmedAt !== undefined
+        && Date.now() - jobsKillArmedAt < JOB_KILL_ARM_MS
+        && jobsKillArmedId === selectedRow.id,
+      selectedKillable: selectedRow !== undefined && jobIsLive(selectedRow),
+    }
+  }
+
+  /** One row of the Background list's contract. */
+  function jobsListRow(row: JobDisplayState): JobsListRow {
+    return { id: row.id, label: row.label, status: row.status }
+  }
+
+  /** The kind-driven heading and label field name for one job's detail view.
+   *  The shell wording matches the footer's summary segment (jobKindWord). */
   function jobDetailVocabulary(kind: string): { title: string; labelField: string } {
-    if (kind === 'bash' || kind === 'pwsh') return { title: 'Command details', labelField: 'Command' }
+    if (kind === 'bash' || kind === 'pwsh') return { title: 'Shell details', labelField: 'Command' }
     if (kind === 'subagent') return { title: 'Subagent details', labelField: 'Task' }
     if (kind === 'workflow') return { title: 'Workflow details', labelField: 'Workflow' }
     return { title: 'Job details', labelField: 'Label' }
@@ -902,7 +980,9 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
     const row = jobsRows.get(jobsOpen)
     if (row === undefined) return undefined
     const { title, labelField } = jobDetailVocabulary(row.kind)
-    const killArmed = jobsKillArmedAt !== undefined && Date.now() - jobsKillArmedAt < JOB_KILL_ARM_MS
+    const killArmed = jobsKillArmedAt !== undefined
+      && Date.now() - jobsKillArmedAt < JOB_KILL_ARM_MS
+      && jobsKillArmedId === row.id
     // Only a live job can be stopped; a settled row shows the outcome alone.
     const killable = row.status === 'running' || row.status === 'stopping'
     return {
@@ -1025,12 +1105,14 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
       // Members only (no main row): the 1-based selection clamps to the count.
       if (workflowSelected !== undefined) next.workflowSelected = Math.min(workflowSelected, workflow.memberCount)
     }
-    const jobPanel = jobsPanel()
-    if (jobPanel !== undefined) {
-      next.jobs = jobPanel
-      // Members only (no main row): the 1-based selection clamps to the count.
-      if (jobsSelected !== undefined) next.jobsSelected = Math.min(jobsSelected, jobPanel.rows.length)
+    // The jobs summary rides the status bar (the roster panel is gone): the
+    // Background list and the open detail project here per render.
+    const footer = jobsFooter()
+    if (footer !== undefined && next.status !== undefined) {
+      next.status = { ...next.status, jobs: footer }
     }
+    const list = jobsList()
+    if (list !== undefined) next.jobsList = list
     const openJobDetail = jobDetail()
     if (openJobDetail !== undefined) next.openJob = openJobDetail
     if (openChild !== undefined) {
@@ -1490,10 +1572,10 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
     // instrument renders, so there this is a cheap no-op.
     performance.clearMarks()
     performance.clearMeasures()
-    // Jobs tick for their own elapsed and linger-drop even with no child or
+    // Jobs tick for the open detail's live elapsed even with no child or
     // turn in flight; refreshJobs also merges the registry's current list.
     refreshJobs()
-    if (children.size === 0 && state.turnStartedAt === undefined && jobsRows.size === 0) return
+    if (children.size === 0 && state.turnStartedAt === undefined && liveJobsCount() === 0) return
     const now = Date.now()
     const teamMemberIds = new Set(teamBase?.members.map(member => member.id) ?? [])
     for (const [childId, entry] of children) {
@@ -1725,26 +1807,45 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
         scheduleRender(true)
       })
     },
-    onJobKill: () => {
+    onJobBack: () => {
       if (exiting || jobsOpen === undefined) return
-      const row = jobsRows.get(jobsOpen)
-      if (row === undefined || (row.status !== 'running' && row.status !== 'stopping')) return
-      // Two-step confirm: the first x arms the gesture, a second within the
-      // window kills (the web button's same re-arm cadence — the panel tick's
-      // re-render disarms a stale arm through the derived killArmed flag).
-      const armed = jobsKillArmedAt !== undefined && Date.now() - jobsKillArmedAt < JOB_KILL_ARM_MS
+      // ← steps back one layer: the detail closes onto the Background list it
+      // was opened from, the cursor staying put for another Enter. Esc and
+      // friends are the way to the input bar.
+      closeJobOutput()
+      panelNav = true
+      scheduleRender(true)
+    },
+    onJobKill: () => {
+      if (exiting) return
+      // The kill target: the open detail's job, else the Background list's
+      // selected row. Only a live row can be stopped.
+      const target = jobsOpen !== undefined
+        ? jobsRows.get(jobsOpen)
+        : jobsListOpen && jobsSelected !== undefined
+          ? jobsDisplayRows()[jobsSelected - 1]
+          : undefined
+      if (target === undefined || !jobIsLive(target)) return
+      // Two-step confirm: the first x arms the gesture on its target, a
+      // second within the window on the SAME row kills (the web button's same
+      // re-arm cadence — the projections re-derive the arm, so a stale or
+      // retargeted arm disarms through the render).
+      const armed = jobsKillArmedId === target.id
+        && jobsKillArmedAt !== undefined && Date.now() - jobsKillArmedAt < JOB_KILL_ARM_MS
       if (!armed) {
+        jobsKillArmedId = target.id
         jobsKillArmedAt = Date.now()
         scheduleRender(true)
         return
       }
+      jobsKillArmedId = undefined
       jobsKillArmedAt = undefined
       try {
-        jobs?.kill(jobsOpen, agent.session.id, 'stopped from the terminal')
+        jobs?.kill(target.id, agent.session.id, 'stopped from the terminal')
       } catch {
         // A kill racing the job's own settlement can throw (unknown job or a
-        // fence rejection); the settled event converges the detail either way.
-        setOverlay({ kind: 'notice', text: `停止失败：${jobsOpen} 已不在运行` })
+        // fence rejection); the settled event converges the view either way.
+        setOverlay({ kind: 'notice', text: `停止失败：${target.id} 已不在运行` })
       }
       scheduleRender(true)
     },
@@ -1804,6 +1905,7 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
         panelSelected = undefined
         workflowSelected = undefined
         jobsSelected = undefined
+        jobsListOpen = false
       } else if (workflow !== undefined && workflow.memberCount > 0) {
         // Members only (no main row): the cursor starts on the first member;
         // Esc from the child view is the way back to the main view.
@@ -1811,14 +1913,17 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
         panelSelected = undefined
         teamSelected = undefined
         jobsSelected = undefined
+        jobsListOpen = false
       } else if (rosterRows().length > 0) {
         if (panelSelected === undefined) panelSelected = 0
         teamSelected = undefined
         workflowSelected = undefined
         jobsSelected = undefined
-      } else if (jobsRows.size > 0) {
-        // Members only (no main row): the cursor starts on the first job; the
-        // jobs panel is the ladder's last rung — the whole-session backdrop.
+        jobsListOpen = false
+      } else if (liveJobsCount() > 0) {
+        // The jobs rung is the ladder's last — the footer's blue segment,
+        // behind every other panel's activity. It needs a live job: the
+        // segment itself counts live jobs only.
         if (jobsSelected === undefined) jobsSelected = 1
         panelSelected = undefined
         teamSelected = undefined
@@ -1871,20 +1976,24 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
         return
       }
       if (jobsSelected !== undefined) {
-        // ↑ at the first job leaves the panel back to where ↓ found it. The
-        // jobs panel never opens a child transcript, so ↑ is never blocked.
-        if (delta < 0 && jobsSelected === 1) {
+        // While the Background list is open, the arrows walk its rows
+        // (clamped at both ends — Esc is the way out).
+        if (jobsListOpen) {
+          const rows = jobsDisplayRows()
+          if (rows.length === 0) return
+          jobsSelected = Math.min(rows.length, Math.max(1, jobsSelected + delta))
+          scheduleRender(true)
+          return
+        }
+        // The footer's rung is one row: ↑ leaves the panel back to where ↓
+        // found it (never a child transcript, so it is never blocked); ↓ has
+        // no lower rung to take.
+        if (delta < 0) {
           jobsSelected = undefined
           closeJobOutput()
           panelNav = false
           scheduleRender(true)
-          return
         }
-        const count = jobsRows.size
-        if (count === 0) return
-        // Members only (no main row): the selection spans 1..count.
-        jobsSelected = Math.min(count, Math.max(1, jobsSelected + delta))
-        scheduleRender(true)
         return
       }
       if (panelSelected === undefined) return
@@ -1938,21 +2047,17 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
         return
       }
       if (jobsSelected !== undefined) {
-        // Enter opens the selected job's full-screen detail (or toggles it
-        // closed if already open). The detail owns the keys while set, so the
-        // roster cursor stays put underneath. The index maps through
-        // jobsPanel()'s row order.
-        const row = jobsPanel()?.rows[jobsSelected - 1]
-        if (row !== undefined) {
-          if (jobsOpen === row.id) {
-            closeJobOutput()
-          } else {
-            jobsOpen = row.id
-            jobsOpenCursor = 0
-            jobsOpenBuffer = ''
-            jobsOpenLossy = false
-            readOpenJob()
-          }
+        // Enter on the footer's blue segment opens the Background list;
+        // Enter inside the list opens the selected row's full-screen detail.
+        // The detail owns the keys while set, so the list's cursor stays put
+        // underneath. The index maps through the list's display order.
+        const rows = jobsDisplayRows()
+        if (!jobsListOpen) {
+          jobsListOpen = true
+          jobsSelected = Math.min(Math.max(1, jobsSelected), Math.max(1, rows.length))
+        } else {
+          const row = rows[jobsSelected - 1]
+          if (row !== undefined) openJobRow(row.id)
         }
         panelNav = true
         scheduleRender(true)
@@ -1978,12 +2083,15 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
     },
     onPanelBack: () => {
       if (exiting) return
-      // A job detail is its own surface above the roster: the first Esc closes
-      // it back to the jobs list (the cursor stays on the row), the second
-      // leaves the panel — mirroring the continuable child's two-step ladder.
-      if (jobsOpen !== undefined) {
+      // The jobs surfaces close straight to the input bar: Esc/Enter/Space/←
+      // from the detail (and Esc from the Background list) leave the whole
+      // jobs navigation at once — no intermediate stop on the footer's
+      // segment. Re-entry is a fresh ↓ from the editor.
+      if (jobsOpen !== undefined || jobsListOpen) {
         closeJobOutput()
-        panelNav = true
+        jobsListOpen = false
+        jobsSelected = undefined
+        panelNav = false
         scheduleRender(true)
         return
       }
@@ -1997,6 +2105,7 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
         teamSelected = undefined
         workflowSelected = undefined
         jobsSelected = undefined
+        jobsListOpen = false
         closeJobOutput()
       } else {
         // A read-only child (or panel navigation with no child) lands on the
@@ -2007,6 +2116,7 @@ export async function run(ctx: Context, config: Config, io: TuiIo, renderer: Tui
         teamSelected = undefined
         workflowSelected = undefined
         jobsSelected = undefined
+        jobsListOpen = false
         closeJobOutput()
       }
       scheduleRender(true)

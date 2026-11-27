@@ -20,7 +20,7 @@ describe('slash command completion menu', () => {
     return {
       onCommit: vi.fn(), onInterrupt: vi.fn(), onApproval: vi.fn(), onExit: vi.fn(),
       onPanelOpen: vi.fn(), onPanelMove: vi.fn(), onPanelEnter: vi.fn(), onPanelBack: vi.fn(),
-      onChildPrompt: vi.fn(), onJobKill: vi.fn(), onQuestionAnswer: vi.fn(),
+      onChildPrompt: vi.fn(), onJobBack: vi.fn(), onJobKill: vi.fn(), onQuestionAnswer: vi.fn(),
       onCyclePermission: vi.fn(),
       onPickerMove: vi.fn(), onPickerConfirm: vi.fn(), onPickerCancel: vi.fn(),
     }

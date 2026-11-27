@@ -33,6 +33,7 @@ export function noopHandlers(): InputHandlers {
     onPanelMove: () => {},
     onPanelEnter: () => {},
     onPanelBack: () => {},
+    onJobBack: () => {},
     onChildPrompt: () => {},
     onJobKill: () => {},
     onQuestionAnswer: () => {},

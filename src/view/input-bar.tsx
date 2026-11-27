@@ -106,9 +106,9 @@ export function InputBar({
   onFirstInput?: () => void
   /** The session's submitted lines; the arrows browse them (log-restored on resume). */
   history?: readonly string[]
-  /** Which surface owns the keys; the panel, child view, and job detail borrow
-   *  them from the editor. */
-  focusMode?: 'input' | 'panel' | 'child' | 'job'
+  /** Which surface owns the keys; the panel, child view, Background list, and
+   *  job detail borrow them from the editor. */
+  focusMode?: 'input' | 'panel' | 'child' | 'job' | 'jobList'
   /** The opened child is continuable: the child view borrows the editor to
    *  send continuation prompts (Enter steers, Esc returns). */
   childPromptable?: boolean
@@ -282,11 +282,25 @@ export function InputBar({
       if (key.return) { handlers.onPickerConfirm(); return }
       return
     }
+    if (focusMode === 'jobList') {
+      // The Background list owns the keys while it is open: ↑/↓ walk its
+      // rows, Enter views the selected job's detail, x fires the two-step
+      // stop gesture on the selected row, Esc closes back to the footer's
+      // blue segment. Everything else waits.
+      if (key.escape) { handlers.onPanelBack(); return }
+      if (key.upArrow) { handlers.onPanelMove(-1); return }
+      if (key.downArrow) { handlers.onPanelMove(1); return }
+      if (key.return) { handlers.onPanelEnter(); return }
+      if (input === 'x') { handlers.onJobKill(); return }
+      return
+    }
     if (focusMode === 'job') {
-      // The job detail owns the window: Esc or Enter closes it back to the
-      // roster (the cursor stays), x fires the two-step stop gesture, and
-      // everything else waits.
-      if (key.escape || key.return) { handlers.onPanelBack(); return }
+      // The job detail owns the window: Esc/Enter/Space close the whole jobs
+      // navigation to the input bar, ← steps back one layer onto the
+      // Background list, x fires the two-step stop gesture, and everything
+      // else waits.
+      if (key.leftArrow) { handlers.onJobBack(); return }
+      if (key.escape || key.return || input === ' ') { handlers.onPanelBack(); return }
       if (input === 'x') { handlers.onJobKill(); return }
       return
     }
@@ -519,8 +533,9 @@ export function InputBar({
   if (approvalPending) return <Box />
   // A job detail owns the region below the transcript: the input bar (and its
   // status footer) yields entirely — the detail's own keys hint carries the
-  // standing facts, so no duplicate footer line.
-  if (jobDetailOpen) return <Box />
+  // standing facts, so no duplicate footer line. The Background list takes
+  // the region the same way while it is open.
+  if (jobDetailOpen || focusMode === 'jobList') return <Box />
   // A pending ask_user_question owns the screen bottom: the bar renders
   // nothing (the QuestionPanel takes its rows in the chrome band) while still
   // routing the question's keys through the handler above.

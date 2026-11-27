@@ -1,9 +1,10 @@
 /**
  * The chrome band's navigable panels: the subagent roster, the Agent Teams
- * board, the background-jobs roster and its full-screen detail, and the
- * workflow run → phase → member tree. Each is pure presentation over its
- * driver-projected info; the ❯ cursor and ● open-marker follow the selection
- * props the driver owns.
+ * board, the background-job detail view, and the workflow run → phase →
+ * member tree. Each is pure presentation over its driver-projected info; the
+ * ❯ cursor and ● open-marker follow the selection props the driver owns.
+ * (The jobs roster itself is gone — the footer's status bar carries the
+ * summary, and Enter on it opens the detail rendered here.)
  * @module dsh-terminal/src/panels
  */
 
@@ -13,8 +14,8 @@ import { Box, Text } from 'ink'
 import stringWidth from 'string-width'
 import type {
   JobDetailView,
-  JobsPanelInfo,
-  JobStatus,
+  JobsListRow,
+  JobsListView,
   SubagentRow,
   TeamPanelInfo,
   WorkflowMemberRow,
@@ -245,88 +246,6 @@ export function TeamPanel({
   )
 }
 
-/** The status glyph of one background job — the task board's vocabulary:
- *  ◼ light blue while running, ⊘ yellow while stopping, then ✔/✘/⊘. */
-function jobStatusGlyph(status: JobStatus): React.JSX.Element {
-  switch (status) {
-    case 'running': return <Text color="#a5d8ff">◼</Text>
-    case 'stopping': return <Text color="#ffd43b">⊘</Text>
-    case 'completed': return <Text color="green">✔</Text>
-    case 'failed': return <Text color="red">✘</Text>
-    case 'killed': return <Text dimColor>⊘</Text>
-  }
-}
-
-/** The background-jobs roster: one row per live or lingering job. Enter opens
- *  a row's full-screen detail (RenderView.openJob); the roster itself stays a
- *  flat list. The last panel in the ladder — the whole-session backdrop the
- *  other panels' activities run against. */
-export function JobsPanel({
-  info,
-  selected,
-}: {
-  info: JobsPanelInfo
-  /** The ❯ cursor's 1-based row index; undefined keeps focus elsewhere. */
-  selected: number | undefined
-}): React.JSX.Element {
-  const width = useTerminalWidth()
-  const rows = info.rows
-  // Windowing follows the SubagentPanel semantics: tail-anchored while
-  // unselected (the newest jobs lead), centered on the cursor when selected.
-  const selectedRow = selected === undefined || selected <= 0 ? -1 : selected - 1
-  const start = rows.length <= PANEL_MAX_ROWS
-    ? 0
-    : selectedRow < 0
-      ? rows.length - PANEL_MAX_ROWS
-      : Math.min(Math.max(0, selectedRow - Math.floor(PANEL_MAX_ROWS / 2)), rows.length - PANEL_MAX_ROWS)
-  const visible = rows.slice(start, start + PANEL_MAX_ROWS)
-  const hiddenBefore = start
-  const hiddenAfter = rows.length - start - visible.length
-  return (
-    <Box flexDirection="column" marginBottom={1}>
-      <Text>{'  '}Jobs · {rows.length}</Text>
-      {hiddenBefore > 0 ? <Text dimColor>    … {hiddenBefore} more</Text> : null}
-      {visible.map((row, index) => {
-        const rowIndex = start + index
-        const isCursor = rowIndex + 1 === selected
-        // The cursor row stays bright; the rest dim entirely. The id budget
-        // fits the rc.3 registry format `<kind>-<16 hex>` (21 columns); the
-        // rc.2 `<kind>-N` monotonics simply render shorter.
-        const id = truncateToWidth(row.id, 22)
-        const label = truncateToWidth(row.label, Math.max(4, Math.floor(width * 0.35)))
-        // The producer's live progress while running, its terminal detail
-        // once settled — one line, clamped against the row's other columns.
-        const note = row.status === 'running' || row.status === 'stopping'
-          ? row.progress
-          : row.detail ?? row.progress
-        const elapsed = formatElapsed(row.elapsedMs)
-        const budget = Math.min(width - stringWidth(id) - stringWidth(label) - stringWidth(elapsed) - 10, Math.floor(width * PANEL_ACTIVITY_RATIO))
-        const noteText = note !== undefined && note !== '' ? truncateToWidth(note, Math.max(0, budget)) : undefined
-        return (
-          <Box key={row.id} paddingLeft={2}>
-            {/* The two-column lead nests the row under the `Jobs · N` header,
-                matching the team/workflow panels' header→row step: the cursor
-                lands at column two, the status glyph at four. */}
-            <Text>{isCursor ? <Text>❯</Text> : ' '}</Text>
-            <Text> </Text>
-            {jobStatusGlyph(row.status)}
-            <Text> </Text>
-            {isCursor ? <Text>{id}</Text> : <Text dimColor>{id}</Text>}
-            <Text> </Text>
-            {isCursor ? <Text bold>{label}</Text> : <Text dimColor>{label}</Text>}
-            {noteText !== undefined
-              ? isCursor ? <Text>  {noteText}</Text> : <Text dimColor>  {noteText}</Text>
-              : null}
-            <Box flexGrow={1} />
-            {isCursor ? <Text>{elapsed}</Text> : <Text dimColor>{elapsed}</Text>}
-          </Box>
-        )
-      })}
-      {hiddenAfter > 0 ? <Text dimColor>    … {hiddenAfter} more</Text> : null}
-    </Box>
-  )
-}
-
 /** The full-screen detail of one opened job: a kind-named heading, labelled
  *  status/runtime/command fields, and the live output tail (or a placeholder
  *  for a job with no output ring, e.g. a background subagent). */
@@ -339,18 +258,26 @@ export function JobDetail({ view }: { view: JobDetailView }): React.JSX.Element 
   // title, fields, and labels (10, plus one lossy-marker row of slack).
   const maxOutputLines = Math.max(4, rows - 17)
   const outputLines = view.output === '' ? [] : view.output.split('\n').slice(-maxOutputLines)
+  // The key-hint line lists what the detail actually takes: the one-layer
+  // back gesture and the close-to-input gesture always, the two-step stop
+  // while the job is live.
+  const hint = ['← to go back', 'Esc/Enter/Space to close', ...(view.killable ? ['x to stop'] : [])].join(' · ')
   return (
     <Box flexDirection="column">
-      <Text color="#a5d8ff">{'─'.repeat(width)}</Text>
+      {/* The detail's chrome wears the jobs green — the footer segment's and
+          the Background list's color carried into the surface they open. */}
+      <Text color="#51cf66">{'─'.repeat(width)}</Text>
       {/* The heading aligns with the labelled fields below it (two-column
           lead), not centered — the detail reads as one field block. */}
-      <Text>  {view.title}</Text>
+      <Text color="#51cf66">  {view.title}</Text>
       <Text> </Text>
-      <Text><Text dimColor>  Status:   </Text>{view.status}</Text>
-      <Text><Text dimColor>  Runtime:  </Text>{formatElapsed(view.elapsedMs)}</Text>
-      <Text><Text dimColor>  {padToWidth(`${view.labelField}:`, 9)}</Text>{view.label}</Text>
+      <Text>  Status:   <Text color="#51cf66">{view.status}</Text></Text>
+      <Text>  Runtime:  {formatElapsed(view.elapsedMs)}</Text>
+      {/* The label field pads to the Status/Runtime value column (10), so the
+          command text aligns under `running` and the elapsed figure. */}
+      <Text>  {padToWidth(`${view.labelField}:`, 10)}{view.label}</Text>
       <Text> </Text>
-      <Text dimColor>  Output:</Text>
+      <Text>  Output:</Text>
       {view.lossy ? <Text dimColor>    … earlier output dropped</Text> : null}
       {outputLines.length === 0
         ? <Text dimColor>    No output available</Text>
@@ -363,8 +290,66 @@ export function JobDetail({ view }: { view: JobDetailView }): React.JSX.Element 
       <Text dimColor>
         {'  '}{view.killArmed
           ? '再按 x 确认停止 · Esc 取消'
-          : view.killable ? 'Esc/Enter 关闭 · x 停止任务' : 'Esc/Enter 关闭'}
+          : hint}
       </Text>
+    </Box>
+  )
+}
+
+/** One Background-list row: the ❯ cursor and the label in the shared
+ *  highlight tint on the cursor row (dim elsewhere), a dim ● marker whatever
+ *  the status, and the dim status word trailing the label at a wider gap. */
+function JobsListRowView({
+  row,
+  isCursor,
+}: {
+  row: JobsListRow
+  isCursor: boolean
+}): React.JSX.Element {
+  const width = useTerminalWidth()
+  // The label clamps so a long command cannot wrap the row past one line
+  // (13 absorbs the cursor column, the dot, the gaps, and the trailing
+  // status word).
+  const label = truncateToWidth(row.label, Math.max(4, width - 13 - stringWidth(row.status)))
+  return (
+    <Box paddingLeft={2}>
+      {isCursor ? <Text color="#a5d8ff">❯</Text> : <Text> </Text>}
+      <Text> </Text>
+      <Text dimColor>●</Text>
+      <Text> </Text>
+      {isCursor ? <Text color="#a5d8ff">{label}</Text> : <Text dimColor>{label}</Text>}
+      <Text dimColor>   {row.status}</Text>
+    </Box>
+  )
+}
+
+/** The Background list opened from the footer's jobs segment: live jobs lead,
+ *  the session's settled history follows under its own header, and the ❯
+ *  cursor walks the whole display order. Enter views the selected job's
+ *  detail; x stops it (two-step); Esc closes back to the footer. */
+export function JobsList({ view }: { view: JobsListView }): React.JSX.Element {
+  const width = useTerminalWidth()
+  const hint = view.killArmed
+    ? '再按 x 确认停止 · Esc 取消'
+    : ['↑/↓ to select', 'Enter to view', ...(view.selectedKillable ? ['x to stop'] : []), 'Esc to close'].join(' · ')
+  return (
+    <Box flexDirection="column" marginBottom={1}>
+      {/* The list's own chrome wears the jobs green — the footer segment's
+          color carried into the surface it opens. */}
+      <Text color="#51cf66">{'─'.repeat(width)}</Text>
+      <Text color="#51cf66">  Background</Text>
+      <Text dimColor>  {view.activeSummary}</Text>
+      <Text> </Text>
+      {view.active.map((row, index) => (
+        <JobsListRowView key={row.id} row={row} isCursor={index + 1 === view.selected} />
+      ))}
+      <Text> </Text>
+      <Text>      Earlier in this session ({view.earlier.length})</Text>
+      {view.earlier.map((row, index) => (
+        <JobsListRowView key={row.id} row={row} isCursor={view.active.length + index + 1 === view.selected} />
+      ))}
+      <Text> </Text>
+      <Text dimColor>  {hint}</Text>
     </Box>
   )
 }

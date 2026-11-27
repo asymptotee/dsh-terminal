@@ -1,72 +1,28 @@
-/** The jobs panel roster and the full-screen job detail view. */
+/** The footer's jobs summary segment, the Background list, and the job detail view. */
 
 import { describe, expect, it } from 'vitest'
+import chalk from 'chalk'
 import { TuiApp } from '../../src/view/renderer.tsx'
-import type { JobDetailView, JobRow, JobsPanelInfo, StatusInfo, TeamPanelInfo } from '../../src/view/renderer.tsx'
-import type { Frame } from '../../src/fold/frames.ts'
-import { noopHandlers, renderApp, settled, state } from '../helpers/render.tsx'
+import type { JobDetailView, JobsListView, StatusInfo, StatusJobsSummary } from '../../src/view/renderer.tsx'
+import { noopHandlers, renderApp, renderRaw, state } from '../helpers/render.tsx'
 
-// TEMPORARY: the jobs roster is suppressed in the renderer while its
-// chrome-band layout is under investigation (see `jobsVisible` there).
-// Every case here asserts what that panel draws, so the suite is skipped
-// until it is back.
-describe.skip('jobs panel', () => {
-  const job = (over?: Partial<JobRow>): JobRow => ({
-    id: 'bash-1',
-    kind: 'bash',
-    label: 'sleep 300 && echo done',
-    status: 'running',
-    elapsedMs: 12_000,
+describe('jobs summary, list, and detail', () => {
+  const summary = (over?: Partial<StatusJobsSummary>): StatusJobsSummary => ({
+    segments: [{ word: 'shell', count: 1 }],
     ...over,
   })
 
-  it('renders the header, status glyphs, and elapsed', () => {
-    const rows = (info: JobsPanelInfo): string =>
-      (renderApp(<TuiApp state={state([])} handlers={noopHandlers()} view={{ jobs: info }} />).lastFrame() ?? '')
-        .split('\n').find(row => row.includes('bash-')) ?? ''
-    // The header carries the job count on the shared header column.
-    const { lastFrame } = renderApp(<TuiApp state={state([])} handlers={noopHandlers()} view={{ jobs: { rows: [job()] } }} />)
-    expect(lastFrame()).toContain('Jobs · 1')
-    // Each status wears its task-board glyph.
-    expect(rows({ rows: [job({ status: 'running' })] })).toContain('◼')
-    expect(rows({ rows: [job({ status: 'stopping' })] })).toContain('⊘')
-    expect(rows({ rows: [job({ status: 'completed' })] })).toContain('✔')
-    expect(rows({ rows: [job({ status: 'failed' })] })).toContain('✘')
-    expect(rows({ rows: [job({ status: 'killed' })] })).toContain('⊘')
-    // The row carries the id, label, and elapsed; running shows progress.
-    const line = rows({ rows: [job({ progress: '42%' })] })
-    expect(line).toContain('bash-1')
-    expect(line).toContain('sleep 300 && echo done')
-    expect(line).toContain('42%')
-    expect(line).toContain('12s')
-  })
-
-  it('renders the rc.3 long registry id untruncated', () => {
-    // `<kind>-<16 hex>` is 21 columns; the rc.2 `<kind>-N` monotonics stay
-    // shorter — both fit the id column whole.
-    const longId = 'bash-a1b2c3d4e5f60718'
-    const { lastFrame } = renderApp(<TuiApp
-      state={state([])}
-      handlers={noopHandlers()}
-      view={{ jobs: { rows: [job({ id: longId })] } }}
-    />)
-    expect(lastFrame()).toContain(longId)
-  })
-
-  it('shows the terminal detail on settled rows', () => {
-    const { lastFrame } = renderApp(<TuiApp
-      state={state([])}
-      handlers={noopHandlers()}
-      view={{ jobs: { rows: [job({ status: 'completed', detail: 'exit code: 0', progress: '42%' })] } }}
-    />)
-    // Settled rows swap the live progress for the terminal detail.
-    expect(lastFrame()).toContain('exit code: 0')
-    expect(lastFrame()).not.toContain('42%')
+  const status = (jobs?: StatusJobsSummary, over?: Partial<StatusInfo>): StatusInfo => ({
+    model: 'test-model',
+    cwd: '/workspace/repo',
+    mode: 'workspace-write',
+    ...jobs === undefined ? {} : { jobs },
+    ...over,
   })
 
   const detail = (over?: Partial<JobDetailView>): JobDetailView => ({
     jobId: 'bash-1',
-    title: 'Command details',
+    title: 'Shell details',
     labelField: 'Command',
     label: 'sleep 300 && echo done',
     status: 'running',
@@ -78,6 +34,188 @@ describe.skip('jobs panel', () => {
     ...over,
   })
 
+  it('appends the jobs summary to the permission row, dim at rest', () => {
+    const { lastFrame } = renderApp(<TuiApp state={state([])} handlers={noopHandlers()} view={{ status: status(summary()) }} />)
+    expect(lastFrame()).toContain('⏵⏵ workspace-write mode on (shift+tab to cycle) · 1 shell')
+    // The count pluralizes per kind; several kinds join with their own clauses.
+    const many = renderApp(<TuiApp
+      state={state([])}
+      handlers={noopHandlers()}
+      view={{ status: status({ segments: [{ word: 'shell', count: 2 }, { word: 'subagent', count: 1 }] }) }}
+    />)
+    expect(many.lastFrame()).toContain('· 2 shells · 1 subagent')
+  })
+
+  it('shows the summary on its own row without a permission mode', () => {
+    const { lastFrame } = renderApp(<TuiApp
+      state={state([])}
+      handlers={noopHandlers()}
+      view={{ status: { model: 'test-model', cwd: '/workspace/repo', jobs: summary() } }}
+    />)
+    expect(lastFrame()).toContain('1 shell')
+    // No jobs at all: nothing renders — the mode row keeps to itself.
+    const bare = renderApp(<TuiApp state={state([])} handlers={noopHandlers()} view={{ status: status() }} />)
+    expect(bare.lastFrame() ?? '').not.toContain('shell')
+  })
+
+  it('keeps the same text while the rung is selected, without extra hints', () => {
+    // The rung inverts the segment onto a green fill — the text itself and the
+    // row around it do not change, and no navigation hint trails it.
+    const { lastFrame } = renderApp(<TuiApp
+      state={state([])}
+      handlers={noopHandlers()}
+      view={{ status: status(summary({ selected: true })) }}
+    />)
+    expect(lastFrame()).toContain('⏵⏵ workspace-write mode on (shift+tab to cycle) · 1 shell')
+    expect(lastFrame()).not.toContain('Enter 打开')
+  })
+
+  it('paints the segment green, inverted onto a fill while selected', () => {
+    // #51cf66 — the row's own auto-mode green — as the text color at rest and
+    // the background fill under the cursor (the pill's badge recipe).
+    const previous = chalk.level
+    chalk.level = 3
+    try {
+      const rest = renderRaw(<TuiApp state={state([])} handlers={noopHandlers()} view={{ status: status(summary()) }} />)
+      expect(rest).toContain('[38;2;81;207;102m')
+      expect(rest).not.toContain('[48;2;81;207;102m')
+      const selected = renderRaw(<TuiApp state={state([])} handlers={noopHandlers()} view={{ status: status(summary({ selected: true })) }} />)
+      expect(selected).toContain('[48;2;81;207;102m')
+    } finally {
+      chalk.level = previous
+    }
+  })
+
+  it('hides the summary while an approval question owns the screen bottom', () => {
+    const { lastFrame } = renderApp(<TuiApp
+      state={state([])}
+      handlers={noopHandlers()}
+      view={{
+        status: status(summary()),
+        overlay: { kind: 'approval', toolName: 'bash', reason: 'run rm -rf' },
+      }}
+    />)
+    // The bar (status footer included) waits the question out.
+    expect(lastFrame() ?? '').not.toContain('1 shell')
+  })
+
+  it('renders the Background list over the input region', () => {
+    const list = (): JobsListView => ({
+      activeSummary: '2 active shells',
+      active: [
+        { id: 'bash-b', label: 'sleep 60 && echo "后台命令B（60秒）完成"', status: 'running' },
+        { id: 'bash-a', label: 'sleep 60 && echo "后台命令A（60秒）完成"', status: 'running' },
+      ],
+      earlier: [],
+      selected: 1,
+      killArmed: false,
+      selectedKillable: true,
+    })
+    const { lastFrame } = renderApp(<TuiApp state={state([])} handlers={noopHandlers()} view={{ jobsList: list() }} />)
+    const frame = lastFrame() ?? ''
+    expect(frame).toContain('Background')
+    expect(frame).toContain('2 active shells')
+    // The cursor row leads; the other row dims. The input bar yields its rows.
+    const rows = frame.split('\n')
+    const cursorRow = rows.find(row => row.includes('后台命令B')) ?? ''
+    expect(cursorRow).toContain('❯')
+    // The status word trails the label on the same row, not right-aligned.
+    expect(cursorRow).toMatch(/"后台命令B（60秒）完成"\s+running/)
+    const otherRow = rows.find(row => row.includes('后台命令A')) ?? ''
+    expect(otherRow).not.toContain('❯')
+    expect(frame).not.toContain('█')
+    // The history section shows its count, then the key hints close the panel.
+    expect(frame).toContain('Earlier in this session (0)')
+    expect(frame).toContain('↑/↓ to select · Enter to view · x to stop · Esc to close')
+  })
+
+  it('lists the history under its header and hides the stop hint on a settled cursor', () => {
+    const { lastFrame } = renderApp(<TuiApp
+      state={state([])}
+      handlers={noopHandlers()}
+      view={{
+        jobsList: {
+          activeSummary: '1 active shell',
+          active: [{ id: 'bash-c', label: 'sleep 30', status: 'running' }],
+          earlier: [
+            { id: 'bash-b', label: 'sleep 60 && echo B', status: 'completed' },
+            { id: 'bash-a', label: 'sleep 60 && echo A', status: 'killed' },
+          ],
+          selected: 3,
+          killArmed: false,
+          selectedKillable: false,
+        },
+      }}
+    />)
+    const frame = lastFrame() ?? ''
+    expect(frame).toContain('Earlier in this session (2)')
+    // The cursor sits on the last history row; a settled row cannot be stopped.
+    const rows = frame.split('\n')
+    expect(rows.find(row => row.includes('sleep 60 && echo A'))).toContain('❯')
+    expect(rows.find(row => row.includes('sleep 60 && echo B'))).not.toContain('❯')
+    expect(frame).toContain('↑/↓ to select · Enter to view · Esc to close')
+    expect(frame).not.toContain('x to stop')
+  })
+
+  it('paints the cursor row light blue with a dim marker', () => {
+    // The row's own colors: ❯ and the label wear the shared highlight tint
+    // (#a5d8ff) on the cursor row, the ● marker stays dim gray whatever the
+    // status, and no status hue leaks into the dot.
+    const previous = chalk.level
+    chalk.level = 3
+    try {
+      const raw = renderRaw(<TuiApp
+        state={state([])}
+        handlers={noopHandlers()}
+        view={{
+          jobsList: {
+            activeSummary: '2 active shells',
+            active: [
+              { id: 'bash-b', label: 'sleep 60 && echo B', status: 'running' },
+              { id: 'bash-a', label: 'sleep 60 && echo A', status: 'failed' },
+            ],
+            earlier: [],
+            selected: 1,
+            killArmed: false,
+            selectedKillable: true,
+          },
+        }}
+      />)
+      expect(raw).toContain('[38;2;165;216;255m❯')
+      expect(raw).toContain('[2m●')
+      // The failed row's dot is dim too — never the status red.
+      expect(raw).not.toContain('[38;2;255;107;107m●')
+      // The status word is dim on the cursor row as well, at the wider gap.
+      expect(raw).toContain('[2m   running')
+      // The list's own chrome (rule and heading) wears the jobs green, and
+      // the earlier header reads plain white — not dim.
+      expect(raw).toContain('[38;2;81;207;102m─')
+      expect(raw).toContain('[38;2;81;207;102m  Background')
+      const earlierLine = raw.split('\n').find(line => line.includes('Earlier in this session')) ?? ''
+      expect(earlierLine).not.toContain('[2m')
+    } finally {
+      chalk.level = previous
+    }
+  })
+
+  it('flips the Background list hint to the armed confirm gesture', () => {
+    const { lastFrame } = renderApp(<TuiApp
+      state={state([])}
+      handlers={noopHandlers()}
+      view={{
+        jobsList: {
+          activeSummary: '1 active shell',
+          active: [{ id: 'bash-c', label: 'sleep 30', status: 'running' }],
+          earlier: [],
+          selected: 1,
+          killArmed: true,
+          selectedKillable: true,
+        },
+      }}
+    />)
+    expect(lastFrame()).toContain('再按 x 确认停止 · Esc 取消')
+  })
+
   it('renders the opened job as a full-screen detail view', () => {
     const { lastFrame } = renderApp(<TuiApp
       state={state([])}
@@ -86,7 +224,7 @@ describe.skip('jobs panel', () => {
     />)
     const frame = lastFrame() ?? ''
     // The kind-driven heading and labelled fields lead; the output tail follows.
-    expect(frame).toContain('Command details')
+    expect(frame).toContain('Shell details')
     expect(frame).toContain('Status:')
     expect(frame).toContain('running')
     expect(frame).toContain('Runtime:')
@@ -101,11 +239,19 @@ describe.skip('jobs panel', () => {
     // The heading aligns with the field labels' two-column lead, the Status
     // row carries no glyph, and the output lines render bright (not dim).
     const rows = frame.split('\n')
-    expect(rows.find(row => row.includes('Command details'))?.startsWith('  Command details')).toBe(true)
+    expect(rows.find(row => row.includes('Shell details'))?.startsWith('  Shell details')).toBe(true)
     const statusRow = rows.find(row => row.includes('Status:')) ?? ''
     expect(statusRow).toContain('running')
     expect(statusRow).not.toContain('◼')
     expect(rows.find(row => row.includes('line one'))?.startsWith('    line one')).toBe(true)
+    // The three field values start on one column: the command text aligns
+    // under `running` and the elapsed figure.
+    const valueColumn = (row: string, value: string): number => row.indexOf(value)
+    const runtimeRow = rows.find(row => row.includes('Runtime:')) ?? ''
+    const commandRow = rows.find(row => row.includes('Command:')) ?? ''
+    expect(valueColumn(statusRow, 'running')).toBeGreaterThan(0)
+    expect(valueColumn(statusRow, 'running')).toBe(valueColumn(runtimeRow, '12s'))
+    expect(valueColumn(statusRow, 'running')).toBe(valueColumn(commandRow, 'sleep 300'))
   })
 
   it('shows a placeholder for a job with no output ring', () => {
@@ -114,7 +260,7 @@ describe.skip('jobs panel', () => {
     const { lastFrame } = renderApp(<TuiApp
       state={state([])}
       handlers={noopHandlers()}
-      view={{ openJob: detail({ title: 'Subagent details', labelField: 'Task', label: '调研包结构', output: '', killable: true }) }}
+      view={{ openJob: detail({ title: 'Subagent details', labelField: 'Task', label: '调研包结构', output: '' }) }}
     />)
     const frame = lastFrame() ?? ''
     expect(frame).toContain('Subagent details')
@@ -136,66 +282,39 @@ describe.skip('jobs panel', () => {
     expect(frame).toContain('… earlier output dropped')
   })
 
-  it('carries the kill hints in its own footer, hiding the status bar', () => {
-    const status: StatusInfo = { model: 'test-model', cwd: '/workspace/repo', mode: 'workspace-write' }
-    // The detail owns the region below the transcript, so the status footer
-    // hides — the hints live in the detail's own bottom line instead.
-    const idle = renderApp(<TuiApp state={state([])} handlers={noopHandlers()} view={{ openJob: detail(), status }} />)
-    expect(idle.lastFrame()).toContain('Esc/Enter 关闭 · x 停止任务')
-    expect(idle.lastFrame()).not.toContain('workspace-write')
-    const armed = renderApp(<TuiApp state={state([])} handlers={noopHandlers()} view={{ openJob: detail({ killArmed: true }), status }} />)
-    expect(armed.lastFrame()).toContain('再按 x 确认停止 · Esc 取消')
-    // A settled job cannot be stopped: no kill hint.
-    const settled = renderApp(<TuiApp state={state([])} handlers={noopHandlers()} view={{ openJob: detail({ status: 'completed', killable: false, detail: 'exit code: 0' }), status }} />)
-    expect(settled.lastFrame()).toContain('Esc/Enter 关闭')
-    expect(settled.lastFrame()).not.toContain('x 停止任务')
-  })
-
-  it('moves the ❯ cursor with the selection', () => {
-    const rows = [job({ id: 'bash-1' }), job({ id: 'bash-2' })]
-    const { lastFrame } = renderApp(<TuiApp
-      state={state([])}
-      handlers={noopHandlers()}
-      view={{ jobs: { rows }, jobsSelected: 2 }}
-    />)
-    const frame = lastFrame() ?? ''
-    const rowOf = (id: string): string => frame.split('\n').find(row => row.includes(id)) ?? ''
-    expect(rowOf('bash-2')).toContain('❯')
-    expect(rowOf('bash-1')).not.toContain('❯')
-  })
-
-  it('renders below the team panel and hides while absent or under an approval', () => {
-    const team: TeamPanelInfo = {
-      members: [{ name: 'lead', description: 'lead', phase: 'active' }],
-      tasks: [],
+  it('paints the detail chrome and status value green', () => {
+    // #51cf66 — the jobs green — on the rule, the heading, and the status
+    // word; the labelled field names stay dim.
+    const previous = chalk.level
+    chalk.level = 3
+    try {
+      const raw = renderRaw(<TuiApp state={state([])} handlers={noopHandlers()} view={{ openJob: detail() }} />)
+      expect(raw).toContain('[38;2;81;207;102m─')
+      expect(raw).toContain('[38;2;81;207;102m  Shell details')
+      // The label column is plain white; the status value carries the green.
+      expect(raw).toContain('  Status:   \x1b[38;2;81;207;102mrunning')
+    } finally {
+      chalk.level = previous
     }
-    const { lastFrame } = renderApp(<TuiApp
-      state={state([])}
-      handlers={noopHandlers()}
-      view={{ team, jobs: { rows: [job()] } }}
-    />)
-    // The jobs panel is the ladder's last rung: it trails the team panel.
-    const frame = lastFrame() ?? ''
-    expect(frame.indexOf('Teammates · 1')).toBeLessThan(frame.indexOf('Jobs · 1'))
-    // No jobs: nothing renders.
-    const bare = renderApp(<TuiApp state={state([])} handlers={noopHandlers()} />)
-    expect(bare.lastFrame() ?? '').not.toContain('Jobs ·')
-    // An approval question owns the screen bottom; the panel waits it out.
-    const approval = renderApp(<TuiApp
-      state={state([])}
-      handlers={noopHandlers()}
-      view={{ jobs: { rows: [job()] }, overlay: { kind: 'approval', toolName: 'bash', reason: 'run rm -rf' } }}
-    />)
-    expect(approval.lastFrame() ?? '').not.toContain('Jobs ·')
   })
 
-  it('puts the jobs key hints on the status bar while navigating', () => {
-    const status: StatusInfo = { model: 'test-model', cwd: '/workspace/repo', mode: 'workspace-write' }
-    const { lastFrame } = renderApp(<TuiApp
+  it('carries the back, close, and stop hints in its own footer', () => {
+    // The detail hides the status footer, so it carries its own key hints in
+    // the bottom line — the one-layer back gesture and the close-to-input
+    // gesture always, the two-step stop while the job is live. No switch
+    // hint: the Background list is the switcher, ← returns to it.
+    const live = renderApp(<TuiApp state={state([])} handlers={noopHandlers()} view={{ openJob: detail() }} />)
+    expect(live.lastFrame()).toContain('← to go back · Esc/Enter/Space to close · x to stop')
+    expect(live.lastFrame()).not.toContain('↑/↓')
+    const armed = renderApp(<TuiApp state={state([])} handlers={noopHandlers()} view={{ openJob: detail({ killArmed: true }) }} />)
+    expect(armed.lastFrame()).toContain('再按 x 确认停止 · Esc 取消')
+    // A settled job cannot be stopped: no stop hint.
+    const settled = renderApp(<TuiApp
       state={state([])}
       handlers={noopHandlers()}
-      view={{ jobs: { rows: [job()] }, jobsSelected: 1, status }}
+      view={{ openJob: detail({ status: 'completed', killable: false, detail: 'exit code: 0' }) }}
     />)
-    expect(lastFrame()).toContain('⏵⏵ workspace-write mode on (shift+tab to cycle) · (↑↓ 选择 · Enter 详情 · Esc 返回)')
+    expect(settled.lastFrame()).toContain('← to go back · Esc/Enter/Space to close')
+    expect(settled.lastFrame()).not.toContain('x to stop')
   })
 })

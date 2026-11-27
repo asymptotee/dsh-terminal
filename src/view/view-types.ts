@@ -35,6 +35,9 @@ export interface InputHandlers {
   /** Send one human prompt to the opened continuable child; it steers into
    *  the child's nearest step boundary. */
   onChildPrompt(text: string): void
+  /** The job detail's one-layer back gesture (`←`): close the detail onto
+   *  the Background list it was opened from, keeping the cursor there. */
+  onJobBack(): void
   /** The job detail's two-step stop gesture: the first `x` arms, a second
    *  within the window kills the opened job. */
   onJobKill(): void
@@ -172,6 +175,19 @@ export interface StatusInfo {
   /** The reasoning effort, shown in the standing-facts sentence right after
    *  the model name — it is a property of the route in effect. */
   effort?: string
+  /** The background jobs as the footer's summary segment (the roster panel is
+   *  gone): per-kind counts of live jobs, the segment turning blue while the
+   *  jobs rung holds the cursor. */
+  jobs?: StatusJobsSummary
+}
+
+/** The footer's jobs segment: what the status bar's second row appends. */
+export interface StatusJobsSummary {
+  /** Per-kind pluralizable counts of live jobs, in first-registration order. */
+  segments: readonly { word: string; count: number }[]
+  /** The rung holds the cursor: the segment turns blue; Enter opens the
+   *  Background list. */
+  selected?: boolean
 }
 
 /** The standing goal's durable lifecycle phase (the goal domain's vocabulary). */
@@ -315,29 +331,6 @@ export interface WorkflowPanelInfo {
 /** The background-job lifecycle state (the jobs registry's vocabulary). */
 export type JobStatus = 'running' | 'stopping' | 'completed' | 'killed' | 'failed'
 
-/** One background job as a panel row. */
-export interface JobRow {
-  /** The registry-issued id (`<kind>-<short-uuid>`; rc.2 logs replay `<kind>-N`). */
-  id: string
-  /** The producer kind (bash, subagent, workflow, …); shown as the row's dim tag. */
-  kind: string
-  /** The producer's one-line label (the command; the delegation description). */
-  label: string
-  status: JobStatus
-  /** The producer's live progress line while running; cleared at settlement. */
-  progress?: string
-  /** The terminal reason once settled (`exit code: 3`, the kill reason). */
-  detail?: string
-  /** Milliseconds since registration; frozen at settlement (finishedAt − startedAt). */
-  elapsedMs: number
-}
-
-/** The jobs panel contract: rows in registry order. The opened job renders as
- *  a full-screen detail view (RenderView.openJob), not an inline block. */
-export interface JobsPanelInfo {
-  rows: readonly JobRow[]
-}
-
 /** The full-screen detail of one opened job: kind-named heading, labelled
  *  fields, and the incrementally-read output tail. */
 export interface JobDetailView {
@@ -363,6 +356,33 @@ export interface JobDetailView {
   killArmed: boolean
   /** Only a live job can be stopped; settled rows hide the kill hint. */
   killable: boolean
+}
+
+/** One row of the Background list: the job's identity and state. */
+export interface JobsListRow {
+  /** The registry-issued id, unique per row. */
+  id: string
+  /** The producer's one-line label (the command; the delegation description). */
+  label: string
+  status: JobStatus
+}
+
+/** The Background list opened from the footer's jobs segment: live jobs lead
+ *  (newest first), the session's settled jobs follow under the earlier
+ *  header, and the ❯ cursor walks the whole display order. */
+export interface JobsListView {
+  /** The header's live count (`2 active shells`; a mixed roster counts jobs). */
+  activeSummary: string
+  /** Live (running/stopping) rows, newest first. */
+  active: readonly JobsListRow[]
+  /** Settled rows kept as the session's history, newest first. */
+  earlier: readonly JobsListRow[]
+  /** The 1-based cursor over [active, ...earlier] in display order. */
+  selected: number
+  /** The kill gesture is armed on the selected row: a second `x` stops it. */
+  killArmed: boolean
+  /** Only a live row can be stopped; a settled cursor hides the stop hint. */
+  selectedKillable: boolean
 }
 
 /** One registered slash command for the input bar's completion menu. */
@@ -436,10 +456,8 @@ export interface RenderView {
   workflow?: WorkflowPanelInfo
   /** The selected workflow row (0 = the main row); absent means the workflow panel is not focused. */
   workflowSelected?: number
-  /** Background jobs; absent hides the jobs panel. */
-  jobs?: JobsPanelInfo
-  /** The selected job row; absent means the jobs panel is not focused. */
-  jobsSelected?: number
+  /** The Background list, present while it is open below the input bar. */
+  jobsList?: JobsListView
   /** The opened job's full-screen detail; replaces the transcript window while
    *  set, exactly like openSubagent replaces it with a child transcript. */
   openJob?: JobDetailView
